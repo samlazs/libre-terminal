@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "openbb": {
+      "type": "stdio",
+      "command": "/ABSOLUTE/PATH/TO/THIS/FOLDER/.venv-v5/Scripts/openbb-mcp.exe",
+      "args": ["--transport", "stdio", "--tool-discovery"]
+    }
+  }
+}

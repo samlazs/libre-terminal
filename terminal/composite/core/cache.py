@@ -1,0 +1,204 @@
+"""In-memory and disk TTL caches, backoff, stale-note context, and curve store."""
+
+from __future__ import annotations
+
+import concurrent.futures as _cf
+import contextvars
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import threading
+import time
+import local_paths
+
+import composite as C
+
+CACHE_DIR = local_paths.CACHE_DIR
+
+# ---------------------------------------------------------------- caching
+_cache: dict = {}
+
+_locks: dict = {}
+
+_guard = threading.Lock()
+
+
+def cached(key, ttl, fn):
+    now = time.time()
+    with C._guard:
+        hit = C._cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        lock = C._locks.setdefault(key, threading.Lock())
+    with lock:                                   # one fetch per key at a time
+        with C._guard:
+            hit = C._cache.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+        val = fn()
+        with C._guard:
+            C._cache[key] = (time.time(), val)
+            if len(C._cache) > 1200:
+                for k in sorted(C._cache, key=lambda k: C._cache[k][0])[:200]:
+                    held = C._locks.get(k)
+                    if held is not None and held.locked():
+                        continue                 # someone is refreshing it: dropping its lock would allow a second fetch
+                    C._cache.pop(k, None)
+                    C._locks.pop(k, None)
+        return val
+
+
+_backoff: dict = {}
+
+
+def disk_name(prefix, ident, suffix=""):
+    """A safe, unique cache file name: readable start plus a hash of the full identifier (two long id lists that
+    share their first 100 characters must not share a file)."""
+    readable = re.sub(r"[^A-Za-z0-9]+", "_", ident)[:80]
+    digest = hashlib.sha1(ident.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}{readable}_{digest}" + (f"_{suffix}" if suffix else "")
+
+
+# ---------------------------------------------------------------- trust signal: a saved copy served because the source failed
+# (HANDOFF P2). cached_disk records which of its datasets are being served from an old copy; dispatch() collects the ones a
+# view touched during its own request (a context variable: the thread pools below copy the context into their workers)
+# and answers {"stale": "..."}, which the card footer shows.
+_STALE_SINCE: dict = {}                       # dataset name -> time of the saved copy now served after a failed fetch
+
+_STALE_NOTES = contextvars.ContextVar("stale_notes", default=None)
+
+
+class _CtxPool(_cf.ThreadPoolExecutor):
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
+class _CfShim:
+    """concurrent.futures as this module uses it, with pools that carry the request context into their threads."""
+    ThreadPoolExecutor = _CtxPool
+
+    def __getattr__(self, name):
+        return getattr(_cf, name)
+
+
+cf = _CfShim()
+
+
+def _note_stale(name):
+    t = C._STALE_SINCE.get(name)
+    notes = C._STALE_NOTES.get()
+    if t and notes is not None:
+        notes.append(t)
+
+
+def _note_stale_ts(t):
+    notes = C._STALE_NOTES.get()
+    if t and notes is not None:
+        notes.append(t)
+
+
+def stale_text(times):
+    """'Source not answering: showing the copy saved 2026-11-18 14:05 (19 h old)' for the oldest copy used."""
+    t = min(times)
+    hours = (time.time() - t) / 3600
+    age = f"{hours * 60:.0f} min" if hours < 1 else f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.0f} days"
+    return f"Source not answering: showing the copy saved {C.mtl_time(t)} ({age} old)"
+
+
+def mtl_time(t):
+    """Epoch seconds -> 'YYYY-MM-DD HH:MM' in Montreal time (every time shown is Montreal time, whatever the machine's zone)."""
+    from zoneinfo import ZoneInfo
+    return dt.datetime.fromtimestamp(t, ZoneInfo("America/Toronto")).strftime("%Y-%m-%d %H:%M")
+
+
+def cached_disk(name, ttl, fn):
+    """Memory -> disk -> fetch. If the fetch fails, serve the last saved copy however old it is.
+
+    Used for sources that change slowly and limit how often they may be called (OECD, BIS).
+    """
+    def run():
+        path = C.CACHE_DIR / f"{name}.json"
+        saved = None
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if time.time() - saved["t"] < ttl:
+                return saved["v"]
+        except (OSError, ValueError, KeyError):
+            saved = None
+        with C._guard:
+            blocked = C._backoff.get(name)
+        if blocked and time.time() < blocked[0]:
+            if saved is not None:
+                C._STALE_SINCE[name] = saved["t"]
+                return saved["v"]
+            raise C.CompositeError(blocked[1])
+        try:
+            val = fn()
+        except C.CompositeError as e:
+            with C._guard:
+                C._backoff[name] = (time.time() + 600, str(e))      # be polite to a source that is refusing us
+            if saved is not None:
+                C._STALE_SINCE[name] = saved["t"]
+                return saved["v"]
+            raise
+        with C._guard:
+            C._backoff.pop(name, None)
+        C._STALE_SINCE.pop(name, None)
+        C._write_json(path, {"t": time.time(), "v": val})
+        return val
+    val = C.cached(("disk", name), min(ttl, 1800), run)
+    C._note_stale(name)
+    return val
+
+
+def _write_json(path, obj):
+    """Write a cache file atomically: a temporary name of this process and thread, then a rename, so a reader never
+    sees half a file and two writers (a second process on the same local/) never share a temporary file. Best effort:
+    a cache that cannot be written is fetched again next time."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(obj), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def cached_complete(key, ttl, fn, short=60):
+    """cached(), except that an answer flagged "_partial" (a dict key or a .partial attribute) is kept short seconds:
+    a throttled, incomplete answer must not stand for the full ttl (INFRASTRUCTURE W4)."""
+    val = C.cached(key, ttl, fn)
+    part = val.get("_partial") if isinstance(val, dict) else False
+    if part or getattr(val, "partial", False):
+        with C._guard:
+            hit = C._cache.get(key)
+            if hit and time.time() - hit[0] > short:
+                C._cache.pop(key, None)
+        val = C.cached(key, ttl, fn)
+    return val
+
+
+def _curve_store(name, fresh):
+    """Merge freshly fetched curves into a file that keeps growing, so history builds up even where a source only
+    publishes recent data (Bank of England's daily file covers the current month). Per maturity: the fresh answer is
+    the newer vintage, so its value wins for every maturity it has (a corrected value replaces the saved one even when
+    the answer is partial: Bank of England days older than the month file come back with 5/10/20 years only); a
+    maturity it lacks keeps its saved value. Callers run under cached_disk's per-source lock: one writer per file."""
+    path = C.CACHE_DIR / f"curvestore_{name}.json"
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = {}
+    for d, pts in fresh.items():
+        merged = {float(y): v for y, v in old.get(d) or []}
+        merged.update((float(y), v) for y, v in pts)
+        old[d] = sorted(merged.items())
+    cut = (dt.date.today() - dt.timedelta(days=800)).isoformat()
+    old = {d: sorted(p) for d, p in old.items() if d >= cut and p}
+    C._write_json(path, old)
+    return old

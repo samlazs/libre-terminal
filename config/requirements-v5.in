@@ -1,0 +1,5 @@
+# Top-level packages for the V5 environment. Exact versions are pinned in requirements-v5.lock.txt.
+openbb[routers]>=5.0.0,<6
+openbb-yfinance>=2.1.0
+xlrd>=2.0
+pip

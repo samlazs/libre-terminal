@@ -1,0 +1,4 @@
+# Top-level packages for the V4 legacy environment. Exact versions are pinned in requirements-v4.lock.txt.
+openbb[all]==4.7.2
+openbb-polygon==1.5.1
+pip

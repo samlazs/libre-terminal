@@ -1,0 +1,29 @@
+# Normalise text files in the repository; check out with the line endings each tool expects.
+* text=auto
+
+# Windows launchers need CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell scripts must keep LF or they fail on macOS/Linux
+*.sh  text eol=lf
+
+# Everything Python, the UI and config read: LF everywhere
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.toml text eol=lf
+*.in   text eol=lf
+*.env  text eol=lf
+
+# Binary
+*.jpg binary
+*.jpeg binary
+*.png binary
+*.gif binary
+*.ico binary

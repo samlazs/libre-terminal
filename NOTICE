@@ -1,0 +1,43 @@
+NOTICE
+
+This project is an unofficial, independent, community-built research terminal.
+It is not affiliated with, endorsed by, or sponsored by OpenBB Inc., Bloomberg L.P.,
+Koyfin, or any data provider named in it. All product names, trademarks and
+registered trademarks are the property of their respective owners and are used
+only to identify the software and data sources this project works with.
+
+Software this project depends on (installed from PyPI by the install scripts;
+none of it is copied into this repository):
+
+  * OpenBB Platform 5 (openbb, openbb-core and the openbb-* data extensions),
+    Apache License 2.0, except openbb-yfinance, GNU AGPL-3.0.
+  * OpenBB Platform 4.7 "legacy" backend (openbb 4.7.2 and its extensions),
+    GNU AGPL-3.0.
+  * plotly (the plotly.js bundle shipped inside the Python package is served to
+    the browser unmodified), MIT License.
+  * xlrd, BSD License; uv (installer, by Astral), MIT / Apache-2.0.
+
+scripts/run_backend.py changes the behaviour of some OpenBB functions at run
+time (monkey-patching, in memory; no OpenBB file is modified or redistributed).
+Those changes are part of this project's source and are licensed under the
+GNU AGPL-3.0-or-later like the rest of it (see LICENSE).
+
+Data
+----
+Market and economic data shown by the terminal is fetched at run time from
+third-party sources (for example Yahoo Finance, U.S. SEC, Federal Reserve, ECB,
+BIS, IMF, OECD, EIA, BLS, FRED, CFTC, FINRA, CBOE, U.S. Treasury, IMF PortWatch,
+the Caldara-Iacoviello Geopolitical Risk Index, and for government yield curves
+Deutsche Bundesbank, Bank of England, Japan's Ministry of Finance, Bank of Canada,
+Sveriges Riksbank and Brazil's Tesouro Nacional). Each source has its own terms
+of use, rate limits and attribution requirements, and you are responsible for
+respecting them. This project does not own, license, redistribute or guarantee
+any of that data. Some sources are delayed, incomplete, revised or unavailable.
+
+Not investment advice. No warranty.
+-----------------------------------
+Nothing in this software or its output is investment, financial, legal or tax
+advice, or an offer or solicitation to buy or sell any security. The software is
+provided "as is", without warranty of any kind, express or implied; see sections
+15 and 16 of the GNU AGPL-3.0. Use it at your own risk and verify any figure
+with an authoritative source before relying on it.

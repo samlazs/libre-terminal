@@ -1,0 +1,7 @@
+target-version = "py312"
+include = ["terminal/**/*.py", "scripts/**/*.py"]
+exclude = ["local", ".venv-v4", ".venv-v5", "__pycache__"]
+
+[lint]
+# Bug-catching rules only (zero style churn)
+select = ["F", "E9", "E711", "E712", "E713", "E714", "E721", "E722", "W605", "B006", "B008", "B018", "B033", "SIM115"]
