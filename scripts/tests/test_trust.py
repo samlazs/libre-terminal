@@ -1,7 +1,11 @@
 """HANDOFF P2 trust signals beyond 'stale': fallback source, capped history, delayed prices (footer markers)."""
 
+import datetime as dt
+import json
 import sys
 import pathlib
+import tempfile
+import time
 
 from _common import check, done
 
@@ -70,4 +74,42 @@ check(rb.delayed_note("/api/v1/tmx/markets/movers", b"") == "Delayed prices from
 check(rb.delayed_note("/api/v1/derivatives/options/chains", b"symbol=BTC&provider=deribit") == "", "Deribit is real time")
 check(rb.delayed_note("/api/v1/equity/price/historical", b"provider=yfinance") == "", "daily history is not marked")
 check(rb.stale_header([rb.delayed_note("/api/v1/index/snapshots", b"provider=yfinance")]) == b"Delayed prices from Yahoo Finance (free feed, not real time)", "header value is ASCII")
+
+# ---- SWR cached_text vs stale_text + cached_disk failure keeps 'stale' + Data status V5-only phrasing
+t_ref = dt.datetime(2026, 11, 19, 14, 20, tzinfo=dt.timezone.utc).timestamp()
+swr_msg = c.cached_text([time.time() - 600])
+stale_msg = c.stale_text([t_ref])
+check(swr_msg.startswith("Cached ") and swr_msg.endswith("· refreshing") and "Source not answering" not in swr_msg,
+      "cached_text formats calm SWR message without 'Source not answering'")
+check(stale_msg.startswith("Source not answering: showing the copy saved 2026-11-19 "),
+      "stale_text keeps 'Source not answering' for failed fetches")
+
+_cd_saved = c.CACHE_DIR
+_tmp_cd = tempfile.TemporaryDirectory()
+try:
+    c.CACHE_DIR = pathlib.Path(_tmp_cd.name)
+    c._cache.clear()
+    c._backoff.clear()
+    c._STALE_SINCE.clear()
+    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1}]}}), encoding="utf-8")
+    saved_r = dict(c.ROUTES)
+    try:
+        def _fail_fn():
+            raise c.CompositeError("OECD rate limit reached")
+        c.ROUTES["__disk_fail"] = lambda **_: c.cached_disk("disk_fail", 60, _fail_fn)
+        out_df = c.dispatch("__disk_fail", {})
+        check("stale" in out_df and "Source not answering:" in out_df["stale"] and "cached" not in out_df,
+              "cached_disk fallback after CompositeError still emits 'stale' (not 'cached')")
+    finally:
+        c.ROUTES.clear()
+        c.ROUTES.update(saved_r)
+finally:
+    c.CACHE_DIR = _cd_saved
+    c._cache.clear()
+    c._backoff.clear()
+    c._STALE_SINCE.clear()
+    _tmp_cd.cleanup()
+
+ds_md = c.data_status()["content"]
+check("main V5 data service by default" in ds_md and "--with-v4" in ds_md, "Data status documents V5-only default")
 done("test_trust")

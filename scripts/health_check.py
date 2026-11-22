@@ -696,7 +696,7 @@ def classify(card: dict, rec: dict | None, include_manual: bool = False) -> tupl
             return "not-covered", "default symbol not covered by source"
         if st == 404 and re.fullmatch(r"\s*Not Found\s*", txt):
             return "our-bug", "route missing in backend (widgets.json advertises a route the backend does not serve)"
-        if re.search(r"Connection aborted|ConnectionResetError|timed out|TimeoutError|FiscalData request failed|Error fetching data from|HTTP Error|HTTPError|curl: \(|Expecting value: line 1|Worksheet named|no item named|404 Client Error|50[234]", txt):
+        if re.search(r"Connection aborted|ConnectionResetError|timed out|TimeoutError|FiscalData request failed|Error fetching data from|HTTP Error|HTTPError|curl: \(|Expecting value: line 1|Worksheet named|no item named|404 Client Error|50[234]|did not (?:issue|answer|respond)|not answering|not responding|HTML error page instead of JSON", txt):
             return "upstream-error", "source unreachable, slow or changed format"
         m = re.search(r"validation errors? for (\w+)\s+(\w+)\s+Field required", txt)
         if m and "QueryParams" in m.group(1):

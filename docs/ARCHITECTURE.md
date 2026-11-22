@@ -191,7 +191,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,
 request slot queuing): `test_frontend.py` runs it headless; it can also be pasted into the developer console of an
-open terminal page.
+open Libre Terminal page.
 
 `launcher.py start` applies `local/api_keys.env` when it changed since the last apply (`local/run/keys-applied.json`).
 A supervisor that gives up writes `local/run/<name>.stopped.json`; `/api/services` reports it and the page stops waiting.

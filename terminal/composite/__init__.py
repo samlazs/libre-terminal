@@ -15,9 +15,9 @@ from .core.http import (  # noqa: F401
     _SSL, _ssl_context, BROWSER_UA, _download,
 )
 from .core.cache import (  # noqa: F401
-    CACHE_DIR, _cache, _locks, _guard, cached, _backoff, disk_name, _STALE_SINCE, _STALE_NOTES, _CtxPool,
-    _CfShim, cf, _note_stale, _note_stale_ts, stale_text, mtl_time, cached_disk, _write_json,
-    cached_complete, _curve_store,
+    CACHE_DIR, _cache, _locks, _guard, cached, _backoff, disk_name, _STALE_SINCE, _STALE_NOTES, _SWR_NOTES, _CtxPool,
+    _CfShim, cf, _note_stale, _note_stale_ts, _note_swr_ts, _age_text, stale_text, cached_text, mtl_time, cached_disk,
+    _write_json, cached_complete, _curve_store,
 )
 from .core.dates import (  # noqa: F401
     minus_months, HORIZON_MONTHS, horizon_date, RANGE_YEARS, DAILY_RANGES, MONTHLY_RANGES,
@@ -98,16 +98,20 @@ def dispatch(name, params):
     fn = ROUTES.get(name)
     if fn is None:
         raise CompositeError(f"Unknown view '{name}'.")
-    notes = []
+    notes, swr_notes = [], []
     token = _STALE_NOTES.set(notes)
+    swr_token = _SWR_NOTES.set(swr_notes)
     try:
         out = fn(**params)
     finally:
+        _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)
     if isinstance(out, dict) and not out.get("sources"):
         out = dict(out, sources=static_sources(name, params))       # the cached object itself is never changed
     if isinstance(out, dict) and notes:
         out = dict(out, stale=stale_text(notes))
+    elif isinstance(out, dict) and swr_notes:
+        out = dict(out, cached=cached_text(swr_notes))
     if isinstance(out, dict) and name in DELAYED_VIEWS and "delayed" not in out and not str(params.get("symbol") or "").upper().startswith("FRED:"):
         out = dict(out, delayed=DELAYED_YAHOO)          # HANDOFF P2: live prices from a free feed say they are delayed
     return out

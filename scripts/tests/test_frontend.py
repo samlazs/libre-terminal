@@ -105,6 +105,8 @@ wjs = (STATIC / "widgets.js").read_text(encoding="utf-8")
 check('caches.delete("obb-slow-v1")' in wjs and 'caches.open("obb-slow-v1")' not in wjs
       and "slowCacheGet" not in wjs and "slowCachePut" not in wjs,
       "W8: widgets.js retires obb-slow-v1 with one-time caches.delete cleanup")
+idx_html = (STATIC / "index.html").read_text(encoding="utf-8")
+check('<link rel="icon"' in idx_html, "index.html defines inline icon so browsers do not log 404 /favicon.ico")
 # count the browser checks as checks of this file
 import _common  # noqa: E402
 _common._count[0] += n - 1

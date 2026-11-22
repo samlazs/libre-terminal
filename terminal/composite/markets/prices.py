@@ -20,6 +20,7 @@ class PriceHistory(dict):
         super().__init__(*a, **kw)
         self.divs = {}
         self.stale_ts = None
+        self.swr_ts = None
 
     def merge(self, part):
         self.update(part)
@@ -169,7 +170,7 @@ def history(symbols, start: dt.date, interval="1d"):
     def run():
         out = C.PriceHistory({s: [] for s in symbols})
         need, stale_syms, fallback = [], [], {}
-        stale_times = []
+        swr_times, fallback_times = [], []
         bg_start = start_iso
         for s in symbols:
             st, ts, rows, divs, cstart = C._sym_hist_get(s, start_iso, interval)
@@ -182,7 +183,7 @@ def history(symbols, start: dt.date, interval="1d"):
                 if divs:
                     out.divs[s] = divs
                 stale_syms.append(s)
-                stale_times.append(ts)
+                swr_times.append(ts)
                 if cstart and cstart < bg_start:
                     bg_start = cstart
             else:
@@ -210,11 +211,13 @@ def history(symbols, start: dt.date, interval="1d"):
                     out[s] = fb_rows
                     if fb_divs:
                         out.divs[s] = fb_divs
-                    stale_times.append(ts)
+                    fallback_times.append(ts)
         if not any(out.values()):            # not cached: Yahoo answering nothing is usually momentary
             raise C.CompositeError("Yahoo Finance returned no prices just now (it may be throttling or restarting). Press reload in a minute.")
-        if stale_times:
-            out.stale_ts = min(stale_times)
+        if fallback_times:
+            out.stale_ts = min(fallback_times)
+        if swr_times:
+            out.swr_ts = min(swr_times)
         # stale-while-revalidate or >50% empty: re-check bundle after PARTIAL_TTL (30 s) so background refresh lands
         out.partial = bool(stale_syms) or sum(1 for s in symbols if out.get(s)) * 2 < len(symbols)
         return out
@@ -223,6 +226,8 @@ def history(symbols, start: dt.date, interval="1d"):
     out = C.cached_complete(key, C.HIST_TTL, run, C.PARTIAL_TTL)
     if getattr(out, "stale_ts", None):
         C._note_stale_ts(out.stale_ts)
+    if getattr(out, "swr_ts", None):
+        C._note_swr_ts(out.swr_ts)
     return out
 
 

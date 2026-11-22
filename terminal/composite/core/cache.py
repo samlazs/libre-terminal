@@ -68,6 +68,7 @@ def disk_name(prefix, ident, suffix=""):
 _STALE_SINCE: dict = {}                       # dataset name -> time of the saved copy now served after a failed fetch
 
 _STALE_NOTES = contextvars.ContextVar("stale_notes", default=None)
+_SWR_NOTES = contextvars.ContextVar("swr_notes", default=None)
 
 
 class _CtxPool(_cf.ThreadPoolExecutor):
@@ -99,12 +100,27 @@ def _note_stale_ts(t):
         notes.append(t)
 
 
+def _note_swr_ts(t):
+    notes = C._SWR_NOTES.get()
+    if t and notes is not None:
+        notes.append(t)
+
+
+def _age_text(t):
+    hours = max(0.0, time.time() - t) / 3600
+    return f"{hours * 60:.0f} min" if hours < 1 else f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.0f} days"
+
+
 def stale_text(times):
     """'Source not answering: showing the copy saved 2026-11-18 14:05 (19 h old)' for the oldest copy used."""
     t = min(times)
-    hours = (time.time() - t) / 3600
-    age = f"{hours * 60:.0f} min" if hours < 1 else f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.0f} days"
-    return f"Source not answering: showing the copy saved {C.mtl_time(t)} ({age} old)"
+    return f"Source not answering: showing the copy saved {C.mtl_time(t)} ({_age_text(t)} old)"
+
+
+def cached_text(times):
+    """'Cached 2026-11-18 14:05 (10 min old) · refreshing' for normal SWR serving while background refresh runs."""
+    t = min(times)
+    return f"Cached {C.mtl_time(t)} ({_age_text(t)} old) · refreshing"
 
 
 def mtl_time(t):

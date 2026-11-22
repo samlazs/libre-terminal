@@ -79,12 +79,13 @@
     if (keyHit) {
       var prov = keyHit[1].replace(/_(api_key|token|app_token|api_token)$/, "");
       var nm = KEY_NAMES[prov] || prov.replace(/_/g, " ").toUpperCase();
-      if (PAID_ONLY[prov]) return { cls: "key", kind: "info", text: "Needs a paid " + PAID_ONLY[prov] + " subscription.", hint: "This card stays empty unless you have a " + PAID_ONLY[prov] + " key (add it with Setup-Keys.cmd or setup-keys.sh, then restart)." };
-      // no claim that other cards cover the data: often none does (review E1: News > World, Movers, Price & Peers)
-      return { cls: "key", kind: "info", text: "Needs the free " + nm + " API key.", hint: "Add " + keyHit[1] + " with Setup-Keys.cmd (or setup-keys.sh), then stop and start the terminal." };
+      var tabNote = ctx.hasFreeOnTab ? " Other cards on this tab work without one." : "";
+      if (PAID_ONLY[prov]) return { cls: "key", kind: "info", text: "Needs a paid " + PAID_ONLY[prov] + " subscription.", hint: "This card stays empty unless you have a " + PAID_ONLY[prov] + " key (add it with Setup-Keys.cmd or setup-keys.sh, then restart)." + tabNote };
+      // only mention other cards on the tab when another keyless card actually exists on it (review E1)
+      return { cls: "key", kind: "info", text: "Needs the free " + nm + " API key.", hint: "Add " + keyHit[1] + " with Setup-Keys.cmd (or setup-keys.sh), then stop and start the terminal." + tabNote };
     }
     if (/\b402\b|Payment Required|Premium Query Parameter|Restricted Endpoint|Special Endpoint|Legacy Endpoint|current subscription|upgrade your plan|not available under your (current )?(plan|subscription)/i.test(m))
-      return { cls: "paid", kind: "info", text: "Needs a paid " + src + " plan.", hint: "The free " + src + " plan does not include this data." };
+      return { cls: "paid", kind: "info", text: "Needs a paid " + src + " plan.", hint: "The free " + src + " plan does not include this data." + (ctx.hasFreeOnTab ? " Other cards on this tab work without a paid plan." : "") };
     if (/\b40[13]\b|Unauthorized|Forbidden|Invalid API key|invalid credentials|Access denied/i.test(m))
       return { cls: "denied", kind: "info", text: src + " refused the request (access denied).", hint: ctx.provider && KEY_NAMES[ctx.provider] ? "Check the " + KEY_NAMES[ctx.provider] + " API key in local/api_keys.env (Setup-Keys.cmd), then restart." : "The source blocks this kind of request at the moment. Try again later." };
     var req = /^(?:Error: )?(\w[\w ]*?) is a required field/i.exec(m);
@@ -105,13 +106,25 @@
     if (/slow to answer the first request|keeps loading in the background/i.test(m))
       return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
     if (/No (options|data|results) (found|returned|available)|Could not find CIK|CIK not found|No .* found for|covers U\.S\.|is not (supported|covered)|Symbol .* was not found|no price history/i.test(m) && !/route|Not Found$/i.test(m))
-      return { cls: "covered", kind: "info", text: "Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + ".", hint: "Try another symbol, or another source with the selector at the top of the card." };
-    if (/failed after \d+ attempts|request failed|timed? ?out|Timeout|not answering|not reachable|did not answer|Connection (aborted|reset|refused)|ConnectionReset|RemoteDisconnected|Server disconnected|\b(502|503|504)\b|Bad Gateway|Service Unavailable|Internal Server Error|HTTPError|HTTP Error \d|Client Error|Error fetching data|Expecting value|framing layer|curl:|SSL|certificate|returned no|returned nothing|could not be read|moved the source|Worksheet named|no item named|not reachable/i.test(m))
+      return { cls: "covered", kind: "info", text: "Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + ".", hint: "Try another symbol." };
+    if (/failed after \d+ attempts|request failed|timed? ?out|Timeout|No answer after \d+ seconds|not answering|not responding|not reachable|did not answer|Connection (aborted|reset|refused)|ConnectionReset|RemoteDisconnected|Server disconnected|\b(502|503|504)\b|Bad Gateway|Service Unavailable|Internal Server Error|HTTPError|HTTP Error \d|Client Error|Error fetching data|Expecting value|framing layer|curl:|SSL|certificate|returned no|returned nothing|could not be read|moved the source|Worksheet named|no item named|not reachable/i.test(m))
       return { cls: "upstream", kind: "info", text: src + " is not answering properly right now.", hint: "The problem is at the source, not in your settings. Try again later (press ↻)." };
     if (ctx.userMessage)            // the terminal's own views explain themselves; only URLs are taken out
       return { cls: "message", kind: "info", text: m.replace(/\s*\(?https?:\/\/[^\s)]+\)?/g, "").slice(0, 300), hint: null };
     var ref = T.errorRef(m);
     return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: m };
+  };
+
+  /** Footer trust signals: warning styling for failed-fetch fallbacks (`stale`, `fallback`, `truncated`), calm muted styling for background SWR (`cached`). */
+  T.renderTrust = function (foot, lj) {
+    lj = lj && typeof lj === "object" && !Array.isArray(lj) ? lj : {};
+    var trust = typeof lj.stale === "string" ? lj.stale : "";
+    if (trust) foot.appendChild(el("span", { class: "stale-note", title: trust }, "⚠ " + trust));
+    else if (typeof lj.cached === "string" && lj.cached) foot.appendChild(el("span", { class: "cache-note", title: lj.cached }, lj.cached));
+    [["fallback", "↻ "], ["truncated", "✂ "]].forEach(function (k) {
+      if (typeof lj[k[0]] === "string" && lj[k[0]]) foot.appendChild(el("span", { class: "stale-note", title: lj[k[0]] }, k[1] + lj[k[0]]));
+    });
+    if (typeof lj.delayed === "string" && lj.delayed) foot.appendChild(el("span", { class: "delay-note", title: lj.delayed }, "delayed"));
   };
 
   // At most a few requests at a time per backend: bursts make upstream sources (Yahoo especially) return nothing.
@@ -143,7 +156,7 @@
   T.requestTimeout = function (url, isFiles) {
     var u = String(url || "");
     if (isFiles
-      || /\/x\/(policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release)\b/.test(u)
+      || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release)\b/.test(u)
       || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
       || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 60000;
     if (/\/x\/(board|watchlist|perf_bars|performance|style_box|chart|snapshot|comps|news|fx_matrix|crypto_vol|cds_indices)\b/.test(u)
@@ -762,28 +775,22 @@
       var pn = T.providerName(def);
       return (pn ? pn + " returned no data" : "No data returned") + " for these settings.";
     }
-    function sibsHint() {
-      var n = ctx.siblings ? ctx.siblings(item, def).length : 0;
-      return n > 1 ? "Try another source with the selector at the top of this card (" + n + " available)." : null;
-    }
-    /** {stale}: set by a terminal view, or from a backend's X-Terminal-Stale header (getJSON). */
-    function staleNote() {
-      return lastJson && typeof lastJson === "object" && typeof lastJson.stale === "string" ? lastJson.stale : "";
+    function sibsHint(freeOnly) {
+      var alts = ctx.alternatives ? ctx.alternatives(item, def, eff()) : null;
+      var list = alts ? alts.filter(function (a) {
+        return !a.current && !a.dim && (!freeOnly || !/\((?:needs a key|paid plan)\)/i.test(a.label || ""));
+      }) : (ctx.siblings ? ctx.siblings(item, def).filter(function (s) { return !s.current; }) : []);
+      if (!list.length) return null;
+      return freeOnly
+        ? "Switch to a free source with the selector at the top of this card."
+        : "Try another source with the selector at the top of this card (" + (alts ? alts.length : list.length + 1) + " available).";
     }
     function stamp(extra) {
       foot.textContent = "";
       var chartShown = plotNode && ((def.type === "chart" && item.view !== "table") || item.view === "chart");
       var line = chartShown ? T.sourceLine(sources()) : "";
       if (line) foot.appendChild(el("span", { class: "src-line", title: line }, line));      // part of the card, never clipped; PNG exports carry it too
-      // trust signal (HANDOFF P2): a saved copy served because the source failed says so, with its age
-      var trust = staleNote();
-      if (trust) foot.appendChild(el("span", { class: "stale-note", title: trust }, "⚠ " + trust));
-      // the other trust signals in the same slot: another source than the usual one, a capped history, delayed prices
-      var lj = lastJson && typeof lastJson === "object" && !Array.isArray(lastJson) ? lastJson : {};
-      [["fallback", "↻ "], ["truncated", "✂ "]].forEach(function (k) {
-        if (typeof lj[k[0]] === "string" && lj[k[0]]) foot.appendChild(el("span", { class: "stale-note", title: lj[k[0]] }, k[1] + lj[k[0]]));
-      });
-      if (typeof lj.delayed === "string" && lj.delayed) foot.appendChild(el("span", { class: "delay-note", title: lj.delayed }, "delayed"));
+      T.renderTrust(foot, lastJson);
       if (extra) foot.appendChild(el("span", null, extra));
       foot.appendChild(el("span", { style: { marginLeft: "auto" } }, "updated " + T.mtlNow()));
     }
@@ -1077,10 +1084,15 @@
         drawTools(); foot.textContent = "";
         return message("info", item._nocover.text, item._nocover.hint);
       }
+      delete item._keyBlocked;
       if (item.needsKey) {                        // the dashboard builder knows this key is not set: say so without a doomed request
-        var kc = T.classifyError("Missing credential '" + item.needsKey + "'", 400, { source: srcName(), provider: provName() });
+        item._keyBlocked = true;
+        var kc = T.classifyError("Missing credential '" + item.needsKey + "'", 400, {
+          source: srcName(), provider: provName(), hasFreeOnTab: ctx.hasFreeOnTab ? ctx.hasFreeOnTab(item) : false
+        });
+        var ksh = sibsHint(true);
         drawTools(); foot.textContent = "";
-        return message("info", kc.text, kc.hint);
+        return message("info", kc.text, ksh ? kc.hint + " " + ksh : kc.hint);
       }
       var missing = missingParams(p);
       if (missing.length) {
@@ -1210,13 +1222,16 @@
           return message("info", "The data backend is restarting.", "This card reloads by itself as soon as it is back (usually within a minute).");
         }
         var c = T.classifyError(msg, e && e.status, {
-          userMessage: !!(e && e.userMessage), source: srcName(), provider: provName(), symbol: def.params.some(function (p) { return p.paramName === "symbol"; }) ? String(eff().symbol || "").toUpperCase().split(",")[0] : null,
+          userMessage: !!(e && e.userMessage), source: srcName(), provider: provName(),
+          hasFreeOnTab: ctx.hasFreeOnTab ? ctx.hasFreeOnTab(item) : false,
+          symbol: def.params.some(function (p) { return p.paramName === "symbol"; }) ? String(eff().symbol || "").toUpperCase().split(",")[0] : null,
           param: function (n) { var np = def.params.filter(function (x) { return x.paramName === n; })[0]; return np ? (np.label || pretty(n)) : pretty(n); }
         });
         failed = true;
+        if (c.cls === "key" || c.cls === "paid") item._keyBlocked = true;
         if (c.cls === "input" && c.param && item.compact) { item.compact = false; drawParams(); }
         if (c.cls === "bug") reportBug(c);
-        var sh = c.cls === "covered" || c.cls === "upstream" || c.cls === "paid" ? sibsHint() : null;
+        var sh = (c.cls === "covered" || c.cls === "upstream" || c.cls === "paid" || c.cls === "key") ? sibsHint(c.cls === "paid" || c.cls === "key") : null;
         message(c.kind, c.text, sh ? c.hint + " " + sh : c.hint);
       }
     }
@@ -1231,7 +1246,7 @@
       if (!alive) return;
       measure();
       if (!visible) {
-        if (node.isConnected && missingParams(eff()).length) return load(false);
+        if (node.isConnected && (item.needsKey || item.manual || missingParams(eff()).length)) return load(false);
         pending = true;
         if (force) { pendingForce = true; dropCached((/^https?:/.test(def.endpoint) ? "" : base) + def.endpoint + qs(eff())); }
         return;
@@ -1261,7 +1276,7 @@
       if (!alive) return;
       checkNarrow();
       measure();
-      if (visible && pending) { var f = pendingForce; pendingForce = false; load(f); }
+      if ((visible || item.needsKey || item.manual) && pending) { var f = pendingForce; pendingForce = false; load(f); }
     }
     var ro = new ResizeObserver(T.debounce(function () { checkNarrow(); if (plotNode && window.Plotly && plotNode.data) { try { window.Plotly.Plots.resize(plotNode); } catch (e) { /* ignore */ } } }, 120));
     ro.observe(body);

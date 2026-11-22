@@ -42,7 +42,7 @@ MAX_STATE_BYTES = 5 * 1024 * 1024
 
 # The product name shown in the browser title and the sidebar. Renaming the product is this one line
 # (static/app.js has the same name only as a fallback for the moment before /api/config answers).
-PRODUCT_NAME = "Open Terminal"
+PRODUCT_NAME = "Libre Terminal"
 
 V5_PORT = os.environ.get("TERMINAL_V5_PORT") or "6900"
 V4_PORT = os.environ.get("TERMINAL_V4_PORT") or "6901"

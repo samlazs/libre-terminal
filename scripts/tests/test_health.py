@@ -318,6 +318,17 @@ def main() -> int:
     hlp = subprocess.run([sys.executable, str(ROOT / "scripts" / "launcher.py"), "health", "--help"], capture_output=True, text=True, timeout=15)
     check(hlp.returncode == 0 and "--dry-run" in hlp.stdout and "--oecd-gap" in hlp.stdout and "--filter" in hlp.stdout, "launcher.py health --help lists expected flags")
 
+    # ------------------------------------------------------------------ 9. G2 upstream /x/* refusal & sanitized ContentTypeError classification
+    finra_card = {"backend": "x", "provider": "", "url": "http://127.0.0.1:6950/x/bond_lookup?company=AAPL"}
+    cls_finra, _ = H.classify(finra_card, {"status": 502, "etext": "FINRA TRACE did not issue the XSRF token its service requires.", "empty": False, "secs": 0.3})
+    check(cls_finra == "upstream-error", f"FINRA XSRF 502 classifies as upstream-error (got {cls_finra})")
+    cls_bug, _ = H.classify(finra_card, {"status": 502, "etext": "ZeroDivisionError: division by zero", "empty": False, "secs": 0.1})
+    check(cls_bug == "our-bug", f"genuine /x/* internal exception still classifies as our-bug (got {cls_bug})")
+    cboe_card = {"backend": "v5", "provider": "cboe", "url": "http://127.0.0.1:6900/api/v1/index/snapshots?region=us&provider=cboe"}
+    cboe_msg = "ContentTypeError -> 403, message='Source returned an HTML error page instead of JSON'"
+    cls_cboe, _ = H.classify(cboe_card, {"status": 500, "etext": cboe_msg, "empty": False, "secs": 0.2})
+    check(cls_cboe == "upstream-error" and not H.URL_RX.search(cboe_msg), "sanitized ContentTypeError classifies as upstream-error with no URL")
+
     print(f"test_health: {PASSED} checks passed")
     return 0
 

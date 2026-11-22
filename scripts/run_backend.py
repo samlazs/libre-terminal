@@ -2373,6 +2373,19 @@ def frame_error_page(raw: str, status: int) -> str:
                      f"<p>{_h.escape(detail[:600])}</p></body></html>")
 
 
+def sanitize_error_body(text: str) -> str:
+    """Strip raw aiohttp ContentTypeError upstream URLs while keeping signup links and existing redaction markers."""
+    import re
+
+    out = re.sub(
+        r"Attempt to decode JSON with unexpected mimetype:\s*text/html[^'\"\\]*",
+        "Source returned an HTML error page instead of JSON",
+        text,
+    )
+    out = re.sub(r",\s*url=(?:URL\()?['\"]https?://[^'\"\\)]*['\"]\)?", "", out)
+    return out
+
+
 def install_guard(port: str):
     """Wrap the ASGI app uvicorn loads:
       * only Host 127.0.0.1 / localhost (this port) is answered (blocks DNS rebinding);
@@ -2481,7 +2494,7 @@ def install_guard(port: str):
                     try:
                         text = raw.decode("utf-8")
                         if status >= 400:
-                            text = redact(text)
+                            text = sanitize_error_body(redact(text))
                             if to_frame and b"json" in ctype:
                                 text, html_out = frame_error_page(text, status), True
                         elif b"text/html" in ctype:

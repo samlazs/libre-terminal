@@ -1,7 +1,7 @@
 /*
  * Offline checks for the browser-side helpers (error classifier, redaction, relative dates, CSV cells, layout merge).
  * test_frontend.py runs it in headless Edge (part of `launcher.py test`); it can also be pasted into the console of an
- * open terminal page (it swaps T.S.state briefly for the view-preference checks and puts it back; nothing is saved).
+ * open Libre Terminal page (it swaps T.S.state briefly for the view-preference checks and puts it back; nothing is saved).
  * It prints "frontend checks: N passed" or throws on the first failure.
  */
 (function (T) {
@@ -578,6 +578,7 @@
   ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
     && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
     && T.requestTimeout("/x/policy_path?currency=USD", false) === 60000
+    && T.requestTimeout("/x/global_yields?countries=g10", false) === 60000
     && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 60000
     && T.requestTimeout("/api/v1/sec/filing_headers", true) === 60000
     && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
@@ -928,6 +929,70 @@
       ifrErr.dispatchEvent(new Event("error"));
       ok(!frCard.node.querySelector(".frame-wait") && /did not load/i.test((frCard.node.querySelector(".msg.err") || {}).textContent || ""), "iframe error event removes wait overlay and shows error message");
       frCard.destroy();
+
+      // ---- Phase 3A: SWR footer vs failed-fetch stale, E1 honest alternative copy, and ? Help modal accuracy
+      var footSwr = document.createElement("div");
+      T.renderTrust(footSwr, { results: [1], cached: "Cached 2026-11-21 19:50 (10 min old) · refreshing", delayed: "Delayed prices from Yahoo Finance" });
+      ok(footSwr.querySelector(".cache-note") && /Cached .* · refreshing/.test(footSwr.querySelector(".cache-note").textContent)
+        && !footSwr.querySelector(".stale-note") && footSwr.textContent.indexOf("Source not answering") < 0 && footSwr.textContent.indexOf("⚠") < 0,
+        "SWR cached note renders calmly without warning or 'Source not answering'");
+      var footStale = document.createElement("div");
+      T.renderTrust(footStale, { results: [1], stale: "Source not answering: showing the copy saved 2026-11-20 12:00 (30 h old)" });
+      ok(footStale.querySelector(".stale-note") && /⚠ Source not answering: showing the copy saved/.test(footStale.querySelector(".stale-note").textContent)
+        && !footStale.querySelector(".cache-note"),
+        "failed-fetch stale note renders warning without .cache-note");
+
+      var e1NoFree = T.classifyError("Missing credential 'eia_api_key'", 400, { source: "U.S. EIA", provider: "eia", hasFreeOnTab: false });
+      var e1WithFree = T.classifyError("Missing credential 'eia_api_key'", 400, { source: "U.S. EIA", provider: "eia", hasFreeOnTab: true });
+      var e1PaidNoFree = T.classifyError("402 Payment Required", 402, { source: "FMP", provider: "fmp", hasFreeOnTab: false });
+      var e1PaidWithFree = T.classifyError("402 Payment Required", 402, { source: "FMP", provider: "fmp", hasFreeOnTab: true });
+      ok(e1NoFree.hint.indexOf("Other cards") < 0 && e1PaidNoFree.hint.indexOf("Other cards") < 0,
+        "E1: no 'Other cards on this tab' promise when tab has no free card");
+      ok(/Other cards on this tab work without one\./.test(e1WithFree.hint) && /Other cards on this tab work without a paid plan\./.test(e1PaidWithFree.hint)
+        && e1WithFree.hint.indexOf("cover the same data") < 0 && e1PaidWithFree.hint.indexOf("cover the same data") < 0,
+        "E1: honest alternative copy only when tab has free cards, never 'cover the same data'");
+      ok(T.classifyError("No options found for SAP.DE", 400, { source: "Cboe", provider: "cboe", symbol: "SAP.DE" }).hint.indexOf("selector at the top") < 0,
+        "covered error omits source selector promise when no alternative exists");
+      ok(T.classifyError("No answer after 45 seconds. The source is slow or not responding.", 0, { source: "OECD" }).cls === "upstream",
+        "client request timeout classifies as upstream, never 'our bug'");
+
+      // needsKey card honors hasFreeOnTab + free-only alternatives even before scrolling into view
+      var nkIt = { uid: "nk-1", widgetId: "eia_test", backend: "v5", params: {}, groups: [], needsKey: "eia_api_key" };
+      var nkDef = { widgetId: "eia_test", name: "EIA Test", type: "table", endpoint: "/__eia", params: [], source: ["U.S. EIA"] };
+      var hasFree = false;
+      var nkCard = T.widget({
+        item: nkIt, def: nkDef, backend: { id: "v5", name: "Test", url: "" }, scroller: stage4,
+        groupOf: function () { return null; }, groupsOf: function () { return []; },
+        setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; },
+        alternatives: function () { return [{ label: "U.S. EIA", value: "v5:eia_test", current: true }, { label: "Cboe (needs a key)", value: "v5:x", current: false }]; },
+        hasFreeOnTab: function () { return hasFree; },
+        onChange: function () {}, onRemove: function () {}, relayout: function () {}
+      });
+      stage4.appendChild(nkCard.node);
+      nkCard.check();
+      ok(!nkCard.node.querySelector(".spin") && /Needs the free EIA API key/.test(nkCard.node.textContent || ""),
+        "needsKey card renders immediately on check() without waiting on spinner when off-screen");
+      var nkHint1 = (nkCard.node.querySelector(".msg .hint") || {}).textContent || "";
+      ok(nkHint1.indexOf("Other cards") < 0 && nkHint1.indexOf("Switch to a free source") < 0,
+        "needsKey card omits tab & source promises when no free card or free alternative exists");
+      hasFree = true;
+      nkCard.refresh(true);
+      var nkHint2 = (nkCard.node.querySelector(".msg .hint") || {}).textContent || "";
+      ok(/Other cards on this tab work without one\./.test(nkHint2),
+        "needsKey card mentions other cards on tab when a free card exists");
+      nkCard.destroy();
+
+      // Help (?) modal reflects current features & V5-only default
+      var helpBtn = document.getElementById("btn-help");
+      ok(!!helpBtn, "help button present");
+      helpBtn.click();
+      var helpText = (document.querySelector(".help-box") || {}).textContent || "";
+      ok(/CUSIP/.test(helpText) && /FRED:/.test(helpText) && /Bond Lookup/.test(helpText) && /CDS/.test(helpText)
+        && /Policy/.test(helpText) && /situation room/.test(helpText) && /Money & Banking/.test(helpText)
+        && /S&P 500/.test(helpText) && /↻ Refresh/.test(helpText) && /V5/.test(helpText) && /60 rows/.test(helpText),
+        "? Help modal documents Search/CUSIP/FRED:, Bond Lookup, CDS, Policy, situation room, Money & Banking, S&P 500, V5, Refresh, and Flip limit");
+      var closeHelp = document.querySelector(".help-box .icon-btn");
+      if (closeHelp) closeHelp.click();
     } finally {
       stage4.remove();
     }

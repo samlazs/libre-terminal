@@ -576,4 +576,13 @@ with tempfile.TemporaryDirectory() as td_w8:
         Fetcher.fetch_data = orig_fetch_data
         rb.BACKEND_CACHE = orig_backend_cache
 
+# ---- G2 error body URL sanitization (keeps friendly signup URLs, strips aiohttp ContentTypeError client URLs)
+cboe_err = '{"detail":"ContentTypeError -> 403, message=\'Attempt to decode JSON with unexpected mimetype: text/html; charset=utf-8\', url=\'https://cdn-api.cboe.com/api/global/delayed_quotes/quotes/all_us_indices.json\'"}'
+san_cboe = rb.sanitize_error_body(cboe_err)
+check("https://" not in san_cboe and "403" in san_cboe and "HTML error page instead of JSON" in san_cboe, "sanitize_error_body strips Cboe ContentTypeError URL")
+fred_err = '{"detail":"502, message=\'Attempt to decode JSON with unexpected mimetype: text/html\', url=\'https://api.stlouisfed.org/fred/series?series_id=RIFSPPAAAD30NB&api_key=REDACTED&file_type=json\'"}'
+san_fred = rb.sanitize_error_body(fred_err)
+check("https://" not in san_fred and "502" in san_fred and "HTML error page instead of JSON" in san_fred, "sanitize_error_body strips FRED ContentTypeError URL")
+check(rb.sanitize_error_body(rb.FRED_KEY_MESSAGE) == rb.FRED_KEY_MESSAGE, "sanitize_error_body preserves friendly FRED signup URL")
+
 done("test_backend_wrapper")

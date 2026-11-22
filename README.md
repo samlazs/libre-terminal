@@ -1,4 +1,4 @@
-# Open Terminal
+# Libre Terminal
 
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
 Equities, rates and credit, FX, commodities and energy, crypto, macro and government data are organised
@@ -11,13 +11,14 @@ free keys from FRED, BLS, EIA, Congress.gov and FMP add more.
 > delayed, incomplete or wrong, and nothing here is investment advice. See
 > [License and disclaimer](#license-and-disclaimer).
 
-![Markets Summary](docs/markets-summary.jpg)
+![Libre Terminal — Markets Summary](docs/markets-summary.jpg)
 
 | | |
 |---|---|
 | ![Company overview](docs/company-overview.jpg) | ![Comparable companies](docs/company-comps.jpg) |
 | ![Rates by country](docs/rates-by-country.jpg) | ![Energy overview](docs/energy-overview.jpg) |
-| ![Options routed to the exchange that lists the ticker](docs/options-source.jpg) | |
+
+![News situation room](docs/news-situation-room.jpg)
 
 ## Quick start
 
@@ -33,7 +34,7 @@ free keys from FRED, BLS, EIA, Congress.gov and FMP add more.
 **macOS / Linux (experimental, untested — official support is Windows 10/11 only)**
 
 ```sh
-git clone <this repository> terminal && cd terminal
+git clone https://github.com/samlazs/libre-terminal.git && cd libre-terminal
 sh install.sh
 sh start.sh          # opens http://127.0.0.1:6950 ; stop with: sh stop.sh
 ```
@@ -73,8 +74,10 @@ computer except the data requests themselves.
   kept per company.
 - **Source on every card**: the header says where the data comes from ("Source: SEC ▾"). The menu
   switches to another source of the same data and links to the original. Ticker-driven cards pick a
-  source that covers the ticker on their own: options for AAPL come from Cboe, for SU.TO from the Montreal
-  Exchange, for BTC from Deribit; ETF holdings for SPY from Nasdaq, for XIU.TO from TMX.
+  source that covers the ticker on their own: U.S. option chains for AAPL come from Yahoo Finance or
+  Nasdaq (with Cboe analytics when its delayed-quotes CDN is available), Canadian options for SU.TO from
+  the Montreal Exchange (TMX), and crypto options for BTC from Deribit; ETF holdings for SPY come from
+  Nasdaq and for XIU.TO from TMX.
 - **Chart strip**: range (1M to Max), transform (level, year-over-year, indexed, seasonal against the
   5-year range) and period, remembered per card.
 - **Columns**: tables open with a short, readable set of columns in consistent units; **⋯ > Columns**
@@ -113,7 +116,7 @@ cards, and Data Explorers > Data status lists which keys are missing.
 
 | Key | What it adds | Sign up |
 |---|---|---|
-| FRED | macro series, credit spreads, commodity spot prices, the U.S. Economy dashboard | https://fredaccount.stlouisfed.org/apikeys |
+| FRED | macro series, credit spreads, commodity spot prices, the U.S. Economy dashboard (many overview, rates and macro charts work keyless via FRED's public CSV endpoint) | https://fredaccount.stlouisfed.org/apikeys |
 | EIA | the Energy dashboard's U.S. data and data library | https://www.eia.gov/opendata/register.php |
 | BLS | inflation, jobs and productivity tables | https://data.bls.gov/registrationEngine/ |
 | Congress.gov | bills, votes, members, committee reports | https://api.congress.gov/sign-up/ |
@@ -138,11 +141,13 @@ then stop and start the terminal. Keys stay on your computer.
 - **Country curves**: daily for the eight countries above; elsewhere monthly 3-month and 10-year rates
   only, so euro sovereign spreads (BTP-Bund, OAT-Bund) are monthly.
 - **Sources break upstream.** About 30 functions fail at the source right now (moved pages, retired
-  endpoints); Data Explorers > Data status lists them with the reason. OECD limits how often it can be
-  queried: its cards then say "rate limit reached" and recover later. Government sites sometimes fail a
-  single request: reload the card.
+  endpoints); Data Explorers > Data status lists them with the reason. Cboe's delayed-quotes CDN can block
+  options analytics requests upstream with HTTP 403 (U.S. option chains remain available via Yahoo Finance
+  and Nasdaq). OECD limits how often it can be queried: its cards then say "rate limit reached" and recover
+  later. Government sites sometimes fail a single request: reload the card.
 - **Outside the U.S.** prices, statements, estimates, holders and comps cover listings worldwide; SEC
-  filings, FINRA short interest and Cboe options are U.S.-only, and those cards say so.
+  filings, FINRA short interest and U.S. option chains/analytics (Yahoo, Nasdaq, Cboe) are U.S.-only, and
+  those cards say so.
 - **Actuals, no consensus**: released macro figures and IMF forecasts; no survey consensus, no PMIs.
 - **Free tiers** have daily caps (FMP 250 calls a day); scraped sources can change without notice.
 - **Platforms**: **Windows 10/11 only** is officially supported and tested; the `.sh` scripts for macOS/Linux share the same launcher but are experimental and untested.

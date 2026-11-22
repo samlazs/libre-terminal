@@ -338,6 +338,25 @@ finally:
     else:
         os.environ["TERMINAL_WITH_V4"] = saved_env_v4
 
+# Phase 3B: Libre Terminal branding, /api/config product name, verbatim AGPL-3.0 LICENSE, and NOTICE
+check(server.PRODUCT_NAME == "Libre Terminal", "PRODUCT_NAME is Libre Terminal")
+st_cfg, body_cfg = req("GET", "/api/config")
+cfg_json = json.loads(body_cfg)
+check(st_cfg == 200 and cfg_json.get("product") == "Libre Terminal", "/api/config reports Libre Terminal")
+
+lic_raw = (ROOT / "LICENSE").read_bytes()
+lic_txt = lic_raw.decode("utf-8")
+check(not lic_raw.startswith(b"\xef\xbb\xbf") and b"\r" not in lic_raw, "LICENSE is UTF-8 without BOM and pure LF")
+check("Libre Terminal" in lic_txt and "GNU AFFERO GENERAL PUBLIC LICENSE" in lic_txt
+      and "Version 3, 19 November 2007" in lic_txt and "END OF TERMS AND CONDITIONS" in lic_txt,
+      "LICENSE holds Libre Terminal notice and verbatim GNU AGPL v3.0 text")
+check("RELEASE " + "BLOCKER" not in lic_txt and "Open " + "Terminal" not in lic_txt, "LICENSE has no placeholder or old name")
+
+not_raw = (ROOT / "NOTICE").read_bytes()
+not_txt = not_raw.decode("utf-8")
+check(not not_raw.startswith(b"\xef\xbb\xbf") and b"\r" not in not_raw, "NOTICE is UTF-8 without BOM and pure LF")
+check("Libre Terminal" in not_txt and "Open " + "Terminal" not in not_txt, "NOTICE uses Libre Terminal and has no old name")
+
 httpd.shutdown()
 
 done("test_launcher_server")

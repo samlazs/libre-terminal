@@ -30,7 +30,8 @@ def _patch_status_md() -> list:
                 rows.append(f"| {BACKEND_NAMES[name]} | {cell(p.get('patch', ''), 120)} | **not applied**: {cell(p.get('why', ''), 160)} |")
     if not rows:
         return []
-    return ["", "#### Backend fixes", "Fixes the terminal applies to the data backends in memory when they start (no installed file is changed). "
+    svc = "the data services" if with_v4 else "the data service"
+    return ["", "#### Backend fixes", f"Fixes the terminal applies to {svc} in memory when starting (no installed file is changed). "
             "One that is not applied usually means the backend package changed; the affected sources keep working, without that fix.", "",
             "| Backend | Fix | Status |", "|---|---|---|"] + rows
 
@@ -59,6 +60,7 @@ def data_status(**_):
         md += ["| Function | Normally in | Reason |", "|---|---|---|"]
         md += [f"| {b['name']} | {b['home']} | {b['reason']} |" for b in broken]
     md += C._patch_status_md()
-    md += ["", "#### Known limits", "No real-time feeds (Yahoo Finance prices are delayed), no single-name CDS, U.S. Treasury security prices are blocked at the source, "
+    md += ["", "#### Known limits", "Runs on the main V5 data service by default (legacy V4 is opt-in with `--with-v4`). "
+           "No real-time feeds (Yahoo Finance prices are delayed), no single-name CDS, U.S. Treasury security prices are blocked at the source, "
            "euro-area member curves are monthly (3-month and 10-year only). OECD data is cached for 12 hours because OECD limits how often it can be queried."]
     return {"content": "\n".join(md)}

@@ -55,8 +55,8 @@ ANALYST_ACTIONS = dict(sort="published_date:desc", cols=["published_date", "anal
                                                         "price_target_previous", "price_target_action"])
 
 
-def X(name, w=None, h=None, title=None, groups=None, **params):
-    return W("x:" + name, w, h, params=params, title=title, groups=groups)
+def X(name, w=None, h=None, title=None, groups=None, cols=None, **params):
+    return W("x:" + name, w, h, params=params, title=title, groups=groups, cols=cols)
 
 
 def NEWS(w=None, h=None, title=None, groups=None, compact=None, **params):
@@ -113,7 +113,9 @@ DASHBOARDS = [
             # review G2: the chart was ~610 px and Global Yields 42 rows while Market News showed two headlines
             (16, [NEWS(h=14, subject="market", title="Top market news", groups=[], compact=True),
                   PERF("^GSPC,^NDX,^DJI,^RUT", h=17, title="Normalized Performance: U.S. indices"),
-                  W("yfinance/tv_widget/view", h=15, title="Chart"), X("global_yields", h=16, countries="g10", title="Global Yields (G10)"), X("style_box", h=9)]),
+                  W("yfinance/tv_widget/view", h=15, title="Chart"),
+                  X("global_yields", h=16, countries="g10", title="Global Yields (G10)", cols=["country", "m3", "y2", "y10", "slope_2s10s", "policy"]),
+                  X("style_box", h=9)]),
             (12, [OVB("fx", 15), OVB("global_markets", 30), OVB("commodities", 25), OVB("crypto", 20)]),
         ]),
         T("Chart", rows=[[W("yfinance/tv_widget/view", 28, 26), WATCH(12, 26)],
@@ -397,11 +399,14 @@ DASHBOARDS = [
 
     D("energy", "Energy", "commodities", "Oil, gas, power and uranium: prices, inventories against their seasonal range, refining margins, global supply, shipping chokepoints, geopolitical risk and outlooks.", [
         T("Overview", columns=[
-            (14, [X("board", h=30, preset="energy"), M("oil_volatility", h=16, since="2021")]),
-            (13, [M("oil_prices", h=15, since="2020"), M("crude_stocks_seasonal", h=15), M("crack_spreads", h=16, since="2022")]),
-            (13, [M("gas_europe_us", h=15, since="2021"), M("natgas_storage_seasonal", h=15), M("chokepoint_tankers", h=16, since="2023")]),
-        ], rows=[[CURVE("CL", "Crude oil futures curve (WTI)", 20, 16),
-                  NEWS(20, 16, subject="crude", title="Oil news", groups=[])]]),        # the gas curve stays on Natural Gas & LNG
+            (14, [X("board", h=30, preset="energy")]),
+            (13, [M("oil_prices", h=15, since="2020"), M("crack_spreads", h=15, since="2022")]),
+            (13, [M("gas_europe_us", h=15, since="2021"), M("chokepoint_tankers", h=15, since="2023")]),
+        ], rows=[
+            [M("crude_stocks_seasonal", 20, 16), M("natgas_storage_seasonal", 20, 16)],
+            [M("oil_volatility", 14, 16, since="2021"), CURVE("CL", "Crude oil futures curve (WTI)", 13, 16),
+             NEWS(13, 16, subject="crude", title="Oil news", groups=[])],
+        ]),        # the gas curve stays on Natural Gas & LNG
         T("Oil", rows=[[M("oil_prices", 20, 16, since="2015"), M("brent_wti", 20, 16, since="2020")],
                        [M("crack_spreads", 14, 16, since="2021"), M("pump_prices", 13, 16, since="2020"), M("refinery_utilization", 13, 16)],
                        [M("crude_stocks", 14, 16, since="2015"), M("cushing_seasonal", 13, 16), M("us_oil_flows", 13, 16, since="2018")],

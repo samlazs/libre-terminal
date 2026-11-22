@@ -5,7 +5,7 @@
   var HOME = "d:markets";
   var STATUS = ["d:explorers", "data-status"];          // where "what is down / which keys are missing" lives
   // The product name is set in one place, PRODUCT_NAME in terminal/server.py, and arrives with /api/config.
-  T.product = "Terminal";
+  T.product = "Libre Terminal";
   function paintProduct() { document.title = T.product; $("brand-name").textContent = T.product; }
 
   var S = {
@@ -1659,6 +1659,7 @@
       item: item, def: def, backend: b, scroller: $("canvas-wrap"),
       groupOf: groupOf, groupsOf: groupsOf, setGroup: setGroup, broadcast: broadcast, siblings: siblings, swapChoice: swapChoice, backendDown: backendDown, setPref: setPref,
       alternatives: alternatives, pickSource: pickSource, overrides: overrides, setView: setView, colsel: colsel, setCols: setCols, member: function (it) { var m = memberOf(it); return m ? m.member : null; },
+      hasFreeOnTab: function (it) { var tab = curTab(); return !!(tab && (tab.items || []).some(function (o) { return o !== it && !o.needsKey && !o._nocover && !o._keyBlocked; })); },
       conceptTitle: function (it) { var m = memberOf(it); return m ? S.concepts[m.id].title || null : null; },
       onChange: touch, onRemove: remove,
       relayout: function () { S.grid.layout(false); }
@@ -2077,22 +2078,24 @@
       })));
     }
     var box = el("div", { class: "modal help-box" }, [
-      el("div", { class: "help-head" }, [el("b", null, (T.product || "Terminal") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
+      el("div", { class: "help-head" }, [el("b", null, (T.product || "Libre Terminal") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
       el("div", { class: "help-body" }, [
         sec("Keyboard", [["Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
           ["[  ]", "Previous / next tab"], ["Esc", "Close a maximized card, menu or dialog"], ["?", "This guide"]]),
-        sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or a name (toyota) in the top box to open the Company dashboard; type a topic (cpi, sofr, options) to jump to the card that has it."],
-          ["Pickers", "Symbol, Country and Bank boxes at the top drive every linked card on the dashboard. Clicking a name, ticker or country in a table sets them too."]]),
-        sec("Work with cards", [["Source: X ▾", "The card header names the source. Click it to switch to another source of the same data, or to open the source's page."],
-          ["Dataset", "Library cards (EIA, BLS, USDA, regional Feds, FFIEC) hold a family of datasets: pick one in the Dataset box. The pick is remembered."],
-          ["Columns", "Lists open with the columns that matter. ⋯ › Columns shows or hides the rest; Default columns goes back."],
-          ["⤓ Export", "Copy a table for Excel, download CSV, or save a chart as PNG. Exports carry the source and date."],
-          ["⋯ menu", "Plot a table, flip rows and columns, show settings, or remove the card. Drag the header to move a card, the corner to resize it."]]),
-        sec("Lists and comparisons", [["Watchlist", "Markets Summary › Overview. Edit on the card to create lists and add or remove symbols; click a name to chart it."],
-          ["Compare chart", "Markets Summary › Chart and Company › Price & Peers: overlay symbols or FRED series as % change, ratio or spread, with moving averages."],
-          ["Comps", "Company › Overview: valuation, growth and margins against peers with the peer median. Peers on the card changes the group."]]),
-        sec("API keys", [["Free keys", "FRED, BLS, EIA and Congress.gov keys are free and unlock more cards. Run Setup-Keys.cmd (or setup-keys.sh), or edit local/api_keys.env, then restart."],
-          ["What is missing", "Data Explorers › Data status lists the keys that are set, how many cards each unlocks, sign-up links, and any source that is down upstream."]])
+        sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; a topic (cpi, sofr, options) for that card; a 9-char CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
+          ["Pickers", "Symbol, Country and Bank boxes at the top drive linked cards. Clicking a ticker, country, CUSIP, CRD, RSSD or bill id in a table fills them too."]]),
+        sec("Work with cards", [["Source: X ▾", "Click the header source to switch providers for the same data or open the source's page."],
+          ["↻ Refresh", "Card ↻ bypasses server and browser cache for that card; top-bar ↻ reloads all cards on the current tab."],
+          ["Dataset", "Library cards (EIA, BLS, USDA, regional Feds, FFIEC) hold a family of datasets and remember your pick."],
+          ["Columns", "Lists open with key columns. ⋯ › Columns shows or hides the rest; Default columns resets."],
+          ["⤓ Export", "Copy a table for Excel, download CSV, or save a chart as PNG (exports include source and date)."],
+          ["⋯ menu", "Plot a table, flip rows and columns (compact tables up to 60 rows), show settings, or remove the card. Drag header to move, corner to resize."]]),
+        sec("Desks & comparisons", [["Watchlist & Comps", "Markets Summary › Overview watchlists (click a name to chart); Company › Overview peer comps with peer median."],
+          ["Compare chart", "Markets Summary › Chart and Company › Price & Peers: overlay tickers or FRED: series as % change, ratio or spread, with moving averages."],
+          ["Credit & Rates", "Credit › Bond Lookup (TRACE by issuer, ticker or CUSIP), Credit › Spreads (CFTC index CDS & OAS), Rates & Curves › Policy & Inflation (OIS-implied policy paths)."],
+          ["News & Banking", "News › Markets situation room (newest-first monitor & official releases); Money & Banking (credit quality, FDIC failures, FFIEC Bank Lookup); Indices › Valuation (S&P 500 multiples)."]]),
+        sec("API keys & services", [["Keyless & free keys", "Runs keyless by default on the main V5 data service. Optional free FRED, BLS, EIA and Congress.gov keys unlock extra cards (Setup-Keys.cmd or local/api_keys.env, then restart)."],
+          ["Data status", "Data Explorers › Data status lists configured keys, card counts, sign-up links, runtime fixes, and any source down upstream."]])
       ])
     ]);
     var m = T.modal(box);

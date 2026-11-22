@@ -528,16 +528,38 @@ def build(report=False):
                         placed_here.add(spec["ep"])
                     x += width
                     y = max(y, cy)
+            built_rows = []
             for row in tab["rows"]:
+                r = build_specs(row)
+                for spec, _ in r:
+                    placed_here.add(spec["ep"])
+                built_rows.append(r)
+            auto_built = [(spec, it) for it in auto_items(tab["auto"], tab, tid, y, n) for spec in [{"ep": it.pop("_ep")}]]
+            free_rows = [r for r in built_rows if r and not any(it.get("_keyed") for _, it in r)]
+            mixed_rows = [r for r in built_rows if r and any(it.get("_keyed") for _, it in r) and not all(it.get("_keyed") for _, it in r)]
+            keyed_rows = [r for r in built_rows if r and all(it.get("_keyed") for _, it in r)]
+            auto_free = [(s, it) for s, it in auto_built if not it.get("_keyed")]
+            auto_keyed = [(s, it) for s, it in auto_built if it.get("_keyed")]
+            for row in free_rows + mixed_rows:
                 x, row_h = 0, 0
-                for spec, it in build_specs(row):
+                for spec, it in row:
                     it.update({"x": x, "y": y, "_ep": spec["ep"]})
                     x += it["w"]
                     row_h = max(row_h, it["h"])
                     items.append(it)
-                    placed_here.add(spec["ep"])
                 y += row_h
-            items += auto_items(tab["auto"], tab, tid, y, n)
+            for group in (auto_free, *(r for r in keyed_rows), auto_keyed):
+                if not group:
+                    continue
+                x, row_h = 0, 0
+                for spec, it in group:
+                    if x + it["w"] > 40:
+                        x, y, row_h = 0, y + row_h, 0
+                    it.update({"x": x, "y": y, "_ep": spec["ep"]})
+                    x += it["w"]
+                    row_h = max(row_h, it["h"])
+                    items.append(it)
+                y += row_h
             # keep tabs readable: split very long ones
             limit = 16
             if len(items) > limit and not tab["rows"] and not tab["columns"]:

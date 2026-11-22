@@ -135,22 +135,45 @@ else:
           and not any(i["widgetId"] == "index_sp500_multiples_multpl_obb" for i in val_both["items"])
           and "index.sp500_multiples" in out["concepts"],
           "Indices > Valuation keeps x_sp500_multiples primary in V5+V4 build with legacy multpl in source picker")
-    # keyless computer: cards that need a key sit behind the keyless ones in fixed columns and rows (Energy > Overview)
+    # keyless computer (V5-only default): cards that need a key sit behind the keyless ones across landing tabs and rows
     real_creds = bd.credentials
     bd.credentials = lambda: set()
     try:
         keyless = replay(defs)
+        keyless_nov4 = replay(dict(defs, v4={}))
     finally:
         bd.credentials = real_creds
     check(bd.macro_key_provider("crude_stocks_seasonal") == "eia" and bd.macro_key_provider("crack_spreads") is None, "EIA-only curated charts need the EIA key")
-    en = next(t for d in keyless["dashboards"] if d["id"] == "d:energy" for t in d["tabs"] if t["id"] == "overview")
-    for col_x in sorted({i["x"] for i in en["items"] if i["y"] < 60}):
-        col = sorted([i for i in en["items"] if i["x"] == col_x and i["w"] < 20], key=lambda i: i["y"])
-        flags = [bool(i.get("needsKey")) for i in col]
-        check(flags == sorted(flags), f"Energy > Overview column at x={col_x}: keyed cards after the keyless ones")
-    en_ids = sorted(i["uid"] for i in en["items"])
+    for label, build_out in (("V5+V4", keyless), ("V5-only", keyless_nov4)):
+        en = next(t for d in build_out["dashboards"] if d["id"] == "d:energy" for t in d["tabs"] if t["id"] == "overview")
+        en_free = [i for i in en["items"] if not i.get("needsKey")]
+        en_keyed = [i for i in en["items"] if i.get("needsKey")]
+        check(en_free and en_keyed and max(i["y"] + i["h"] for i in en_free) <= min(i["y"] for i in en_keyed),
+              f"Energy > Overview ({label}): all keyless cards sit strictly above EIA key-gated cards")
+        for d in build_out["dashboards"]:
+            t0 = d["tabs"][0]
+            t0_free = [i for i in t0["items"] if not i.get("needsKey")]
+            t0_keyed = [i for i in t0["items"] if i.get("needsKey")]
+            if t0_free and t0_keyed:
+                check(max(i["y"] for i in t0_free) <= min(i["y"] for i in t0_keyed),
+                      f"{d['name']} > {t0['name']} ({label}): no key-gated card starts above a keyless card")
+        for did, tid in (("d:energy", "oil"), ("d:energy", "outlooks-reports"), ("d:macro-us", "inflation")):
+            tab = next(t for d in build_out["dashboards"] if d["id"] == did for t in d["tabs"] if t["id"] == tid)
+            t_free = [i for i in tab["items"] if not i.get("needsKey")]
+            t_keyed = [i for i in tab["items"] if i.get("needsKey")]
+            if t_free and t_keyed:
+                check(max(i["y"] for i in t_free) <= min(i["y"] for i in t_keyed),
+                      f"{did} > {tid} ({label}): keyless rows/auto items sit above all-keyed rows")
+    en_ids = sorted(i["uid"] for d in keyless["dashboards"] if d["id"] == "d:energy" for t in d["tabs"] if t["id"] == "overview" for i in t["items"])
     check(en_ids == sorted(i["uid"] for d in dashes if d["id"] == "d:energy" for t in d["tabs"] if t["id"] == "overview" for i in t["items"]), "same card ids with or without keys")
-    check(any(i.get("needsKey") == "eia_api_key" and i["widgetId"] == "x_macro" for i in en["items"]), "EIA seasonal charts say they need the key")
+    check(any(i.get("needsKey") == "eia_api_key" and i["widgetId"] == "x_macro" for d in keyless["dashboards"] if d["id"] == "d:energy" for t in d["tabs"] if t["id"] == "overview" for i in t["items"]),
+          "EIA seasonal charts say they need the key")
+
+    # Markets Summary > Overview Global Yields (G10) uses a 6-column 1440 px preset while Rates & Curves > Global keeps full columns
+    ov_gy = next(i for d in no_v4["dashboards"] if d["id"] == "d:markets" for t in d["tabs"] if t["id"] == "overview" for i in t["items"] if i["widgetId"] == "x_global_yields")
+    rc_gy = next(i for d in no_v4["dashboards"] if d["id"] == "d:rates" for t in d["tabs"] if t["id"] == "global" for i in t["items"] if i["widgetId"] == "x_global_yields")
+    check(ov_gy.get("cols") == ["country", "m3", "y2", "y10", "slope_2s10s", "policy"] and "cols" not in rc_gy,
+          "Overview Global Yields (G10) uses 6-col 1440 px preset; Rates & Curves keeps all columns")
 
     # SEC Filings & Data + Search & Read contracts: viewer requires document_url, variants & library placed, keyed Intrinio last
     ix = bd.Index(defs)
