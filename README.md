@@ -1,45 +1,201 @@
 # Libre Terminal
 
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
-Equities, rates and credit, FX, commodities and energy, crypto, macro and government data are organised
-by asset class in 28 dashboards, built on public sources (Yahoo Finance, SEC, Federal Reserve, ECB, BIS,
-IMF, OECD, EIA, CFTC and others) through the open-source
-[OpenBB Platform](https://github.com/OpenBB-finance/OpenBB). It works without an account or API key;
-free keys from FRED, BLS, EIA, Congress.gov and FMP add more.
 
-## Download & Run (Windows 10 / 11)
+It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
+
+Most of the terminal works immediately with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add deeper U.S. economic, energy, labor, and legislative series.
+
+![Cross-asset Markets Summary in Libre Terminal](docs/markets-summary.jpg)
+*Markets Summary: watchlists, U.S. indices and sectors, normalized returns, currencies, country ETFs, and top market news on a single screen.*
+
+## Download and run (Windows 10 / 11)
 
 > **[Download Libre Terminal for Windows (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)** &nbsp;·&nbsp; [Latest release notes](https://github.com/samlazs/libre-terminal/releases/latest)
 
-No Python, coding tools, or accounts needed — just an internet connection and ~1 GB of free space:
+No coding tools, Python setup, or accounts needed. You only need an internet connection and about 1 GB of free space:
 
-1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip) above.
-2. **Extract it** — right-click the downloaded ZIP → **Extract All…** → **Extract**. *(Important: do not open files from inside the ZIP.)*
-3. **Install (once)** — open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (takes 2–5 minutes).
-   - If Windows shows *"Windows protected your PC"*, click **More info** → **Run anyway** (only needed once).
-4. **Launch** — double-click **`Start.cmd`**. Wait 15–60 seconds on the first launch while initial data and charts warm up; your browser opens at `http://127.0.0.1:6950`.
-   - Use **`Stop.cmd`** to shut it down cleanly, and **`Setup-Keys.cmd`** later if you want optional free API keys.
+1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip).
+2. **Extract the ZIP.** Right-click the downloaded file, choose **Extract All...**, and click **Extract**. Do not open files directly from inside the ZIP window.
+3. **Install once.** Open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (this takes 2 to 5 minutes).
+   - If Windows shows *"Windows protected your PC"*, click **More info** and then **Run anyway**. You only need to do this once.
+4. **Launch.** Double-click **`Start.cmd`**. On the first launch, wait 15 to 60 seconds while initial market data and charts load. Your browser will open automatically to `http://127.0.0.1:6950`.
+   - Use **`Stop.cmd`** to close the terminal cleanly, and **`Setup-Keys.cmd`** later if you want to add optional free API keys.
 
-> Unofficial project, not affiliated with OpenBB or any data provider. Research tool only: data can be
-> delayed, incomplete or wrong, and nothing here is investment advice. See
-> [License and disclaimer](#license-and-disclaimer).
+Everything runs locally on your machine. Nothing leaves your computer except the requests to the data providers themselves.
 
-![Libre Terminal — Markets Summary](docs/markets-summary.jpg)
+> Unofficial project, not affiliated with OpenBB or any data provider. Built for research only: market data can be delayed, incomplete, or revised, and nothing here is investment advice. See [License and disclaimer](#license-and-disclaimer).
+
+## Inside the terminal
+
+### Equities, comps, and SEC filings
+
+Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to pull up price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview sits an editable comparable companies table with market cap and enterprise value converted to USD, multiples, margins, growth, leverage, and peer medians. Separate tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons (such as capital expenditure or debt across major cloud providers).
 
 | | |
 |---|---|
-| ![Company overview](docs/company-overview.jpg) | ![Comparable companies](docs/company-comps.jpg) |
-| ![Rates by country](docs/rates-by-country.jpg) | ![Energy overview](docs/energy-overview.jpg) |
+| ![Company overview for Apple](docs/company-overview.jpg) | ![Comparable companies table for Apple](docs/company-comps.jpg) |
+| *Company Overview: interactive price chart, valuation and profitability snapshot, analyst consensus, and company news.* | *Comparable Companies: peer multiples, margins, growth, and ROE with peer medians alongside recent analyst actions.* |
 
-![News situation room](docs/news-situation-room.jpg)
+### Earnings day and options volatility
 
-## Quick start (updating, options & macOS / Linux)
+On earnings day, the Estimates tab puts expected versus reported EPS and revenue right next to the company's actual SEC Form 8-K press release (Exhibit 99.1). It also shows the two-day share price move, options-implied move versus past realized moves, 12 quarters of surprise history (click any past date to load that quarter's scorecard and press release), and 30- and 90-day analyst estimate revisions.
 
-**Updating from an earlier Windows download:** double-click **`Stop.cmd`** in your old folder, download and extract the new ZIP above, copy your old `local` folder into the new folder if you want to keep saved layouts and API keys, then run **`Install.cmd`** and **`Start.cmd`**.
+For derivatives work, the options views go beyond raw chains to plot implied volatility term structure, out-of-the-money volatility smiles, 3D volatility surfaces, open interest by expiration, and strategy payoffs (straddles, strangles, and spreads). Ticker routing happens automatically: U.S. stocks pull from Yahoo Finance, Nasdaq, or Cboe, Canadian names route to the Montreal Exchange (TMX), and crypto options route to Deribit.
 
-**Start options (optional):** from a Command Prompt in the `Libre-Terminal` folder, `Start.cmd --no-wait` opens the browser immediately while charts finish warming in the background; `Install.cmd --with-v4` and `Start.cmd --with-v4` add the optional legacy V4 backend (+480 MB for FMP, Finviz, EconDB, Intrinio).
+| | |
+|---|---|
+| ![Earnings scorecard and SEC 8-K release](docs/company-earnings.jpg) | ![Options term structure, volatility smile, 3D surface, and open interest](docs/options-volatility.jpg) |
+| *Company > Estimates: consensus vs. reported results, options-implied vs. realized moves, revisions, and the inline SEC 8-K release.* | *Company > Options: volatility term structure, OTM implied-volatility smile, 3D volatility surface, and open interest by expiration.* |
 
-**macOS / Linux (experimental, untested — official support is Windows 10/11 only)**
+### Sovereign yield curves and central bank policy paths
+
+Government curves come directly from central banks and ministries of finance rather than scraped quotes. Pick a country to plot today's curve against 1 month, 3 months, 6 months, 1 year, 2 years, or 5 years ago, read basis-point changes across tenors, and review BIS policy-rate history alongside OECD long-term rates. A separate global screen shows a 45-country yields matrix and roughly 40 central bank policy rates.
+
+On Policy Expectations, meeting-dated overnight index swap (OIS) trade reports from the CFTC are turned into market-implied rate paths for six major central banks (Fed, ECB, BoE, BoJ, BoC, and RBA), comparing today's pricing against one week and one month ago. FOMC statements, minutes, and economic projections open directly underneath, followed by San Francisco Fed term-premium estimates and Atlanta Fed rate probabilities.
+
+| | |
+|---|---|
+| ![U.S. yield curve now versus 1 month and 1 year ago](docs/rates-by-country.jpg) | ![OIS-implied Federal Reserve policy path and FOMC statement](docs/rates-policy-path.jpg) |
+| *Rates & Curves > By Country: Treasury par curve against 1M and 1Y ago, basis-point table, BIS policy history, and OECD 10Y yields.* | *Rates & Curves > Policy Expectations: OIS-implied Fed path (today vs. 1W and 1M ago) from CFTC swap prints above FOMC releases.* |
+
+### Corporate credit: FINRA TRACE bonds, spreads, and CDS indices
+
+Enter a U.S. ticker, company name, or CUSIP on Bond Lookup to pull an issuer's traded corporate bonds from FINRA TRACE. Each row gives coupon, maturity, Moody's and S&P ratings, last reported price, last-sale yield (yield-to-worst on callables), and call dates, plotted beside the issuer's full maturity yield curve and historical TRACE bond prices.
+
+For broader credit markets, the Spreads tab pairs ICE BofA option-adjusted spreads (investment grade, high yield, rating tiers from AAA to CCC, and regional corporate spreads) with live on-the-run 5-year CDS index levels (CDX IG, HY, and EM; iTraxx Main and Crossover) derived from CFTC swap-repository prints. Additional credit tabs cover private credit (BDCs, leveraged loans, CLOs, and listed alternative managers), corporate leverage, NY Fed bond distress, and bank lending surveys.
+
+| | |
+|---|---|
+| ![FINRA TRACE bond table, issuer yield curve, and bond price history](docs/credit-bonds-trace.jpg) | ![ICE BofA credit spreads and CFTC 5-year CDS indices](docs/credit-spreads-cds.jpg) |
+| *Credit > Bond Lookup (TRACE): active Apple bond schedule, plotted issuer yield curve, and historical TRACE pricing for a selected CUSIP.* | *Credit > Spreads: ICE BofA option-adjusted spreads by rating and region alongside CFTC 5-year CDX and iTraxx index levels and history.* |
+
+### Energy markets and EIA physical fundamentals
+
+The Energy desk covers crude benchmarks (WTI and Brent), refining margins (3-2-1, diesel, and gasoline crack spreads), European TTF versus U.S. Henry Hub natural gas, uranium, and hourly U.S. power grid demand and generation by fuel.
+
+Adding a free U.S. EIA API key populates weekly and monthly physical balances: commercial and Strategic Petroleum Reserve crude inventories, Cushing, gasoline, and distillate stocks plotted against their 5-year seasonal ranges and averages, refinery utilization, U.S. crude trade flows, LNG exports, and Short-Term Energy Outlook forecasts. International crude production and exports from JODI are built in as well.
+
+| | |
+|---|---|
+| ![Energy markets board, spot prices, crack spreads, and tanker transits](docs/energy-overview.jpg) | ![EIA crude, Cushing, gasoline, and distillate 5-year seasonal inventory bands](docs/energy-eia-fundamentals.jpg) |
+| *Energy > Overview: energy futures and equities, WTI/Brent, TTF vs. Henry Hub, crack spreads, and tanker transits through key straits.* | *Energy > Oil: commercial and SPR crude stocks, 5-year seasonal bands for Cushing, gasoline, and diesel, plus production, trade, and demand (uses free EIA key).* |
+
+### Maritime shipping, global macro, and situation-room news
+
+Physical trade flows often move before official economic releases. Using IMF PortWatch data, Trade & Shipping tracks daily vessel transits across the Strait of Hormuz, Bab el-Mandeb, Suez Canal, Cape of Good Hope, Bosporus, Panama Canal, Malacca Strait, and Taiwan Strait, broken down by tankers, container ships, and dry bulk against a year earlier and the pre-crisis 2023 baseline. Dedicated tabs add port disruption maps, trade-flow diagrams, and bilateral tariffs.
+
+Across macro and banking, the Country Monitor puts GDP growth, inflation, unemployment, policy rates, and sovereign yields for 17 major economies in one table; clicking any country updates the IMF inflation, BIS policy-rate, yield curve, and news panels beneath it. Elsewhere, dedicated tabs track Caldara-Iacoviello geopolitical risk across 44 countries, U.S. bank credit quality, FDIC bank failures, and individual bank ratios against peer-group percentiles (FFIEC UBPR).
+
+The News dashboard separates curated market headlines (folding duplicate wire stories into a single row) from a dedicated stream of official releases published by central banks, statistical offices, and financial regulators.
+
+| | |
+|---|---|
+| ![IMF PortWatch maritime chokepoint monitor and shipping lane charts](docs/trade-chokepoints.jpg) | ![17-economy global macro Country Monitor with IMF CPI and BIS rate history](docs/macro-country-monitor.jpg) |
+| *Trade & Shipping > Chokepoints: daily vessel counts vs. 1Y ago and 2023, oil tanker transits, Red Sea vs. Cape diversions, and Asian lanes.* | *Economy by Country > Country Monitor: 17-economy macro scorecard with IMF consumer-price inflation and BIS policy-rate history.* |
+
+![Market monitor news feed alongside official central bank and regulator releases](docs/news-situation-room.jpg)
+*News > Markets: curated financial press with duplicate stories folded on the left, beside official releases from the Fed, SEC, BEA, and other regulators.*
+
+## Coverage across 28 dashboards
+
+| Area | Dashboards |
+|---|---|
+| **Overview** | **Markets Summary:** cross-asset quote boards over five return horizons, watchlists, normalized performance, G10 yields, U.S. equity style box, movers, geopolitical risk, shipping chokepoints, news, and calendars |
+| **Equities** | **Company** (overview, statements, estimates and 8-K releases, peers and comps, growth and ratios, ownership and insiders, dividends, SEC filings, shorts and dark pool, options), **Screeners & Movers**, **Calendars & Events**, **Canada (TMX)**, **Nordics (Nasdaq Nordic)** |
+| **Indices, ETFs & Factors** | **Indices** (world boards, constituents, S&P 500 valuation multiples back to 1871 including Shiller CAPE, VIX futures curve), **ETFs & Mutual Funds** (holdings, exposures, N-PORT filings), **Factors & Styles** (factor boards, style box, Relative Rotation Graph, Fama-French factors) |
+| **Rates & Credit** | **Rates & Curves** (global yields, by country, U.S., euro area, money markets, CFTC swaps and OIS, policy expectations and FOMC documents), **Credit** (OAS spreads, CFTC CDS indices, private credit and BDCs, corporate debt, bank lending surveys and stress, FINRA TRACE bond lookup and issuer curve), **Government Finance** (public debt, Treasury cash balance, auctions, Fed balance sheet and primary dealer fails) |
+| **Derivatives** | **Equity Options** (chains, stats, term structure, IV smile, 3D surface, straddles, strangles, spreads, payoff), **Futures & Positioning** (futures curves for energy, metals, rates, and indices; CFTC Commitments of Traders index, movers, and net positioning) |
+| **Currencies** | **Currencies** (spot board, cross-rate matrix, policy-rate differentials, real effective exchange rates, FX reserves, CFTC FX forwards, implied volatility, and COT positioning) |
+| **Commodities & Energy** | **Commodities** (boards, WTI/gas/gold/copper curves, COT positioning), **Energy** (crude, products, refining cracks, TTF vs. Henry Hub, EIA 5-year seasonal inventories, LNG exports, hourly grid demand and fuel mix, nuclear outages, uranium, JODI global oil and gas, STEO forecasts), **Agriculture & Food** (grains, softs, and livestock curves, COT positioning, WASDE/PSD balances, USDA and regional Fed farm data) |
+| **Crypto** | **Crypto** (spot boards, price history, Deribit order books, option chains, volatility smile and surface, funding rates, DVOL vs. 30-day realized volatility) |
+| **Macro & Economy** | **Economy by Country** (17-economy Country Monitor, OECD snapshot, external accounts, Caldara-Iacoviello geopolitical risk, IMF WEO forecasts), **U.S. Economy** (Atlanta Fed GDPNow, Cleveland Fed inflation nowcasts, BLS CPI/PPI/payrolls/JOLTS tables, housing and CRE, business surveys, all 12 regional Feds), **Money & Banking** (delinquencies, charge-offs, FDIC bank failures, single-bank UBPR peer percentiles and FFIEC call reports, Fed and ECB liquidity), **Trade & Shipping** (IMF PortWatch chokepoints, disruption maps and flows, port volumes, bilateral trade and tariffs), **Data Explorers** (search FRED, BLS, IMF, OECD, ECB, and Federal Reserve series, plus Data Status) |
+| **Government & Regulation** | **U.S. Congress** (bills, laws, amendments, votes, members, committee calendars), **Federal Spending** (USAspending agency budgets, contract awards, and top recipients) |
+| **News & Research** | **News** (market monitor, official central bank and regulator feed, ranked company and regional news), **SEC Filings & Enforcement** (EDGAR full-text search, filing viewer, extracted sections, SEC litigation releases and Form ADV advisers) |
+
+## Working in the terminal
+
+- **Search from anywhere (`Ctrl+G`):** Type a ticker, company name, or dataset (`toyota`, `rheinmetall`, `SHEL.L`, `cpi`, `sofr`, `wasde`). Stocks open in Company, ETFs in ETFs & Funds, and indices, currencies, futures, or coins in the main chart.
+- **Watchlists:** Keep your own lists of tickers with last price, daily change, five return horizons, 3-month sparklines, and 52-week ranges in each security's trading currency.
+- **Compare chart:** Plot up to eight securities or FRED series (`FRED:DGS10`) on one axis as price, percent change, ratio, spread, or drawdown, with candlesticks, volume, 50- and 200-day moving averages, log scale, and NBER recession shading.
+- **Editable comps:** Comparable companies tables auto-select peers and compute medians, and you can add or remove tickers per company with your list saved locally.
+- **Source attribution on every card:** Each card names its source in the header (`Source: SEC`). Click it to switch to another provider for the same data or open the original source page. Cards that depend on a ticker route automatically to the exchange or provider that covers it (U.S. options via Yahoo/Nasdaq/Cboe, Canadian options via TMX, crypto options via Deribit; U.S. ETF holdings via Nasdaq, Canadian via TMX).
+- **Chart and table controls:** Change date ranges (`1M` to `Max`), switch transforms (`Level`, `YoY %`, `Indexed`, `Seasonal` against the 5-year range), or show and hide table columns without editing your saved layout. Export any table to CSV (with its source line) or save any chart as PNG.
+- **Custom dashboards:** Build your own tabs or dashboards with `+`, rearrange cards freely, and restore any built-in dashboard to its original layout through **⋯ > Reset to default layout**.
+- **Shortcuts and status:** Press `?` to view keyboard shortcuts (`[` and `]` move between tabs). Open **Data Explorers > Data status** to see which sources are down upstream and which API keys are configured.
+
+## Official sovereign yield curves
+
+**Rates & Curves > By Country** compares current curves against 1 month, 3 months, 6 months, 1 year, 2 years, and 5 years ago, with basis-point changes, policy-rate history, and monthly rate histories. Daily official curves cover eight major sovereign markets without any API key, and monthly OECD rates cover roughly 30 more:
+
+| Country / Region | Tenors and frequency | Official source |
+|---|---|---|
+| United States | 1M to 30Y, daily | Federal Reserve (Treasury par curve) |
+| Euro area | 3M to 30Y, daily | European Central Bank (AAA government curve) |
+| Germany | 6M to 30Y, daily | Deutsche Bundesbank |
+| United Kingdom | 6M to 40Y, daily | Bank of England |
+| Japan | 1Y to 40Y, daily | Ministry of Finance |
+| Canada | 1M to 1Y bills, 2Y to long bond, daily | Bank of Canada |
+| Sweden | 1M to 6M bills, 2Y to 10Y, daily | Riksbank |
+| Brazil | ~2M to 10Y, daily | Tesouro Direto (fixed-rate bonds) |
+| France, Italy, Spain, Switzerland, Australia, and ~30 others | 3M and 10Y, monthly | OECD |
+
+## Optional free API keys
+
+The opening tab of nearly every dashboard works without any keys. Cards that need a key say so clearly and sit after the keyless cards. Registering for any of these free public keys takes about two minutes:
+
+| Provider | What the key adds | Sign-up page |
+|---|---|---|
+| **FRED** | Full U.S. macro history, ICE BofA credit spreads, commodity spot prices, and the U.S. Economy dashboard *(many overview, rates, and macro charts also work keyless through FRED's public CSV feed)* | https://fredaccount.stlouisfed.org/apikeys |
+| **EIA** | U.S. Energy Information Administration crude, product, and natural gas inventories, 5-year seasonal ranges, LNG exports, electricity grid data, and STEO forecasts | https://www.eia.gov/opendata/register.php |
+| **BLS** | U.S. Bureau of Labor Statistics CPI, PPI, Employment Situation, JOLTS, real earnings, and productivity tables | https://data.bls.gov/registrationEngine/ |
+| **Congress.gov** | U.S. House and Senate bills, votes, amendments, member profiles, and committee reports | https://api.congress.gov/sign-up/ |
+
+To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, paste the keys into the file that opens, save, and restart with **`Stop.cmd`** and **`Start.cmd`**. Keys never leave your computer.
+
+## What to know about the data
+
+- **Delayed quotes, no trading.** Market prices come from Yahoo Finance. Quotes can be delayed, and there is no live tick streaming, order entry, or price alerting.
+- **Earnings timing.** Consensus and reported EPS come from Yahoo Finance on a single consistent basis. Reported figures appear once Yahoo posts them (usually hours to a day after the release), while the SEC Form 8-K Exhibit 99.1 press release loads directly from EDGAR in the meantime. Because Yahoo removes a quarter's revenue consensus right after reporting, past revenue surprises appear only for quarters the terminal saw before the release. Earnings call transcripts are not included.
+- **Total return vs. price return.** Quote boards containing only stocks and funds show total return (distributions reinvested on the ex-date). Boards that include an index, future, currency, or cryptocurrency show price return. The footer line beneath each board states which one is shown.
+- **Credit and bond coverage.** CDS data covers on-the-run 5-year index CDS from CFTC swap-repository trade reports; single-name CDS is not available. Corporate bond prices come from FINRA TRACE last-sale reports; security-level U.S. Treasury quotes are not included.
+- **Sovereign curve frequency.** Daily curves cover the eight markets listed above. Other countries rely on monthly 3-month and 10-year OECD series, so intra-euro spreads such as BTP-Bund and OAT-Bund are monthly.
+- **Source interruptions.** Public providers occasionally move or retire pages; roughly 30 feeds currently fail at the source and are listed in **Data Explorers > Data status**. When Cboe blocks automated requests to its options feed, options analytics fall back automatically to Yahoo Finance chains (computing Black-76 implied volatilities and Greeks locally), the VIX curve switches to Cboe settlement files, and U.S. index snapshots use Yahoo, with every substitute labelled on the card. Cboe intraday bars and historical option quotes have no substitute. OECD occasionally pauses requests when its rate limit is reached and recovers later.
+- **Geographic scope.** Stock prices, financial statements, analyst estimates, holders, and peer comps work for listings worldwide. SEC filings, FINRA TRACE, FINRA short interest, FDIC/FFIEC bank data, and U.S. option analytics apply to U.S. issuers (Canadian and Nordic markets have their own dashboards).
+- **Actuals only for macro.** Macro dashboards show official releases and IMF forecasts, not economist survey consensus or PMI releases.
+- **Supported platform.** Windows 10 and 11 are the officially tested and supported systems.
+
+## Updating and troubleshooting
+
+Everything personal (your watchlists, custom layouts, peer lists, and optional API keys) lives inside the `local` folder.
+
+- **Updating to a newer release:** Run **`Stop.cmd`** in your old folder, download and extract the new ZIP, copy your old `local` folder into the new `Libre-Terminal` folder if you want to keep your saved work, then run **`Install.cmd`** and **`Start.cmd`**.
+- **Backing up or moving computers:** Stop the terminal and copy the `local` folder. To start completely fresh, stop the terminal and delete `local`.
+
+| Problem | What to do |
+|---|---|
+| *"Windows protected your PC"* | Click **More info** and then **Run anyway**. Only needed once; `Install.cmd` unblocks the other `.cmd` files automatically. |
+| Files will not run / *"inside the ZIP"* | Right-click `Libre-Terminal-Windows.zip`, choose **Extract All...**, and open the extracted `Libre-Terminal` folder. |
+| Install fails inside OneDrive or a long path | Move the extracted folder to a short local path such as `C:\Libre-Terminal` and double-click `Install.cmd` again. |
+| Install stops partway through | Usually a corporate proxy, firewall, or antivirus block. Allow access and run `Install.cmd` again; it picks up where it stopped. |
+| Port already in use | Open Command Prompt inside `Libre-Terminal` and run `Start.cmd --ui-port 7950 --v5-port 7900` (saved for future launches). |
+| Slow first start or blank cards | The first launch takes 15 to 60 seconds while initial data and charts load. If a background service stops or freezes, the terminal restarts it automatically; logs are in `local/logs/`. |
+| A card asks for an API key | Add the free key with **`Setup-Keys.cmd`**, then stop and start the terminal. |
+| Want the default layout back | Click **⋯** on the dashboard and choose **Reset to default layout**. |
+| Uninstall | Run **`Stop.cmd`** and delete the `Libre-Terminal` folder. |
+
+<details>
+<summary><strong>Advanced options, macOS / Linux, and developers</strong></summary>
+
+### Startup and backend options
+
+- **Skip the first-launch wait:** `Start.cmd --no-wait` opens the browser immediately while data finishes loading in the background.
+- **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` if setting custom ports). The default V5 install includes **28 dashboards, 118 tabs, 766 cards, and 929 data functions**. Opting into V4 adds about 43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) for **28 dashboards, 119 tabs, 809 cards, and 990 functions**. A free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) works with `--with-v4`.
+- **Custom local folder:** Set `TERMINAL_LOCAL_DIR` before launching. Services bind to `127.0.0.1` only.
+
+### macOS / Linux (experimental, untested)
+
+Windows 10/11 is the only officially tested platform. Shell scripts sharing the same launcher are included for macOS and Linux on a best-effort basis:
 
 ```sh
 git clone https://github.com/samlazs/libre-terminal.git && cd libre-terminal
@@ -47,170 +203,32 @@ sh install.sh
 sh start.sh          # opens http://127.0.0.1:6950 ; stop with: sh stop.sh
 ```
 
-The first start pre-warms initial dashboard data and TradingView chart caches before opening the
-browser (usually 15–60 s on a cold cache; pass `--no-wait` to open immediately while warming
-continues in the background). Everything listens on `127.0.0.1` only; nothing leaves your
-computer except the data requests themselves.
+To update a git clone, stop the terminal, run `git pull`, and re-run `Install.cmd` (or `sh install.sh`). Your `local/` folder is not touched.
 
-## What is inside
+### Inside `local/`
 
-28 dashboards, 118 tabs and 766 cards by default on V5 (929 data functions); opting into the legacy V4 backend (`--with-v4`) adds ~43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ; 28 dashboards, 119 tabs, 809 cards, 990 functions total).
-
-| Section | Dashboards |
+| Path | Contents |
 |---|---|
-| Overview | **Markets Summary**: cross-asset boards with returns over five horizons, normalized performance, global yields, style box, movers, risk and geopolitics, news and calendar |
-| Equities | **Company** (overview, financials, estimates, price and peers, ratios, ownership, events, segments, filings, shorts, options), Screeners & Movers, Calendars & Events, Canada (TMX), Nordics |
-| Indices, ETFs & Funds | Indices, ETFs & Mutual Funds |
-| Rates & Credit | **Rates & Curves** (global, by country, U.S., euro area, money markets, swaps and OIS, policy expectations), Credit, Government Finance |
-| Derivatives | Equity Options, Futures & Positioning |
-| Currencies | Currencies (board, cross-rate matrix, history, forwards, volatility, positioning) |
-| Commodities & Energy | Commodities, **Energy** (oil, gas and LNG, power and uranium, supply and geopolitics, outlooks, data library), Agriculture & Food |
-| Crypto | Crypto (boards, Deribit market and options) |
-| Macro & Economy | Economy by Country (Country Monitor for 17 economies), U.S. Economy, Money & Banking, Trade & Shipping (chokepoints, ports, tariffs), Data Explorers |
-| Government | U.S. Congress, Federal Spending |
-| News & Research | News, SEC Filings & Enforcement, Factors & Styles |
+| `local/api_keys.env` | Optional API keys |
+| `local/state/` | Saved layouts, watchlists, peers, and selections (`state.json` plus daily backups) |
+| `local/logs/` | `ui.log`, `v5.log`, `v4.log`, and freeze dumps (`*-freeze-*.txt`) |
+| `local/dashboards.json`, `cache/`, `backends/`, `run/` | Generated dashboards, caches, backend settings, and process IDs |
 
-## Features
+### For contributors
 
-- **Search** (Ctrl+G): a ticker or a company name worldwide (`toyota`, `rheinmetall`, `SHEL.L`). A
-  stock opens in Company with the ticker applied, an ETF in ETFs & Funds, an index, currency, future or
-  coin in the Markets chart. The same box finds dashboards, tabs and datasets (`cpi`, `sofr`, `wasde`).
-- **Watchlists**: a quote board for your own lists (price, change, five return horizons, 3-month trend,
-  52-week range, in the trading currency). Add symbols by name.
-- **Compare chart**: overlay up to eight symbols as price, % change, ratio or spread; candles, volume,
-  50/200-day averages, log scale. FRED series can sit next to prices (`FRED:DGS10`).
-- **Comparable companies**: valuation multiples, margins, growth, leverage, yield and 1-year return for a
-  company and its peers, with the median. Works for U.S. and non-U.S. listings; peers are editable and
-  kept per company.
-- **Source on every card**: the header says where the data comes from ("Source: SEC ▾"). The menu
-  switches to another source of the same data and links to the original. Ticker-driven cards pick a
-  source that covers the ticker on their own: U.S. option chains for AAPL come from Yahoo Finance or
-  Nasdaq (analytics from Cboe, or calculated from Yahoo's chain while Cboe blocks its feed), Canadian options for SU.TO from
-  the Montreal Exchange (TMX), and crypto options for BTC from Deribit; ETF holdings for SPY come from
-  Nasdaq and for XIU.TO from TMX.
-- **Chart strip**: range (1M to Max), transform (level, year-over-year, indexed, seasonal against the
-  5-year range) and period, remembered per card.
-- **Columns**: tables open with a short, readable set of columns in consistent units; **⋯ > Columns**
-  shows or hides the others, remembered per card. **⋯** also has Flip, Plot and Settings.
-- **Export** (⤓): copy the table, download CSV (with the source line), save a chart as PNG.
-- **Library cards**: families of similar datasets (EIA, BLS tables, each regional Fed, FFIEC) are one
-  card with a Dataset picker.
-- **Your own dashboards** with `+`; built-in tabs you change keep your edits (orange dot; "Reset to
-  default layout" restores them).
-- **Help** (`?` button or key) lists the shortcuts; `[` and `]` switch tabs.
-- **Data status** (Data Explorers): sources broken upstream right now, and which API keys are set.
+- Structure, source contract, saved-state schema, runtime patches, and tests are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- The UI server (`terminal/`) uses the Python standard library only, with no front-end build step; data comes from the OpenBB V5 backend in `.venv-v5`.
+- Run offline tests and hygiene checks:
+  ```sh
+  python scripts/launcher.py test
+  python scripts/launcher.py check
+  ```
+- Keep server and launcher code within the Python standard library (no dependencies beyond `.venv-v5`) and never commit `local/`.
 
-## Rates by country
-
-Rates & Curves > **By Country** shows one or more countries' curves now against one month and one year
-ago, the same data as a table with changes in basis points, the policy-rate path and rate history; one
-country picker drives every card. **Global** has a yields matrix for about 45 countries and policy rates
-for about 40 central banks (BIS). Curves come from official keyless sources:
-
-| Country | Tenors | Source |
-|---|---|---|
-| United States | 1M to 30Y, daily | Federal Reserve (Treasury par curve) |
-| Euro area | 3M to 30Y, daily | ECB (AAA-rated government curve) |
-| Germany | 6M to 30Y, daily | Deutsche Bundesbank |
-| United Kingdom | 6M to 40Y, daily | Bank of England |
-| Japan | 1Y to 40Y, daily | Ministry of Finance |
-| Canada | 1M to 1Y bills, 2Y to long bond, daily | Bank of Canada |
-| Sweden | 1M to 6M bills, 2Y to 10Y, daily | Riksbank |
-| Brazil | about 2M to 10Y, daily | Tesouro Direto fixed-rate bonds |
-| France, Italy, Spain, Switzerland, Australia and about 30 others | 3-month and 10-year, monthly | OECD |
-
-## Optional: free API keys
-
-The first tab of most dashboards works without keys. Cards that need a key say so, sit after the keyless
-cards, and Data Explorers > Data status lists which keys are missing.
-
-| Key | What it adds | Sign up |
-|---|---|---|
-| FRED | macro series, credit spreads, commodity spot prices, the U.S. Economy dashboard (many overview, rates and macro charts work keyless via FRED's public CSV endpoint) | https://fredaccount.stlouisfed.org/apikeys |
-| EIA | the Energy dashboard's U.S. data and data library | https://www.eia.gov/opendata/register.php |
-| BLS | inflation, jobs and productivity tables | https://data.bls.gov/registrationEngine/ |
-| Congress.gov | bills, votes, members, committee reports | https://api.congress.gov/sign-up/ |
-| FMP | fundamentals, estimates, transcripts (free tier: 250 calls a day; requires optional `--with-v4`) | https://site.financialmodelingprep.com/developer/docs |
-
-Double-click **`Setup-Keys.cmd`** (or `sh setup-keys.sh`), paste the keys into the file that opens, save,
-then stop and start the terminal. Keys stay on your computer.
-
-## Known limits
-
-- **Delayed prices.** Quotes come from Yahoo Finance: fine for research, often delayed, not a trading
-  feed. No streaming, order entry or alerts.
-- **Earnings.** Consensus and reported EPS come from Yahoo Finance (one source, one basis); reported EPS and
-  revenue appear when Yahoo posts them, usually hours to a day after the release, which is linked from SEC
-  meanwhile. Yahoo drops a quarter's revenue consensus once it is reported, so past revenue surprises are shown
-  only where the terminal saw the consensus before the report. No call transcripts.
-- **Returns.** Boards made only of stocks and funds show total returns (distributions reinvested on the
-  ex-date); boards that include an index, future, currency or coin show price returns, since a price index
-  carries no dividends. The line under each board says which.
-- **No single-name CDS**; credit default swap data is index-level trade reports (CFTC). **Bond pricing is
-  limited** to what FINRA TRACE publishes; U.S. Treasury security prices are not available.
-- **Country curves**: daily for the eight countries above; elsewhere monthly 3-month and 10-year rates
-  only, so euro sovereign spreads (BTP-Bund, OAT-Bund) are monthly.
-- **Sources break upstream.** About 30 functions fail at the source right now (moved pages, retired
-  endpoints); Data Explorers > Data status lists them with the reason. Cboe's delayed-quotes CDN can refuse
-  requests with HTTP 403: options analytics then use Yahoo's chain (IV and Greeks calculated by the terminal),
-  the VIX curve uses Cboe's settlement prices and U.S. index snapshots show major indices from Yahoo, each
-  labelled on the card; Cboe quotes, price history and intraday bars have no substitute. OECD limits how often it can be queried: its cards then say "rate limit reached" and recover
-  later. Government sites sometimes fail a single request: reload the card.
-- **Outside the U.S.** prices, statements, estimates, holders and comps cover listings worldwide; SEC
-  filings, FINRA short interest and U.S. option chains/analytics (Yahoo, Nasdaq, Cboe) are U.S.-only, and
-  those cards say so.
-- **Actuals, no consensus**: released macro figures and IMF forecasts; no survey consensus, no PMIs.
-- **Free tiers** have daily caps (FMP 250 calls a day); scraped sources can change without notice.
-- **Platforms**: **Windows 10/11 only** is officially supported and tested; the `.sh` scripts for macOS/Linux share the same launcher but are experimental and untested.
-
-## Your data: the `local/` folder
-
-Everything personal lives in `local/`, created on the first start and never part of the project you share:
-
-| In `local/` | What it is |
-|---|---|
-| `api_keys.env` | your optional API keys |
-| `state/` | your layouts, watchlists, peers and picks (`state.json` and one backup a day) |
-| `logs/` | `ui.log`, `v5.log`, `v4.log`, and `*-freeze-*.txt` if a backend froze |
-| `dashboards.json`, `cache/`, `backends/`, `run/` | generated dashboards, caches, backend settings, process ids |
-
-**Backup**: copy `local/`. **Restore** or move to another computer: stop the terminal and put the folder
-back. **Start fresh**: stop the terminal and delete `local/`. `TERMINAL_LOCAL_DIR` moves it elsewhere.
-
-## Troubleshooting
-
-| Problem | What to do |
-|---|---|
-| `"Windows protected your PC"` | Click **More info** → **Run anyway** (only needed once; `Install.cmd` unblocks the other `.cmd` files automatically). |
-| `File won't run / "inside the ZIP"` | Right-click the ZIP → **Extract All…**, then open the extracted `Libre-Terminal` folder. |
-| `Install fails inside OneDrive / long folder path` | Move the extracted `Libre-Terminal` folder to a simple local path like `C:\Libre-Terminal` and double-click `Install.cmd` again. |
-| Install stops with an error | Usually a proxy, firewall or antivirus. Fix it and run the install again; it continues where it stopped. |
-| Port already in use | `Start.cmd --ui-port 7950 --v5-port 7900` (remembered for later starts; add `--v4-port 7901` if using `--with-v4`). |
-| A service is not responding | The first start can take minutes. See `local/logs/`. A backend that stops or freezes is restarted automatically (up to 5 times in 10 minutes); the freeze report is in `local/logs/*-freeze-*.txt`. |
-| A card says it needs an API key | Add the free key (above), then stop and start. |
-| Want the default layout back | `⋯` on the dashboard, "Reset to default layout". |
-| Legacy V4 sources (FMP, Finviz, EconDB, Intrinio) | Single-backend V5 is the default (~1 GB). Run `Install.cmd --with-v4` then `Start.cmd --with-v4` to enable the optional V4 backend (`--skip-v4` is accepted as a backward-compatible alias). |
-| Uninstall | Stop it and delete the folder (keep a copy of `local/` if you want your layouts). |
-
-**Updating** a git clone: stop, `git pull`, run the install again. `local/` is not touched.
-
-## For developers
-
-Two local processes by default: the UI server (`terminal/`, Python standard library, no front-end build step) and
-the OpenBB V5 data backend (plus an optional legacy V4 backend via `--with-v4`). `python scripts/launcher.py test` runs the offline checks in a few seconds, and
-`python scripts/launcher.py check` runs encoding, syntax, lint and hygiene checks. The structure, the source
-contract, saved-state keys, generator conventions, runtime patches and tests are described in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Contributions are welcome under the project's license; keep
-server/launcher code in the standard library (no new dependencies beyond what `.venv-v5` installs) and never
-commit `local/`.
+</details>
 
 ## License and disclaimer
 
-Licensed under the **GNU Affero General Public License v3.0 or later** ([LICENSE](LICENSE)); third-party
-notices are in [NOTICE](NOTICE). The OpenBB Platform and other packages are installed from PyPI under their
-own licenses and are not redistributed here.
+Licensed under the **GNU Affero General Public License v3.0 or later** ([LICENSE](LICENSE)); third-party notices are in [NOTICE](NOTICE). The OpenBB Platform and other Python packages are installed from PyPI under their own licenses and are not redistributed here.
 
-Unofficial project, not affiliated with, endorsed by or sponsored by OpenBB or any data provider; names
-identify compatible software and data sources only. Data comes from third parties under their own terms,
-which you are responsible for respecting, and may be delayed, incomplete or wrong. Nothing here is
-investment, financial, legal or tax advice. The software is provided "as is", without warranty of any kind.
+Unofficial project, not affiliated with, endorsed by, or sponsored by OpenBB or any data provider; names identify compatible software and data sources only. Data comes from third parties under their own terms, which you are responsible for respecting, and may be delayed, incomplete, or wrong. Nothing here is investment, financial, legal, or tax advice. The software is provided "as is", without warranty of any kind.
