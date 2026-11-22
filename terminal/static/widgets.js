@@ -166,6 +166,7 @@
   T.requestTimeout = function (url, isFiles) {
     var u = String(url || "");
     if (isFiles
+      || /\/api\/v1\/(?:cboe\/options\/|derivatives\/options\/chains)\b/.test(u)
       || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release)\b/.test(u)
       || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
       || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 60000;

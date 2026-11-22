@@ -155,12 +155,13 @@ Applied in memory at start; no installed file is modified.
   bid/ask mid when both sides are quoted within 1%, else the previous close (a `basis` column says which); for
   precious metals a month more than 3% off a robust line through the curve is left out (stale or off-market quotes).
   The stock fetcher halved one-sided quotes and drew 0.00 for unquoted months.
-- Cboe `delayed_quotes` refused (HTTP 403; never worked around): options analytics load Yahoo's chain at the
-  regular-session price and time and calculate IV and Greeks (`terminal/option_math.py`: parity forward, Black-76,
-  one IV per strike; Yahoo's own IV is a placeholder without live quotes). The VIX curve and futures list come from
-  Cboe's settlement file, U.S. index snapshots from Yahoo. `note_substitute` sends `X-Terminal-Source` and
-  `X-Terminal-Fallback`, which the card shows as its Source and footer note. An async fetcher's `extract_data`
-  must be the coroutine itself: `asyncio.run` inside it binds openbb_cboe's shared HTTP cache to a dead event loop.
+- Cboe `delayed_quotes` refused (HTTP 403; never worked around): `derivatives/options/chains?provider=cboe` and options
+  analytics share a concurrent Yahoo chain loader at the regular-session price and time and calculate IV and Greeks
+  (`terminal/option_math.py`: parity forward, Black-76, one IV per strike; Yahoo's own IV is a placeholder without
+  live quotes; `^GSPC` aliases to `SPX`). The VIX curve and futures list come from Cboe's settlement file, U.S. index
+  snapshots from Yahoo. `note_substitute` sends `X-Terminal-Source` and `X-Terminal-Fallback`, which the card shows
+  as its Source and footer note. An async fetcher's `extract_data` must be the coroutine itself: `asyncio.run` inside
+  it binds openbb_cboe's shared HTTP cache to a dead event loop.
 - Request guard: Host allow-list (blocks DNS rebinding), Origin must be the UI (any local host name, case-insensitive),
   requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names that origin only, error
   bodies redacted; `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without

@@ -865,6 +865,20 @@ def install_cboe_chain_symbols(applied: list):
     # the coroutine itself, never asyncio.run() around it: that ran each fetch on a throw-away event loop, openbb_cboe's
     # shared HTTP cache bound to it, and every later Cboe card failed "bound to a different event loop" (2026-11-21)
     F.extract_data = staticmethod(aextract_data)
+    try:
+        from openbb_cboe.utils import helpers as cboe_helpers
+    except ImportError:
+        cboe_helpers = None
+    if cboe_helpers is not None and not getattr(cboe_helpers.response_callback, "_terminal_403_wrapped", False):
+        orig_cb = cboe_helpers.response_callback
+
+        async def response_callback(response, arg=None):
+            if getattr(response, "status", None) == 403:
+                raise OpenBBError("Cboe refused the request (HTTP 403).")
+            return await orig_cb(response, arg)
+
+        response_callback._terminal_403_wrapped = True
+        cboe_helpers.response_callback = response_callback
     applied.append("Cboe option chains keep OCC symbols and turn upstream 403 HTML blocks into a readable error")
 
 
@@ -879,29 +893,41 @@ CBOE_RETRY = 300            # seconds before a refused Cboe feed is asked again
 CHAIN_TTL = 300
 CHAINS_KEPT = 16
 YAHOO_OPTION_INDICES = {"SPX", "NDX", "RUT", "VIX", "XSP", "OEX", "DJX"}
+CBOE_OPTION_ALIASES = {"GSPC": "SPX"}
+
+
+def canonical_option_symbol(symbol: str) -> str:
+    """Normalize a ticker for Cboe options and Yahoo option aliases (e.g. ^GSPC -> SPX)."""
+    s = str(symbol or "").strip().upper().lstrip("^")
+    return CBOE_OPTION_ALIASES.get(s, s)
 
 
 def yahoo_option_symbol(symbol: str):
     """Yahoo's spelling of a Cboe underlying (^SPX, BRK-B); None for text that is not a ticker."""
     import re
 
-    s = str(symbol or "").strip().upper().lstrip("^")
+    s = canonical_option_symbol(symbol)
     if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", s):
         return None
     return "^" + s if s in YAHOO_OPTION_INDICES else s.replace(".", "-")
 
 
 def yahoo_retry(read, pause: float = 1.0):
-    """read(), up to three times while it is empty or unreadable. yfinance turns a refused crumb (several first requests
-    at once after a start) into an empty answer or a TypeError: VIX read "no options" that way (2026-11-22). A rate
-    limit is another exception and is not retried."""
+    """read(), up to three times while it is empty or fails transiently. yfinance turns a refused crumb (several first
+    requests at once after a start) into an empty answer or a TypeError: VIX read "no options" that way (2026-11-22).
+    A rate limit is another exception and is never retried."""
     failed = None
     for attempt in range(3):
         if attempt:
             time.sleep(pause * attempt)
         try:
             out = read()
-        except (TypeError, ValueError, KeyError) as e:
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if "RateLimit" in type(e).__name__ or "429" in msg or "Too Many Requests" in msg:
+                raise
+            if not (isinstance(e, (TypeError, ValueError, KeyError, OSError, TimeoutError)) or _transient(e)):
+                raise
             failed = e
             continue
         if out:
@@ -915,25 +941,56 @@ def yahoo_retry(read, pause: float = 1.0):
 def yahoo_chain(symbol: str):
     """(rows, regular-session price, its time) or None without listed options. The regular price and its time, not the
     after-hours ones OpenBB's fetcher keeps: the option quotes stop at the close."""
+    from concurrent.futures import ThreadPoolExecutor
+
     import pandas as pd
     import yfinance
 
     ticker = yfinance.Ticker(symbol)
-    frames, info = [], None
+    expirations = list(yahoo_retry(lambda: ticker.options) or ())
+    if not expirations:
+        return None
+
     def read_expiry(expiry):
         got = ticker.option_chain(expiry)
         return got if got.calls is not None else None
 
-    for expiry in yahoo_retry(lambda: ticker.options) or ():
-        chain = yahoo_retry(lambda: read_expiry(expiry))
-        if chain is None:           # a chain with a month missing would draw a wrong curve and wrong totals
-            raise ValueError(f"no answer for the {expiry} expiry")
+    def fetch_one(expiry):
+        try:
+            return expiry, yahoo_retry(lambda e=expiry: read_expiry(e)), None
+        except Exception as exc:  # noqa: BLE001
+            return expiry, None, exc
+
+    with ThreadPoolExecutor(max_workers=min(4, len(expirations))) as pool:
+        fetched = list(pool.map(fetch_one, expirations))
+
+    frames, info, missing, errors = [], None, [], []
+    for expiry, chain, err in fetched:
+        if err is not None:
+            errors.append((expiry, err))
+            continue
+        if chain is None:
+            missing.append(expiry)
+            continue
         info = info or chain.underlying
         for side, frame in (("call", chain.calls), ("put", chain.puts)):
-            if len(frame):
+            if frame is not None and len(frame):
                 frames.append(frame.assign(option_type=side, expiration=pd.Timestamp(expiry).date()))
-    if not frames:
+
+    rate_err = next((exc for _, exc in errors if "RateLimit" in type(exc).__name__ or "429" in str(exc) or "Too Many Requests" in str(exc)), None)
+    if rate_err is not None:
+        raise rate_err
+    allowed_skip = max(1, len(expirations) // 10) if len(expirations) >= 5 else 0
+    if not frames or len(missing) + len(errors) > allowed_skip:
+        if errors:
+            raise errors[0][1]
+        if missing:
+            raise ValueError(f"no answer for the {missing[0]} expiry")
         return None
+    if missing or errors:
+        say(f"[options] {symbol}: skipped {len(missing) + len(errors)}/{len(expirations)} unavailable expiries")
+
+    info = info or getattr(ticker, "_underlying", None)
     spot, stamp = (info or {}).get("regularMarketPrice"), (info or {}).get("regularMarketTime")
     if not spot or not stamp:
         raise ValueError("no underlying price or time")
@@ -941,7 +998,7 @@ def yahoo_chain(symbol: str):
         "contractSymbol": "contract_symbol", "lastTradeDate": "last_trade_time", "lastPrice": "last_trade_price",
         "openInterest": "open_interest"})
     for col in ("open_interest", "volume"):
-        rows[col] = rows[col].fillna(0).astype("int64")
+        rows[col] = rows[col].fillna(0).astype("int64") if col in rows else 0
     keep = ["contract_symbol", "expiration", "strike", "option_type", "bid", "ask", "last_trade_price", "last_trade_time",
             "open_interest", "volume"]
     return rows[keep], float(spot), pd.Timestamp(int(stamp), unit="s", tz="UTC").tz_convert("America/New_York")
@@ -972,9 +1029,15 @@ def build_substitute_chain(symbol: str, fetched, rate, today):
     from openbb_core.provider.standard_models.options_chains import OptionsChainsData
     from pydantic import PrivateAttr
 
+    try:
+        from openbb_cboe.models.options_chains import CboeOptionsChainsData
+        base_chain = CboeOptionsChainsData
+    except ImportError:
+        base_chain = OptionsChainsData
+
     import option_math
 
-    class SubstituteChain(OptionsChainsData):
+    class SubstituteChain(base_chain):
         _frame = PrivateAttr(default=None)
         _views = PrivateAttr(default_factory=dict)
 
@@ -1015,7 +1078,7 @@ def build_substitute_chain(symbol: str, fetched, rate, today):
 
 
 def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bill_rate):
-    """Options analytics (surface, smile, term structure, stats, strategies) when Cboe refuses its chain feed."""
+    """Options chains and analytics (surface, smile, term structure, stats, strategies) when Cboe refuses its feed."""
     import asyncio
     import importlib
 
@@ -1023,14 +1086,16 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
         from openbb_cboe.models.options_chains import CboeOptionsChainsFetcher
         from openbb_cboe.utils.options import data_handler
         from openbb_core.app.model.abstract.error import OpenBBError
+        from openbb_core.provider.abstract.annotated_result import AnnotatedResult
         from openbb_core.provider.utils.errors import EmptyDataError
     except ImportError:         # V4's openbb-cboe has no options analytics
         return
 
-    loaded: dict = {}           # symbol -> (time, chain, note or None)
+    loaded: dict = {}           # symbol -> (time, chain, note or None, raw AnnotatedResult)
     flights: dict = {}
     refused_until = [0.0]
     yahoo_slots = threading.BoundedSemaphore(3)
+    orig_fetch = CboeOptionsChainsFetcher.fetch_data
 
     def substitute(symbol: str, yahoo: str):
         from datetime import datetime
@@ -1043,11 +1108,11 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
     async def build(symbol: str):
         if time.time() >= refused_until[0]:
             try:
-                got = await CboeOptionsChainsFetcher.fetch_data({"symbol": symbol.replace("-", ".")}, {})
+                got = await orig_fetch({"symbol": symbol.replace("-", ".")}, {})
                 chain = getattr(got, "result", got)
                 if not getattr(chain, "expirations", None):
                     raise OpenBBError(f"No options available for {symbol}.")
-                return chain, None
+                return chain, None, got
             except EmptyDataError:
                 raise OpenBBError(f"No options available for {symbol}.") from None
             except Exception as e:  # noqa: BLE001
@@ -1065,10 +1130,19 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
                                f"{redact(str(e))[:120]})") from None
         if not built:
             raise OpenBBError(f"No options available for {symbol}.")
-        return built
+        chain, note = built
+        full = chain._views.get("all", chain)
+        raw = AnnotatedResult(
+            result=full,
+            metadata={
+                "symbol": symbol,
+                "current_price": float(chain.underlying_price[0]) if getattr(chain, "underlying_price", None) else None,
+            },
+        )
+        return chain, note, raw
 
-    async def load_symbol(symbol: str, update: bool = False):
-        symbol = str(symbol or "").strip().upper().lstrip("^")
+    async def _load(symbol: str, update: bool = False):
+        symbol = canonical_option_symbol(symbol)
         hit = loaded.get(symbol)
         if update or FORCE_REFRESH.get() or not hit or time.time() - hit[0] > CHAIN_TTL:
             # the cards of a tab ask for the same chain at once: one download serves them all
@@ -1077,19 +1151,33 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
             if task is None:
                 task = flights[key] = asyncio.ensure_future(build(symbol))
                 task.add_done_callback(lambda done: (flights.pop(key, None), done.cancelled() or done.exception()))
-            chain, note = await asyncio.shield(task)
-            hit = loaded[symbol] = (time.time(), chain, note)
+            chain, note, raw = await asyncio.shield(task)
+            hit = loaded[symbol] = (time.time(), chain, note, raw)
             data_handler.LOADED_SYMBOLS[symbol] = chain             # the expiry and strike menus read it
             while len(loaded) > CHAINS_KEPT:
                 oldest = min(loaded, key=lambda k: loaded[k][0])
                 loaded.pop(oldest)
                 data_handler.LOADED_SYMBOLS.pop(oldest, None)
-        if hit[2]:
-            note_substitute("Yahoo Finance", hit[2])
-        return hit[1]
+        return hit[1], hit[2], hit[3]
+
+    async def load_symbol(symbol: str, update: bool = False):
+        chain, note, _ = await _load(symbol, update=update)
+        if note:
+            note_substitute("Yahoo Finance", note)
+        return chain
+
+    @classmethod
+    async def fetch_data(cls, params, credentials=None, **kwargs):
+        p = params or {}
+        sym = p.get("symbol", "")
+        use_cache = True if p.get("use_cache") is None else bool(p.get("use_cache"))
+        _, note, raw = await _load(sym, update=not use_cache)
+        if note:
+            note_substitute("Yahoo Finance", note, "Delayed prices from Yahoo Finance (free feed, not real time)")
+        return raw
 
     def choices(orig):
-        return lambda symbol: orig(str(symbol or "").strip().lstrip("^"))
+        return lambda symbol: orig(canonical_option_symbol(symbol))
 
     orig_forward, orig_marks = data_handler._implied_forward, data_handler.get_chain_marks
 
@@ -1140,12 +1228,13 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
         return await orig_ranked(symbol.replace("-", "."), *args, **kwargs)
 
     optimizer.get_symbol_info, optimizer.get_strategies = get_symbol_info, get_strategies
+    CboeOptionsChainsFetcher.fetch_data = fetch_data
     data_handler.load_symbol = load_symbol
     data_handler._implied_forward = implied_forward
     data_handler.get_chain_marks = get_chain_marks
     data_handler.get_expirations = choices(data_handler.get_expirations)
     data_handler.get_strikes = choices(data_handler.get_strikes)
-    applied.append("Cboe options analytics use a labelled Yahoo chain (IV and Greeks calculated) while Cboe refuses its feed")
+    applied.append("Cboe options chains and analytics use a labelled Yahoo chain (IV and Greeks calculated) while Cboe refuses its feed")
 
 
 def vix_curve_from_settlements(rows: list) -> list:

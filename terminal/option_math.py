@@ -24,11 +24,15 @@ CALCULATED = ("implied_volatility", "theoretical_price", "delta", "gamma", "thet
 
 def black76(forward, strike, years, sigma, discount, is_call):
     """European option value on a forward."""
-    dev = sigma * np.sqrt(years)
-    d1 = (np.log(forward / strike) + 0.5 * dev * dev) / dev
-    d2 = d1 - dev
-    return np.where(is_call, discount * (forward * ndtr(d1) - strike * ndtr(d2)),
-                    discount * (strike * ndtr(-d2) - forward * ndtr(-d1)))
+    dev = np.asarray(sigma, dtype=float) * np.sqrt(np.maximum(years, 0.0))
+    intrinsic = np.where(is_call, discount * np.maximum(forward - strike, 0.0),
+                         discount * np.maximum(strike - forward, 0.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d1 = (np.log(forward / strike) + 0.5 * dev * dev) / dev
+        d2 = d1 - dev
+        val = np.where(is_call, discount * (forward * ndtr(d1) - strike * ndtr(d2)),
+                       discount * (strike * ndtr(-d2) - forward * ndtr(-d1)))
+    return np.where(dev > 0, val, intrinsic)
 
 
 def implied_vol(price, forward, strike, years, discount, is_call):

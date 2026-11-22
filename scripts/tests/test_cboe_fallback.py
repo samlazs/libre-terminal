@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import importlib.util
+import warnings
 from datetime import date
 
 import numpy as np
@@ -32,6 +33,11 @@ for name, got, want in (("value", g["theoretical_price"], 7.965567), ("delta", g
 check(close(om.implied_vol(np.array([7.965567]), 100.0, one, 1.0, 1.0, call)[0], 0.2), "7.965567 implies 20%")
 check(np.isnan(om.implied_vol(np.array([0.0]), 100.0, one, 1.0, 1.0, call)[0]), "a zero price implies no volatility")
 check(np.isnan(om.implied_vol(np.array([101.0]), 100.0, one, 1.0, 1.0, call)[0]), "a price above the forward implies none")
+with warnings.catch_warnings(record=True) as zero_t_warn:
+    warnings.simplefilter("always")
+    c0 = om.black76(110.0, one, 0.0, np.array([0.2]), 1.0, call)[0]
+    p0 = om.black76(110.0, one, 0.0, np.array([0.2]), 1.0, put)[0]
+    check(close(c0, 10.0) and close(p0, 0.0) and not zero_t_warn, "black76 at T=0 returns intrinsic without divide-by-zero warnings")
 check(close(om.parity_forward([90, 100, 110], [15, 8, 4], [3, 6, 12], 1.0), 102.0), "forward = K + C - P = 102")
 check(np.isnan(om.parity_forward([100], [8], [6], 1.0)), "one pair is no forward")
 
@@ -94,11 +100,13 @@ check(rb.cfe_instruments_from_settlements(rows) == [{"future_root": "VX", "name"
 row = rb.index_snapshot_row("SPX", {"regularMarketPrice": 99.0, "regularMarketPreviousClose": 100.0, "regularMarketTime": 1795208400})
 check(close(row["price_change_percent"], -1.0) and str(row["last_trade_time"]) == "2026-11-20 16:00:00", "points and Eastern time")
 check(rb.index_snapshot_row("SPX", {}) is None, "no price, no row")
-check([rb.yahoo_option_symbol(s) for s in ("spx", "^VIX", "BRK.B", "AAPL", "../x", "")] == ["^SPX", "^VIX", "BRK-B", "AAPL", None, None],
-      "Yahoo symbols, and no path text")
+check([rb.canonical_option_symbol(s) for s in ("^GSPC", "gspc", "^VIX", "AAPL")] == ["SPX", "SPX", "VIX", "AAPL"],
+      "canonical option symbol maps ^GSPC/GSPC -> SPX")
+check([rb.yahoo_option_symbol(s) for s in ("spx", "^GSPC", "GSPC", "^VIX", "BRK.B", "AAPL", "../x", "")] == [
+    "^SPX", "^SPX", "^SPX", "^VIX", "BRK-B", "AAPL", None, None], "Yahoo symbols, ^GSPC alias, and no path text")
 
 
-answers = iter([TypeError("len of None"), (), ("2026-12-18",)])
+answers = iter([TypeError("len of None"), ConnectionError("reset"), ("2026-12-18",)])
 
 
 def flaky():
@@ -108,7 +116,7 @@ def flaky():
     return got
 
 
-check(rb.yahoo_retry(flaky, 0) == ("2026-12-18",), "a refused crumb (error, then empty) is asked again")
+check(rb.yahoo_retry(flaky, 0) == ("2026-12-18",), "a refused crumb or transient network error is asked again")
 check(rb.yahoo_retry(lambda: (), 0) is None, "three empty answers are no data")
 try:
     rb.yahoo_retry(lambda: len(None), 0)
@@ -117,12 +125,33 @@ except TypeError:
     check(True, "three failures are an outage, not 'no options'")
 
 
+class YFRateLimitError(Exception):
+    pass
+
+
+rl_calls = [0]
+
+
+def rate_limited():
+    rl_calls[0] += 1
+    raise YFRateLimitError("Too Many Requests")
+
+
+try:
+    rb.yahoo_retry(rate_limited, 0)
+    check(False, "rate limit must raise immediately")
+except YFRateLimitError:
+    check(rl_calls[0] == 1, "yahoo_retry never retries rate limits")
+
+
 # ---- the installed loader and the real openbb_cboe chart builders
 async def installed():
     try:
         from openbb_cboe.models.options_chains import CboeOptionsChainsFetcher
+        from openbb_cboe.utils import helpers as cboe_helpers
         from openbb_cboe.utils.options import data_handler
         from openbb_core.app.model.abstract.error import OpenBBError
+        from openbb_core.provider.abstract.annotated_result import AnnotatedResult
     except ImportError:
         print("openbb_cboe not installed: loader checks skipped")
         return
@@ -142,6 +171,26 @@ async def installed():
         return pd.concat([chain(expiry=date(2099, 11, 20)), later], ignore_index=True), 100.0, friday
 
     CboeOptionsChainsFetcher.fetch_data = refused
+    cb_applied = []
+    rb.install_cboe_chain_symbols(cb_applied)
+    check(len(cb_applied) == 1, "cboe chain symbols / 403 callback wrapper applies")
+
+    class FakeResp:
+        def __init__(self, status, data):
+            self.status = status
+            self.headers = {"Content-Type": "application/json"}
+            self._data = data
+
+        async def json(self):
+            return self._data
+
+    check(await cboe_helpers.response_callback(FakeResp(200, {"ok": 1}), None) == {"ok": 1}, "response_callback passes through 200")
+    try:
+        await cboe_helpers.response_callback(FakeResp(403, {}), None)
+        check(False, "response_callback must raise OpenBBError on HTTP 403")
+    except OpenBBError as e:
+        check("403" in str(e), "response_callback raises OpenBBError on HTTP 403")
+
     applied = []
     rb.install_cboe_options_fallback(applied, fetch=fetch, get_rate=lambda: 0.0)
     check(len(applied) == 1, "options fallback applies")
@@ -153,6 +202,19 @@ async def installed():
     box.clear()
     await data_handler.load_symbol("ABC")
     check(box.get("sources") == "Yahoo Finance" and asked["yahoo"] == 1, "a remembered chain is labelled too")
+    box.clear()
+    fetched_chain = await CboeOptionsChainsFetcher.fetch_data({"symbol": "abc"}, {})
+    check(isinstance(fetched_chain, AnnotatedResult) and asked["yahoo"] == 1
+          and box.get("sources") == "Yahoo Finance" and "Delayed prices from Yahoo Finance" in box.get("delayed", ""),
+          "CboeOptionsChainsFetcher.fetch_data shares the Yahoo chain with IV/Greeks and delayed label")
+    check(any(v is not None for v in fetched_chain.result.implied_volatility)
+          and any(v is not None for v in fetched_chain.result.delta),
+          "CboeOptionsChainsFetcher.fetch_data returns calculated IV and Greeks")
+    box.clear()
+    gspc_chain = await data_handler.load_symbol("^GSPC")
+    check(asked["yahoo"] == 2 and gspc_chain.expirations == ["2099-11-20", "2099-12-18"]
+          and len(data_handler.get_expirations("^GSPC")) == 2,
+          "^GSPC aliases cleanly to SPX across load_symbol and expiry lookup")
     check(got[0].expirations == ["2099-11-20", "2099-12-18"] and data_handler.get_expirations("^abc"), "expiry menu filled")
     for module, kwargs in (("create_surface", {}), ("create_surface", {"metric": "gex"}), ("create_smile", {"otm": True}),
                            ("create_term_structure", {}), ("create_stats", {})):

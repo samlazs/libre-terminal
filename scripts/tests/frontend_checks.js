@@ -577,6 +577,8 @@
   ok(T.monthKey("Nov 2026") === 202611 && T.monthKey("Oct 2026") < T.monthKey("Nov 2026"), "readable recommendation months sort chronologically");
   ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
     && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
+    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 60000
+    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 60000
     && T.requestTimeout("/x/policy_path?currency=USD", false) === 60000
     && T.requestTimeout("/x/global_yields?countries=g10", false) === 60000
     && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 60000
