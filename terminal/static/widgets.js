@@ -107,6 +107,8 @@
       return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
     if (/No (options|data|results) (found|returned|available)|Could not find CIK|CIK not found|No .* found for|covers U\.S\.|is not (supported|covered)|Symbol .* was not found|no price history/i.test(m) && !/route|Not Found$/i.test(m))
       return { cls: "covered", kind: "info", text: "Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + ".", hint: "Try another symbol." };
+    var noQuote = /Yahoo Finance (has no bid\/ask quotes|returned no option prices recent enough)[^"]*/.exec(m);
+    if (noQuote) return { cls: "message", kind: "info", text: noQuote[0], hint: null };
     if (/failed after \d+ attempts|request failed|timed? ?out|Timeout|No answer after \d+ seconds|not answering|not responding|not reachable|did not answer|Connection (aborted|reset|refused)|ConnectionReset|RemoteDisconnected|Server disconnected|\b(502|503|504)\b|Bad Gateway|Service Unavailable|Internal Server Error|HTTPError|HTTP Error \d|Client Error|Error fetching data|Expecting value|framing layer|curl:|SSL|certificate|returned no|returned nothing|could not be read|moved the source|Worksheet named|no item named|not reachable/i.test(m))
       return { cls: "upstream", kind: "info", text: src + " is not answering properly right now.", hint: "The problem is at the source, not in your settings. Try again later (press ↻)." };
     if (ctx.userMessage)            // the terminal's own views explain themselves; only URLs are taken out
@@ -115,9 +117,17 @@
     return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: m };
   };
 
+  /** What really answered, when the backend had to substitute the source asked (X-Terminal-Source: "Yahoo Finance"). */
+  T.substituteSources = function (names, note) {
+    return String(names || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean).map(function (n) {
+      var key = Object.keys(PROV).filter(function (k) { return PROV[k] === n; })[0];
+      return { name: n, detail: note || "", url: PROV_URL[key] || "" };
+    });
+  };
+
   /** Footer trust signals: warning styling for failed-fetch fallbacks (`stale`, `fallback`, `truncated`), calm muted styling for background SWR (`cached`). */
   T.renderTrust = function (foot, lj) {
-    lj = lj && typeof lj === "object" && !Array.isArray(lj) ? lj : {};
+    lj = lj && typeof lj === "object" ? lj : {};
     var trust = typeof lj.stale === "string" ? lj.stale : "";
     if (trust) foot.appendChild(el("span", { class: "stale-note", title: trust }, "⚠ " + trust));
     else if (typeof lj.cached === "string" && lj.cached) foot.appendChild(el("span", { class: "cache-note", title: lj.cached }, lj.cached));
@@ -251,6 +261,8 @@
       }
       if (!r.ok) {
         var err = new Error(errText(r.status, etxt)); err.status = r.status;
+        var subE = r.headers && r.headers.get("X-Terminal-Source");
+        if (subE) err.sources = T.substituteSources(subE, r.headers.get("X-Terminal-Fallback"));
         try { var ej = JSON.parse(etxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
         if (slow && /rate limit reached/i.test(err.message)) { limitedUntil = Date.now() + 600000; limitedMsg = err.message; }
         throw err;
@@ -268,6 +280,12 @@
       // a backend answer served from a saved copy because the source failed (HANDOFF P2): kept with the answer in memory
       var staleH = r.headers.get("X-Terminal-Stale");
       if (staleH && json && typeof json === "object" && !Array.isArray(json) && json.stale == null) json.stale = staleH;
+      var subH = r.headers.get("X-Terminal-Source");
+      if (subH && json && typeof json === "object") {       // a list answer carries it too
+        var subNote = r.headers.get("X-Terminal-Fallback") || "";
+        json.sources = T.substituteSources(subH, subNote);
+        json.fallback = subNote;
+      }
       var lateH = r.headers.get("X-Terminal-Delayed");
       if (lateH && json && typeof json === "object" && !Array.isArray(json) && json.delayed == null) json.delayed = lateH;
     } catch (e2) {
@@ -1213,6 +1231,8 @@
         if (my !== seq || !alive) return;
         lastJson = json;
         if (json && Array.isArray(json.sources)) answerSources = json.sources;
+        else if (ctx.backend.id !== "x") answerSources = null;      // the named source answers again
+        paintSource();
         if (def.strip) drawStrip();
         failed = false;
         slowRetries = 0;

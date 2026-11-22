@@ -225,7 +225,8 @@ UNITS = {
     "ustreasury_auction_results_us_treasury_obb": {"allocation_percentage_decimals": "integer"},   # a count of decimals: 2
     "index_sectors_tmx_obb": {"weight": "fraction"},                                    # ^TSX sector weights sum to 0.988
     "bls_employment_situation_long_term_unemployed_share_bls_obb": {"percent": "percent"},   # 2006-10: 15.9
-    "cboe_options_trade_optimizer_custom_obb": {"regt_margin": "number"},               # dollars (SPY median 1,044)
+    "cboe_options_trade_optimizer_custom_obb": {"regt_margin": "number",                # dollars (SPY median 1,044)
+                                                "annualized_return": "fraction"},       # upstream says percent; 5.4919 = 549% (0.4815 in 33 days)
     "eia_nuclear_outages_facility_level_nuclear_outages_eia_obb": {"percent_outage": "percent"},
     "eia_nuclear_outages_generator_level_nuclear_outages_eia_obb": {"percent_outage": "percent"},
     "eia_nuclear_outages_us_nuclear_outages_eia_obb": {"percent_outage": "percent"},    # outage 13,956 / capacity 99,723 = 13.99

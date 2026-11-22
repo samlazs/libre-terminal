@@ -85,7 +85,7 @@ computer except the data requests themselves.
 - **Source on every card**: the header says where the data comes from ("Source: SEC ▾"). The menu
   switches to another source of the same data and links to the original. Ticker-driven cards pick a
   source that covers the ticker on their own: U.S. option chains for AAPL come from Yahoo Finance or
-  Nasdaq (with Cboe analytics when its delayed-quotes CDN is available), Canadian options for SU.TO from
+  Nasdaq (analytics from Cboe, or calculated from Yahoo's chain while Cboe blocks its feed), Canadian options for SU.TO from
   the Montreal Exchange (TMX), and crypto options for BTC from Deribit; ETF holdings for SPY come from
   Nasdaq and for XIU.TO from TMX.
 - **Chart strip**: range (1M to Max), transform (level, year-over-year, indexed, seasonal against the
@@ -151,9 +151,10 @@ then stop and start the terminal. Keys stay on your computer.
 - **Country curves**: daily for the eight countries above; elsewhere monthly 3-month and 10-year rates
   only, so euro sovereign spreads (BTP-Bund, OAT-Bund) are monthly.
 - **Sources break upstream.** About 30 functions fail at the source right now (moved pages, retired
-  endpoints); Data Explorers > Data status lists them with the reason. Cboe's delayed-quotes CDN can block
-  options analytics requests upstream with HTTP 403 (U.S. option chains remain available via Yahoo Finance
-  and Nasdaq). OECD limits how often it can be queried: its cards then say "rate limit reached" and recover
+  endpoints); Data Explorers > Data status lists them with the reason. Cboe's delayed-quotes CDN can refuse
+  requests with HTTP 403: options analytics then use Yahoo's chain (IV and Greeks calculated by the terminal),
+  the VIX curve uses Cboe's settlement prices and U.S. index snapshots show major indices from Yahoo, each
+  labelled on the card; Cboe quotes, price history and intraday bars have no substitute. OECD limits how often it can be queried: its cards then say "rate limit reached" and recover
   later. Government sites sometimes fail a single request: reload the card.
 - **Outside the U.S.** prices, statements, estimates, holders and comps cover listings worldwide; SEC
   filings, FINRA short interest and U.S. option chains/analytics (Yahoo, Nasdaq, Cboe) are U.S.-only, and

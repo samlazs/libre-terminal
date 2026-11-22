@@ -410,8 +410,10 @@ try:
     cboe_applied = []
     rb.install_cboe_chain_symbols(cboe_applied)
     check(len(cboe_applied) == 1 and "403" in cboe_applied[0], "Cboe chain wrapper applies cleanly")
-    for mode, call_fn in (("async", lambda: asyncio.run(FakeCboeFetcher.aextract_data(None, None))),
-                          ("sync", lambda: FakeCboeFetcher.extract_data(None, None))):
+    check(asyncio.iscoroutinefunction(FakeCboeFetcher.extract_data),
+          "Cboe extract_data stays a coroutine (asyncio.run inside it poisoned the shared HTTP cache)")
+    for mode, call_fn in (("aextract", lambda: asyncio.run(FakeCboeFetcher.aextract_data(None, None))),
+                          ("extract", lambda: asyncio.run(FakeCboeFetcher.extract_data(None, None)))):
         caught = None
         try:
             call_fn()

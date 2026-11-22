@@ -285,6 +285,14 @@ STALE_NOTES = _contextvars.ContextVar("terminal_stale_notes", default=None)     
 CALLER_POOL = _contextvars.ContextVar("terminal_caller_pool", default="ui")     # "x" from composite views, "ui" from direct card calls
 FORCE_REFRESH = _contextvars.ContextVar("terminal_force_refresh", default=False)
 CACHE_STATUS = _contextvars.ContextVar("terminal_cache_status", default=None)
+SUBSTITUTE = _contextvars.ContextVar("terminal_substitute", default=None)     # what really answered, when not the source asked
+
+
+def note_substitute(sources: str, note: str, delayed: str = ""):
+    """This answer came from `sources` (comma-separated): the guard tells the card, which shows it as its Source."""
+    box = SUBSTITUTE.get()
+    if box is not None:
+        box.update(sources=sources, note=note, delayed=delayed)
 
 
 def stale_message(label: str, saved_at: float, now: float | None = None) -> str:
@@ -839,10 +847,6 @@ def install_cboe_chain_symbols(applied: list):
             inner["options"] = cboe_standard_contracts(inner["options"])
         return _orig(query, data, **kwargs)
 
-    def _cboe_403(exc: BaseException) -> bool:
-        txt = str(exc)
-        return "403" in txt or "Forbidden" in txt or "text/html" in txt
-
     _cboe_msg = (
         "Cboe refused the delayed options feed (HTTP 403). "
         "Switch Source to Yahoo Finance or Nasdaq (U.S.), TMX (Canada), or Deribit (crypto)."
@@ -852,19 +856,444 @@ def install_cboe_chain_symbols(applied: list):
         try:
             return await _orig(query, credentials, **kwargs)
         except Exception as e:  # noqa: BLE001
-            if _cboe_403(e):
+            if cboe_refused(e):
                 raise OpenBBError(_cboe_msg) from None
             raise
 
-    def extract_data(query, credentials, _aex=aextract_data, **kwargs):
-        import asyncio
-
-        return asyncio.run(_aex(query, credentials, **kwargs))
-
     F.transform_data = staticmethod(transform_data)
     F.aextract_data = staticmethod(aextract_data)
-    F.extract_data = staticmethod(extract_data)
+    # the coroutine itself, never asyncio.run() around it: that ran each fetch on a throw-away event loop, openbb_cboe's
+    # shared HTTP cache bound to it, and every later Cboe card failed "bound to a different event loop" (2026-11-21)
+    F.extract_data = staticmethod(aextract_data)
     applied.append("Cboe option chains keep OCC symbols and turn upstream 403 HTML blocks into a readable error")
+
+
+def cboe_refused(exc: BaseException) -> bool:
+    """Cboe answered 403 with an HTML page (its delayed_quotes CDN, since 2026-11-21). It is never worked around:
+    the cards below take the same figures from another published source and say so."""
+    txt = str(exc)
+    return "403" in txt or "Forbidden" in txt or "text/html" in txt
+
+
+CBOE_RETRY = 300            # seconds before a refused Cboe feed is asked again
+CHAIN_TTL = 300
+CHAINS_KEPT = 16
+YAHOO_OPTION_INDICES = {"SPX", "NDX", "RUT", "VIX", "XSP", "OEX", "DJX"}
+
+
+def yahoo_option_symbol(symbol: str):
+    """Yahoo's spelling of a Cboe underlying (^SPX, BRK-B); None for text that is not a ticker."""
+    import re
+
+    s = str(symbol or "").strip().upper().lstrip("^")
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9.\-]{0,11}", s):
+        return None
+    return "^" + s if s in YAHOO_OPTION_INDICES else s.replace(".", "-")
+
+
+def yahoo_retry(read, pause: float = 1.0):
+    """read(), up to three times while it is empty or unreadable. yfinance turns a refused crumb (several first requests
+    at once after a start) into an empty answer or a TypeError: VIX read "no options" that way (2026-11-22). A rate
+    limit is another exception and is not retried."""
+    failed = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(pause * attempt)
+        try:
+            out = read()
+        except (TypeError, ValueError, KeyError) as e:
+            failed = e
+            continue
+        if out:
+            return out
+        failed = None
+    if failed:
+        raise failed
+    return None
+
+
+def yahoo_chain(symbol: str):
+    """(rows, regular-session price, its time) or None without listed options. The regular price and its time, not the
+    after-hours ones OpenBB's fetcher keeps: the option quotes stop at the close."""
+    import pandas as pd
+    import yfinance
+
+    ticker = yfinance.Ticker(symbol)
+    frames, info = [], None
+    def read_expiry(expiry):
+        got = ticker.option_chain(expiry)
+        return got if got.calls is not None else None
+
+    for expiry in yahoo_retry(lambda: ticker.options) or ():
+        chain = yahoo_retry(lambda: read_expiry(expiry))
+        if chain is None:           # a chain with a month missing would draw a wrong curve and wrong totals
+            raise ValueError(f"no answer for the {expiry} expiry")
+        info = info or chain.underlying
+        for side, frame in (("call", chain.calls), ("put", chain.puts)):
+            if len(frame):
+                frames.append(frame.assign(option_type=side, expiration=pd.Timestamp(expiry).date()))
+    if not frames:
+        return None
+    spot, stamp = (info or {}).get("regularMarketPrice"), (info or {}).get("regularMarketTime")
+    if not spot or not stamp:
+        raise ValueError("no underlying price or time")
+    rows = pd.concat(frames, ignore_index=True).rename(columns={
+        "contractSymbol": "contract_symbol", "lastTradeDate": "last_trade_time", "lastPrice": "last_trade_price",
+        "openInterest": "open_interest"})
+    for col in ("open_interest", "volume"):
+        rows[col] = rows[col].fillna(0).astype("int64")
+    keep = ["contract_symbol", "expiration", "strike", "option_type", "bid", "ask", "last_trade_price", "last_trade_time",
+            "open_interest", "volume"]
+    return rows[keep], float(spot), pd.Timestamp(int(stamp), unit="s", tz="UTC").tz_convert("America/New_York")
+
+
+_BILL_RATE = {"at": 0.0, "rate": None}
+
+
+def bill_rate():
+    """13-week T-bill yield as a fraction (Yahoo ^IRX, kept 6 h); None when it cannot be read."""
+    import yfinance
+
+    if _BILL_RATE["rate"] is None or time.time() - _BILL_RATE["at"] > 6 * 3600:
+        try:
+            value = float(yfinance.Ticker("^IRX").fast_info["lastPrice"])
+        except Exception as e:  # noqa: BLE001
+            say(f"[options] 13-week bill rate not read: {type(e).__name__}")
+            return None
+        if not 0 <= value < 25:
+            return None
+        _BILL_RATE.update(at=time.time(), rate=value / 100)
+    return _BILL_RATE["rate"]
+
+
+def build_substitute_chain(symbol: str, fetched, rate, today):
+    """(chain the openbb_cboe chart builders accept, note for the card) from yahoo_chain()'s answer."""
+    from openbb_core.app.model.abstract.error import OpenBBError
+    from openbb_core.provider.standard_models.options_chains import OptionsChainsData
+    from pydantic import PrivateAttr
+
+    import option_math
+
+    class SubstituteChain(OptionsChainsData):
+        _frame = PrivateAttr(default=None)
+        _views = PrivateAttr(default_factory=dict)
+
+        @property
+        def dataframe(self):        # OpenBB's version turns an all-blank ask column into a failure that loses DEX and GEX
+            return self._frame.copy()
+
+        def strategies(self, *args, **kwargs):
+            if not self._frame["ask"].notna().any():
+                raise OpenBBError(f"Yahoo Finance has no bid/ask quotes for {symbol} right now, so strategies cannot be "
+                                  "priced. They return in market hours.")
+            return super().strategies(*args, **kwargs)
+
+    rows, spot, quoted_at = fetched
+    df, basis = option_math.analyse_chain(rows, spot, quoted_at, rate or 0.0, today)
+    if df.empty:
+        return None
+    df["underlying_symbol"] = symbol
+    fields = ("underlying_symbol", "underlying_price", "contract_symbol", "expiration", "dte", "strike", "option_type",
+              "open_interest", "volume", "last_trade_price", "bid", "ask", *option_math.CALCULATED)
+
+    def model(part):
+        part = part.reset_index(drop=True)
+        values = part[list(fields)].astype(object)
+        obj = SubstituteChain.model_validate(values.where(values.notna(), None).to_dict("list"))
+        obj._frame = part
+        return obj
+
+    chain = model(df[df["main"]])
+    chain._views["all"] = model(df)
+    priced = option_math.priced_part(df, spot)
+    if not priced.empty:
+        chain._views["priced"] = model(priced)
+    method = "mids" if basis == "mid" else "last trades"       # short: the footer also has to fit the Source line
+    note = (f"Cboe blocked; Yahoo {quoted_at:%Y-%m-%d %H:%M} ET, IV calculated from {method}"
+            + ("" if rate is not None else " at 0% rate"))
+    return chain, note
+
+
+def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bill_rate):
+    """Options analytics (surface, smile, term structure, stats, strategies) when Cboe refuses its chain feed."""
+    import asyncio
+    import importlib
+
+    try:
+        from openbb_cboe.models.options_chains import CboeOptionsChainsFetcher
+        from openbb_cboe.utils.options import data_handler
+        from openbb_core.app.model.abstract.error import OpenBBError
+        from openbb_core.provider.utils.errors import EmptyDataError
+    except ImportError:         # V4's openbb-cboe has no options analytics
+        return
+
+    loaded: dict = {}           # symbol -> (time, chain, note or None)
+    flights: dict = {}
+    refused_until = [0.0]
+    yahoo_slots = threading.BoundedSemaphore(3)
+
+    def substitute(symbol: str, yahoo: str):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        with yahoo_slots:
+            got = fetch(yahoo)
+        return got and build_substitute_chain(symbol, got, get_rate(), datetime.now(ZoneInfo("America/New_York")).date())
+
+    async def build(symbol: str):
+        if time.time() >= refused_until[0]:
+            try:
+                got = await CboeOptionsChainsFetcher.fetch_data({"symbol": symbol.replace("-", ".")}, {})
+                chain = getattr(got, "result", got)
+                if not getattr(chain, "expirations", None):
+                    raise OpenBBError(f"No options available for {symbol}.")
+                return chain, None
+            except EmptyDataError:
+                raise OpenBBError(f"No options available for {symbol}.") from None
+            except Exception as e:  # noqa: BLE001
+                if not cboe_refused(e):
+                    raise
+                refused_until[0] = time.time() + CBOE_RETRY
+        yahoo = yahoo_option_symbol(symbol)
+        if not yahoo:
+            raise OpenBBError(f"No options available for {symbol}.")
+        try:
+            built = await asyncio.to_thread(substitute, symbol, yahoo)
+        except Exception as e:  # noqa: BLE001
+            # not an OpenBBError: the chart routes would report that as "no options for this symbol"
+            raise RuntimeError(f"Cboe refused its options feed and Yahoo Finance is not answering ({type(e).__name__}: "
+                               f"{redact(str(e))[:120]})") from None
+        if not built:
+            raise OpenBBError(f"No options available for {symbol}.")
+        return built
+
+    async def load_symbol(symbol: str, update: bool = False):
+        symbol = str(symbol or "").strip().upper().lstrip("^")
+        hit = loaded.get(symbol)
+        if update or FORCE_REFRESH.get() or not hit or time.time() - hit[0] > CHAIN_TTL:
+            # the cards of a tab ask for the same chain at once: one download serves them all
+            key = (id(asyncio.get_running_loop()), symbol)
+            task = flights.get(key)
+            if task is None:
+                task = flights[key] = asyncio.ensure_future(build(symbol))
+                task.add_done_callback(lambda done: (flights.pop(key, None), done.cancelled() or done.exception()))
+            chain, note = await asyncio.shield(task)
+            hit = loaded[symbol] = (time.time(), chain, note)
+            data_handler.LOADED_SYMBOLS[symbol] = chain             # the expiry and strike menus read it
+            while len(loaded) > CHAINS_KEPT:
+                oldest = min(loaded, key=lambda k: loaded[k][0])
+                loaded.pop(oldest)
+                data_handler.LOADED_SYMBOLS.pop(oldest, None)
+        if hit[2]:
+            note_substitute("Yahoo Finance", hit[2])
+        return hit[1]
+
+    def choices(orig):
+        return lambda symbol: orig(str(symbol or "").strip().lstrip("^"))
+
+    orig_forward, orig_marks = data_handler._implied_forward, data_handler.get_chain_marks
+
+    def implied_forward(records):
+        return orig_forward([r for r in records if r.get("theoretical_price") == r.get("theoretical_price")])    # no NaN
+
+    async def get_chain_marks(symbol, expiration):
+        marks = await orig_marks(symbol, expiration)
+        box = SUBSTITUTE.get()
+        if box:                                     # the payoff's prices are Cboe's optimizer, its marks the substitute's
+            box["sources"] = "Cboe, Yahoo Finance"
+        for mark in marks["contracts"].values():
+            for k, v in list(mark.items()):
+                if v != v:                          # NaN is truthy: openbb_cboe would use it as a price
+                    mark[k] = None
+        return marks
+
+    def view_of(data, name: str):
+        views = getattr(data, "_views", None) if type(data).__name__ == "SubstituteChain" else None
+        if views is None:
+            return data
+        if name not in views:
+            raise OpenBBError("Yahoo Finance returned no option prices recent enough to calculate implied volatility.")
+        return views[name]
+
+    def use_view(module: str, pick):
+        mod = importlib.import_module(f"openbb_cboe.utils.options.{module}")
+        orig = getattr(mod, module)
+
+        def builder(data, *args, **kwargs):
+            name = pick(kwargs)
+            return orig(view_of(data, name) if name else data, *args, **kwargs)
+
+        setattr(mod, module, builder)               # the routes import the builder when they are called
+
+    use_view("create_surface", lambda kw: "priced")
+    use_view("create_smile", lambda kw: "priced")
+    use_view("create_term_structure", lambda kw: "priced" if kw.get("metric", "iv") == "iv" else None)
+    use_view("create_stats", lambda kw: "all")
+
+    optimizer = importlib.import_module("openbb_cboe.utils.options.trade_optimizer")
+    orig_info, orig_ranked = optimizer.get_symbol_info, optimizer.get_strategies
+
+    async def get_symbol_info(symbol, *args, **kwargs):
+        return await orig_info(symbol.replace("-", "."), *args, **kwargs)           # the terminal's BRK-B is Cboe's BRK.B
+
+    async def get_strategies(symbol, *args, **kwargs):
+        return await orig_ranked(symbol.replace("-", "."), *args, **kwargs)
+
+    optimizer.get_symbol_info, optimizer.get_strategies = get_symbol_info, get_strategies
+    data_handler.load_symbol = load_symbol
+    data_handler._implied_forward = implied_forward
+    data_handler.get_chain_marks = get_chain_marks
+    data_handler.get_expirations = choices(data_handler.get_expirations)
+    data_handler.get_strikes = choices(data_handler.get_strikes)
+    applied.append("Cboe options analytics use a labelled Yahoo chain (IV and Greeks calculated) while Cboe refuses its feed")
+
+
+def vix_curve_from_settlements(rows: list) -> list:
+    """Monthly VX contracts (VX/Z6; the weeklies are VX47/X6) of one session as VX1, VX2, ... by expiration."""
+    import re
+
+    monthly = sorted((r for r in rows if r.get("product") == "VX" and re.fullmatch(r"VX/[A-Z]\d+", str(r.get("symbol")))
+                      and r.get("price") and r["price"] > 0), key=lambda r: str(r["expiration"]))
+    return [{"expiration": str(r["expiration"])[:7], "price": float(r["price"]), "symbol": f"VX{i + 1}",
+             "date": str(r["settlement_date"])} for i, r in enumerate(monthly)]
+
+
+# only products whose name is certain; any other root shows its code with a blank name
+CFE_NAMES = {"VX": "Cboe Volatility Index (VX) futures", "VXM": "Mini Cboe Volatility Index (VXM) futures",
+             "VA": "S&P 500 variance futures", "IBHY": "iBoxx iShares $ High Yield Corporate Bond Index futures",
+             "IBIG": "iBoxx iShares $ Investment Grade Corporate Bond Index futures"}
+
+
+def cfe_instruments_from_settlements(rows: list) -> list:
+    return [{"future_root": root, "name": CFE_NAMES.get(root)} for root in sorted({r["product"] for r in rows if r.get("product")})]
+
+
+def install_cboe_settlement_date(applied: list):
+    """openbb_cboe stamps the latest settlement file with today's date: Friday's prices read 2026-11-21 on Saturday.
+    Asking by date, from today back, returns the session the file belongs to."""
+    try:
+        from openbb_cboe.utils import helpers
+
+        orig = helpers.get_settlement_prices
+    except (ImportError, AttributeError):
+        return
+
+    async def get_settlement_prices(settlement_date=None, options=False, archives=False, final_settlement=False, **kwargs):
+        if settlement_date is None and not archives and not final_settlement:
+            settlement_date = helpers.ny_today()
+        return await orig(settlement_date=settlement_date, options=options, archives=archives,
+                          final_settlement=final_settlement, **kwargs)
+
+    helpers.get_settlement_prices = get_settlement_prices
+    applied.append("Cboe futures settlements carry their own session date")
+
+
+# Cboe symbol -> Yahoo's. No yield indices: Cboe quotes TNX at ten times the yield, Yahoo in percent.
+US_INDEX_SUBSTITUTES = {"SPX": "^GSPC", "NDX": "^NDX", "DJI": "^DJI", "RUT": "^RUT", "OEX": "^OEX", "MID": "^MID",
+                        "VIX": "^VIX", "VIX9D": "^VIX9D", "VIX3M": "^VIX3M", "VIX6M": "^VIX6M", "VVIX": "^VVIX",
+                        "VXN": "^VXN", "SKEW": "^SKEW"}
+
+
+def index_snapshot_row(symbol: str, info: dict):
+    """One Cboe-shaped snapshot row from Yahoo's quote; change in percentage points (the transform divides by 100)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    last, prev = info.get("regularMarketPrice"), info.get("regularMarketPreviousClose")
+    if not last:
+        return None
+    stamp = info.get("regularMarketTime")
+    return {"symbol": symbol, "name": info.get("longName") or info.get("shortName") or symbol, "current_price": last,
+            "open": info.get("regularMarketOpen"), "high": info.get("regularMarketDayHigh"),
+            "low": info.get("regularMarketDayLow"), "prev_day_close": prev,
+            "price_change": last - prev if prev else None,
+            "price_change_percent": (last / prev - 1) * 100 if prev else None,
+            "last_trade_time": datetime.fromtimestamp(stamp, ZoneInfo("America/New_York")).replace(tzinfo=None) if stamp else None}
+
+
+def install_cboe_market_fallbacks(applied: list):
+    """VIX curve, futures list and U.S. index snapshots when Cboe refuses delayed_quotes."""
+    import asyncio
+
+    try:
+        from openbb_cboe.models.futures_curve import CboeFuturesCurveFetcher as Curve
+        from openbb_cboe.models.futures_instruments import CboeFuturesInstrumentsFetcher as Instruments
+        from openbb_cboe.models.index_snapshots import CboeIndexSnapshotsFetcher as Snapshots
+        from openbb_cboe.utils import helpers
+        from openbb_core.app.model.abstract.error import OpenBBError
+    except ImportError:
+        return
+
+    orig_curve, orig_list, orig_snap = Curve.aextract_data, Instruments.aextract_data, Snapshots.aextract_data
+
+    async def settlements(day=None):
+        frame = await helpers.get_settlement_prices(settlement_date=day)
+        return frame.astype(object).where(frame.notna(), None).to_dict("records")
+
+    async def curve(query, credentials, _orig=orig_curve, **kwargs):
+        try:
+            return await _orig(query, credentials, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            if not cboe_refused(e):
+                raise
+        if query.symbol == "VX_AM":
+            raise OpenBBError("Cboe refused the mid-morning VX levels (HTTP 403). Choose VX_EOD for settlement prices.")
+        from datetime import date as _date
+
+        days = [_date.fromisoformat(d.strip()[:10]) for d in str(query.date).split(",")] if query.date else [None]
+        points = []
+        for day in days:
+            points += vix_curve_from_settlements(await settlements(day))
+        if not points:
+            raise OpenBBError("Cboe refused the VX levels (HTTP 403) and published no settlement prices for that date.")
+        sessions = ", ".join(sorted({p["date"] for p in points}))
+        note_substitute("Cboe", f"Cboe quotes blocked; monthly settlements of {sessions}")
+        return points
+
+    async def instruments(query, credentials, _orig=orig_list, **kwargs):
+        try:
+            return await _orig(query, credentials, **kwargs)
+        except Exception as e:  # noqa: BLE001  (list_futures reads the 403 page as text, then calls .get on it)
+            if not cboe_refused(e) and not (isinstance(e, AttributeError) and "'str'" in str(e)):
+                raise
+        rows = cfe_instruments_from_settlements(await settlements())
+        if not rows:
+            raise OpenBBError("Cboe refused its futures directory (HTTP 403) and published no settlement prices.")
+        note_substitute("Cboe", "Cboe directory blocked; products from the settlement file")
+        return rows
+
+    def quote(item):
+        import yfinance
+
+        try:
+            return yahoo_retry(lambda: index_snapshot_row(item[0], yfinance.Ticker(item[1]).get_info()))
+        except Exception as e:  # noqa: BLE001
+            say(f"[index snapshots] {item[0]} not read: {type(e).__name__}")
+            return None
+
+    def quotes():
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(4) as pool:
+            return [row for row in pool.map(quote, US_INDEX_SUBSTITUTES.items()) if row]
+
+    async def snapshots(query, credentials, _orig=orig_snap, **kwargs):
+        try:
+            return await _orig(query, credentials, **kwargs)
+        except Exception as e:  # noqa: BLE001
+            if query.region != "us" or not cboe_refused(e):
+                raise
+        rows = await asyncio.to_thread(quotes)
+        if not rows:
+            raise OpenBBError("Cboe refused its index feed and Yahoo Finance is not answering.")
+        note_substitute("Yahoo Finance", f"Cboe blocked; {len(rows)} major indices from Yahoo, not the full list",
+                        "Delayed prices from Yahoo Finance (free feed, not real time)")
+        return rows
+
+    for cls, func in ((Curve, curve), (Instruments, instruments), (Snapshots, snapshots)):
+        cls.aextract_data = staticmethod(func)
+        cls.extract_data = staticmethod(func)
+    applied.append("VIX curve, Cboe futures list and U.S. index snapshots have labelled substitutes for a refused Cboe feed")
 
 
 def bill_id_from_package(package_id):
@@ -2305,6 +2734,18 @@ def apply_fixes():
     except Exception as e:  # noqa: BLE001
         _not_applied("Cboe chain contract symbols", e)
     try:
+        install_cboe_options_fallback(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Cboe options analytics fallback", e)
+    try:
+        install_cboe_settlement_date(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Cboe settlement session date", e)
+    try:
+        install_cboe_market_fallbacks(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Cboe market fallbacks", e)
+    try:
         install_cds_spread_bp(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("CFTC CDS spread in bp", e)
@@ -2641,6 +3082,8 @@ def install_guard(port: str):
             dark = scope.get("path") in DARK_HTML_PATHS
             stale_notes: list = []
             cache_status: list = []
+            substitute: dict = {}
+            sub_tok = SUBSTITUTE.set(substitute)
             stale_tok = STALE_NOTES.set(stale_notes)        # this request's context (each ASGI request runs in its own)
             pool_tok = CALLER_POOL.set("x" if headers.get("x-terminal-pool") == "x" else "ui")
             refresh_tok = FORCE_REFRESH.set(headers.get("x-terminal-refresh", "").strip().lower() in ("1", "true", "yes"))
@@ -2664,6 +3107,11 @@ def install_guard(port: str):
                         hs.append((b"x-terminal-cache", cache_status[0].encode("ascii")))
                         expose.append(b"X-Terminal-Cache")
                     late = delayed_note(scope.get("path", ""), scope.get("query_string") or b"") if msg.get("status", 200) < 400 else ""
+                    if substitute:
+                        late = late and substitute["delayed"]           # never "delayed prices from Cboe" over another source's numbers
+                        hs.append((b"x-terminal-source", stale_header([substitute["sources"]])))
+                        hs.append((b"x-terminal-fallback", stale_header([substitute["note"]])))
+                        expose += [b"X-Terminal-Source", b"X-Terminal-Fallback"]
                     if late:
                         hs.append((b"x-terminal-delayed", stale_header([late])))
                         expose.append(b"X-Terminal-Delayed")
@@ -2728,6 +3176,7 @@ def install_guard(port: str):
                 say(f"ERROR:    {scope.get('path')} -> {type(e).__name__}: {redact(str(e))[:300]}")
                 return None
             finally:
+                SUBSTITUTE.reset(sub_tok)
                 STALE_NOTES.reset(stale_tok)
                 CALLER_POOL.reset(pool_tok)
                 FORCE_REFRESH.reset(refresh_tok)

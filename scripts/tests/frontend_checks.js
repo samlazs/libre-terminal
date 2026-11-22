@@ -942,6 +942,16 @@
         && !footStale.querySelector(".cache-note"),
         "failed-fetch stale note renders warning without .cache-note");
 
+      // a substituted source is named on the card, list answers included (Cboe 403, 2026-11-21)
+      var subList = [{ strike: 100 }]; subList.fallback = "Cboe refused its feed. Yahoo chain";
+      var footSub = document.createElement("div");
+      T.renderTrust(footSub, subList);
+      ok(footSub.textContent.indexOf("Yahoo chain") >= 0, "a list answer shows its substitute note");
+      var subSrc = T.substituteSources("Cboe, Yahoo Finance", "note");
+      ok(T.sourceLabel(subSrc) === "Cboe · Yahoo Finance" && subSrc[1].url === "https://finance.yahoo.com/", "substitute sources are named and linked");
+      var subQuote = T.classifyError("Yahoo Finance has no bid/ask quotes for SPX right now, so strategies cannot be priced.", 400, { source: "Cboe" });
+      ok(subQuote.cls === "message" && /no bid\/ask/.test(subQuote.text), "missing live quotes is explained, not reported as a bug");
+
       var e1NoFree = T.classifyError("Missing credential 'eia_api_key'", 400, { source: "U.S. EIA", provider: "eia", hasFreeOnTab: false });
       var e1WithFree = T.classifyError("Missing credential 'eia_api_key'", 400, { source: "U.S. EIA", provider: "eia", hasFreeOnTab: true });
       var e1PaidNoFree = T.classifyError("402 Payment Required", 402, { source: "FMP", provider: "fmp", hasFreeOnTab: false });

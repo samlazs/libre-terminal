@@ -268,6 +268,10 @@ check(all(db.get("f", {}).get(k, {}).get("formatterFn") == "percent" for k in ("
 check(db.get("h", {}).get("bid") == "Bid (USD)" and db.get("h", {}).get("mark") == "Mark (USD)" and "bid" not in cb.get("h", {}) and "bid" not in tx.get("h", {}),
       "Deribit prices say USD (not BTC); Cboe and TMX headers untouched (TMX quotes in CAD)")
 check(cb["h"]["dte"] == "DTE (full days)" and tx["h"]["dte"] == db["h"]["dte"] == "DTE (calendar)", "DTE headers name each source's convention")
+_to = C.spec({"widgetId": "cboe_options_trade_optimizer_custom_obb", "data": {"table": {"columnsDefs": [
+    {"field": "annualized_return", "cellDataType": "number", "formatterFn": "percent"}]}}}, "cboe/options/trade_optimizer") or {}
+check(_to.get("f", {}).get("annualized_return", {}).get("formatterFn") == "normalizedPercent",
+      "Cboe optimizer annualized 5.4919 reads 549.19% (0.4815 over 32 days x 365 / 32), not 5.49%")
 fr = C.spec({"widgetId": "yfinance_funds_risk_yfinance_obb", "data": {"table": {"columnsDefs": [{"field": "volatility", "cellDataType": "number"}]}}}) or {}
 check(fr.get("f", {}).get("volatility", {}).get("formatterFn") == "normalizedPercent", "Yahoo fund risk volatility 0.155 reads 15.51%")
 yf = chain("derivatives_options_chains_yfinance_obb")     # the chain placed on Company > Options and Derivatives > Chain

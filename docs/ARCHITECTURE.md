@@ -52,6 +52,7 @@ terminal/multpl.py           S&P 500 valuation multiples and fundamentals from m
 terminal/fred_public.py      keyless FRED public CSV series fetcher and cache helper
 terminal/xwidgets.py         widget definitions of those views
 terminal/columns.py          table column layer: headers, formats, default column sets per endpoint
+terminal/option_math.py      implied volatility and Greeks for substitute option chains
 terminal/redact.py           strips key material from logs and error text
 terminal/local_paths.py      where local/ is and what goes in it (the only place those paths are defined)
 terminal/health.json         data functions broken upstream (shown in Data Explorers > Data status)
@@ -150,6 +151,12 @@ Applied in memory at start; no installed file is modified.
   bid/ask mid when both sides are quoted within 1%, else the previous close (a `basis` column says which); for
   precious metals a month more than 3% off a robust line through the curve is left out (stale or off-market quotes).
   The stock fetcher halved one-sided quotes and drew 0.00 for unquoted months.
+- Cboe `delayed_quotes` refused (HTTP 403; never worked around): options analytics load Yahoo's chain at the
+  regular-session price and time and calculate IV and Greeks (`terminal/option_math.py`: parity forward, Black-76,
+  one IV per strike; Yahoo's own IV is a placeholder without live quotes). The VIX curve and futures list come from
+  Cboe's settlement file, U.S. index snapshots from Yahoo. `note_substitute` sends `X-Terminal-Source` and
+  `X-Terminal-Fallback`, which the card shows as its Source and footer note. An async fetcher's `extract_data`
+  must be the coroutine itself: `asyncio.run` inside it binds openbb_cboe's shared HTTP cache to a dead event loop.
 - Request guard: Host allow-list (blocks DNS rebinding), Origin must be the UI (any local host name, case-insensitive),
   requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names that origin only, error
   bodies redacted; `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without
@@ -186,6 +193,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_columns.py`, `test_sources.py`, `test_trust.py`, `test_timezone.py`, `test_news.py`, `test_fred.py`, `test_links.py`, `test_multpl.py` | Column headers/formats/units, source contract & v4 saved-state check, stale/delayed/fallback trust signals, Montreal timezones, news ranking/dedup, keyless FRED CSV, company jump links, multpl.com S&P 500 valuation multiples |
 | `test_medium.py`, `test_low.py`, `test_p4.py` | FRED cache slicing, weekly YoY, STEO forecast split, BIS daily policy, non-trading-day bases, SWR per-symbol history cache, cache eviction |
 | `test_generator.py` | routing by ticker; full build replayed from the catalogs the last live build recorded in `local/cache/catalog-*.json`: coverage, unique and stable ids, renamed tabs, V5-only default build without V4 |
+| `test_cboe_fallback.py` | Black-76 by hand, parity forward, blank-not-zero, substitute loader and chart builders |
 | `test_redact.py`, `test_backend_wrapper.py` | key redaction, stream guard, log redaction, Host/Origin guard |
 | `test_launcher_server.py` | restart policy, stop scope, V5-only default / `--with-v4` / `--skip-v4` CLI, UI server Host/Origin/state/config rules, v4 override validation, corrupt state recovery, ETags, CSP, keys applied on start, cache pruning |
 | `test_health.py`, `test_workflow.py` | relative NY dates, card/choice URL builder, error classifier, secret redaction, mock OECD-429 health run; publishable manifest, snapshots, snapshot diffs, EOL/BOM/hygiene checks, parallel test filter |
