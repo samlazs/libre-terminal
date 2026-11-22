@@ -1,7 +1,18 @@
 @echo off
+title Libre Terminal - Install
 REM Double-click to install the terminal (first time, or to repair/update). Safe to run again.
 REM Downloads Python 3.12 and the data packages into this folder; takes a few minutes the first time.
 REM Options from a command prompt: Install.cmd --with-v4 (also install optional legacy V4 backend), Install.cmd --upgrade
+if not exist "%~dp0scripts\install.ps1" (
+  echo.
+  echo You opened Install.cmd from inside the ZIP file.
+  echo Close this window, right-click the ZIP file, click "Extract All...",
+  echo open the extracted Libre-Terminal folder, and double-click Install.cmd again.
+  echo.
+  pause
+  exit /b 1
+)
+echo Installing Libre Terminal - first run takes 2-5 minutes. Keep this window open...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" %*
 if errorlevel 1 (
   echo.

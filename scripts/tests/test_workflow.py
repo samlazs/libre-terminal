@@ -155,4 +155,33 @@ sample_paths = [Path("test_alpha.py"), Path("test_beta.py"), Path("test_frontend
 check([p.name for p in run_all.select_tests(sample_paths, [], fast=True)] == ["test_alpha.py", "test_beta.py"], "select_tests --fast skips test_frontend")
 check([p.name for p in run_all.select_tests(sample_paths, ["BETA"])] == ["test_beta.py"], "select_tests filters case-insensitively")
 
+# ---- 9. create_release_zip packages clean Windows folder layout
+import zipfile as _zf  # noqa: E402
+
+rel_zip_dst = make_tmp_dir("rel-zip-") / pc.RELEASE_ZIP_NAME
+rel_res = pc.create_release_zip(ROOT, rel_zip_dst)
+check(rel_res["path"].is_file() and rel_res["bytes"] > 100_000 and len(rel_res["sha256"]) == 64, "create_release_zip builds zip and returns sha256")
+with _zf.ZipFile(rel_zip_dst, "r") as zf:
+    names = set(zf.namelist())
+    readme_raw = zf.read("Libre-Terminal/READ-ME-FIRST.txt")
+check(
+    {"Libre-Terminal/Install.cmd", "Libre-Terminal/Start.cmd", "Libre-Terminal/Stop.cmd",
+     "Libre-Terminal/Setup-Keys.cmd", "Libre-Terminal/READ-ME-FIRST.txt",
+     "Libre-Terminal/LICENSE", "Libre-Terminal/NOTICE",
+     "Libre-Terminal/terminal/server.py", "Libre-Terminal/scripts/launcher.py",
+     "Libre-Terminal/config/requirements-v5.lock.txt"} <= names,
+    "release zip includes Windows launchers, READ-ME-FIRST, license, runtime code, and v5 lockfile",
+)
+check(b"\r\n" in readme_raw and b"\n" not in readme_raw.replace(b"\r\n", b""), "READ-ME-FIRST.txt uses Windows CRLF")
+check(
+    not any(
+        n.endswith(".sh")
+        or n.startswith(("Libre-Terminal/docs/", "Libre-Terminal/scripts/tests/", "Libre-Terminal/local/", "Libre-Terminal/.venv"))
+        or n in {"Libre-Terminal/README.md", "Libre-Terminal/.gitignore", "Libre-Terminal/.gitattributes", "Libre-Terminal/ruff.toml"}
+        or not n.startswith("Libre-Terminal/")
+        for n in names
+    ),
+    "release zip wraps cleanly in Libre-Terminal/ and excludes dev/macOS/test clutter",
+)
+
 done("test_workflow")

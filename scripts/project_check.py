@@ -3,6 +3,7 @@
     python scripts/project_check.py check [--live-sources]
     python scripts/project_check.py snapshot [--label NAME] [--force]
     python scripts/project_check.py diff [SNAPSHOT] [--stat] [PATH ...]
+    python scripts/project_check.py release-zip [-o PATH]
 """
 
 from __future__ import annotations
@@ -62,6 +63,53 @@ SKIP_DIR_PARTS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 CRLF_EXTS = {".cmd", ".bat", ".ps1"}
 LF_EXTS = {".py", ".js", ".css", ".html", ".json", ".md", ".sh", ".toml", ".in", ".env", ".txt"}
 TEXT_EXTS = CRLF_EXTS | LF_EXTS
+
+RELEASE_ZIP_NAME = "Libre-Terminal-Windows.zip"
+RELEASE_ZIP_TOP_DIR = "Libre-Terminal"
+WINDOWS_RELEASE_EXCLUDE_FILES = {
+    "install.sh",
+    "start.sh",
+    "stop.sh",
+    "setup-keys.sh",
+    ".gitignore",
+    ".gitattributes",
+    "ruff.toml",
+    "README.md",
+}
+WINDOWS_RELEASE_EXCLUDE_PREFIXES = ("docs/", "scripts/tests/")
+WINDOWS_README_TEXT = """\
+Libre Terminal - Windows Quick Guide
+====================================
+
+No Python, coding tools, or accounts are required.
+
+1. EXTRACT FIRST (important)
+   Make sure you extracted this folder from the ZIP file before running anything.
+   (Right-click the ZIP -> Extract All... -> Extract.)
+
+2. INSTALL (once, takes 2-5 minutes, needs internet & ~1 GB free space)
+   Double-click:  Install.cmd
+   - If Windows shows "Windows protected your PC", click "More info" -> "Run anyway".
+     (This only appears once; Install.cmd unblocks the other scripts automatically.)
+   - Wait until it says "Done. Double-click Start.cmd to open the terminal."
+
+3. LAUNCH
+   Double-click:  Start.cmd
+   - First launch warms initial market data and charts (15-60 seconds), then opens
+     your browser automatically at http://127.0.0.1:6950.
+
+4. STOP / OPTIONAL FREE API KEYS
+   - Double-click  Stop.cmd        to shut down cleanly when finished.
+   - Double-click  Setup-Keys.cmd  later if you want to add free API keys
+     (FRED, EIA, BLS, Congress.gov). Most dashboards work without any keys.
+
+UPDATING FROM AN EARLIER VERSION
+   Stop the old version first (double-click Stop.cmd in the old folder).
+   To keep your saved layouts and API keys, copy the "local" folder from the old
+   folder into this new folder, then double-click Install.cmd and Start.cmd.
+
+Full documentation & updates: https://github.com/samlazs/libre-terminal
+"""
 
 _AI_TERMS = (
     "cla" + "ude",
@@ -177,6 +225,34 @@ def create_snapshot(
             except OSError:
                 pass
     return {"created": True, "path": dst, "files": len(rels), "bytes": dst.stat().st_size}
+
+
+def create_release_zip(root: Path = ROOT, dst: Path | None = None) -> dict:
+    """Package a clean, Windows-focused distribution zip wrapped in Libre-Terminal/."""
+    dst = dst or (local_paths.LOCAL / "releases" / RELEASE_ZIP_NAME)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    rels = [
+        rel
+        for rel in publishable_files(root)
+        if rel.as_posix() not in WINDOWS_RELEASE_EXCLUDE_FILES
+        and not rel.as_posix().startswith(WINDOWS_RELEASE_EXCLUDE_PREFIXES)
+    ]
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+    readme_bytes = WINDOWS_README_TEXT.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(f"{RELEASE_ZIP_TOP_DIR}/READ-ME-FIRST.txt", readme_bytes)
+            for rel in rels:
+                zf.write(root / rel, f"{RELEASE_ZIP_TOP_DIR}/{rel.as_posix()}")
+        os.replace(tmp, dst)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    sha256 = hashlib.sha256(dst.read_bytes()).hexdigest()
+    return {"path": dst, "files": len(rels) + 1, "bytes": dst.stat().st_size, "sha256": sha256}
 
 
 def _matches_filter(rel_str: str, filters: list[str] | None) -> bool:
@@ -479,7 +555,14 @@ def main(argv=None) -> int:
     d.add_argument("--stat", action="store_true", help="show summary counts only")
     d.add_argument("paths", nargs="*", help="optional path filters")
 
+    rz = sub.add_parser("release-zip", help="build the clean Windows user release zip in local/releases/")
+    rz.add_argument("-o", "--output", default="", help="optional output path (defaults to local/releases/Libre-Terminal-Windows.zip)")
+
     a = ap.parse_args(argv)
+    if a.cmd == "release-zip":
+        res = create_release_zip(ROOT, Path(a.output) if a.output else None)
+        print(f"Release zip created: {res['path']} ({res['files']} files, {res['bytes']:,} bytes, sha256={res['sha256']})")
+        return 0
     if a.cmd == "check":
         ok, results = run_checks(ROOT, live_sources=a.live_sources)
         for name, st, issues in results:

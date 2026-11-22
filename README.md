@@ -7,6 +7,19 @@ IMF, OECD, EIA, CFTC and others) through the open-source
 [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB). It works without an account or API key;
 free keys from FRED, BLS, EIA, Congress.gov and FMP add more.
 
+## Download & Run (Windows 10 / 11)
+
+> **[Download Libre Terminal for Windows (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)** &nbsp;·&nbsp; [Latest release notes](https://github.com/samlazs/libre-terminal/releases/latest)
+
+No Python, coding tools, or accounts needed — just an internet connection and ~1 GB of free space:
+
+1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip) above.
+2. **Extract it** — right-click the downloaded ZIP → **Extract All…** → **Extract**. *(Important: do not open files from inside the ZIP.)*
+3. **Install (once)** — open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (takes 2–5 minutes).
+   - If Windows shows *"Windows protected your PC"*, click **More info** → **Run anyway** (only needed once).
+4. **Launch** — double-click **`Start.cmd`**. Wait 15–60 seconds on the first launch while initial data and charts warm up; your browser opens at `http://127.0.0.1:6950`.
+   - Use **`Stop.cmd`** to shut it down cleanly, and **`Setup-Keys.cmd`** later if you want optional free API keys.
+
 > Unofficial project, not affiliated with OpenBB or any data provider. Research tool only: data can be
 > delayed, incomplete or wrong, and nothing here is investment advice. See
 > [License and disclaimer](#license-and-disclaimer).
@@ -20,16 +33,11 @@ free keys from FRED, BLS, EIA, Congress.gov and FMP add more.
 
 ![News situation room](docs/news-situation-room.jpg)
 
-## Quick start
+## Quick start (updating, options & macOS / Linux)
 
-**Windows 10/11** is the officially supported and tested platform. You need an internet connection and about 1 GB of disk (about 1.5 GB if you also opt into the legacy V4 backend with `--with-v4`). Nothing else: the installer fetches [uv](https://docs.astral.sh/uv/), Python 3.12 and the data packages into the project folder.
+**Updating from an earlier Windows download:** double-click **`Stop.cmd`** in your old folder, download and extract the new ZIP above, copy your old `local` folder into the new folder if you want to keep saved layouts and API keys, then run **`Install.cmd`** and **`Start.cmd`**.
 
-**Windows 10 / 11 (supported)**
-
-1. Download the repository (**Code**, **Download ZIP**; right-click the ZIP, **Properties**, tick
-   **Unblock**, then extract it), or `git clone` it.
-2. Double-click **`Install.cmd`** (a few minutes the first time; installs the single V5 backend by default, or run `Install.cmd --with-v4` to also install optional legacy V4 providers).
-3. Double-click **`Start.cmd`** (or `Start.cmd --with-v4` if installed). The browser opens at http://127.0.0.1:6950. **`Stop.cmd`** stops it.
+**Start options (optional):** from a Command Prompt in the `Libre-Terminal` folder, `Start.cmd --no-wait` opens the browser immediately while charts finish warming in the background; `Install.cmd --with-v4` and `Start.cmd --with-v4` add the optional legacy V4 backend (+480 MB for FMP, Finviz, EconDB, Intrinio).
 
 **macOS / Linux (experimental, untested — official support is Windows 10/11 only)**
 
@@ -172,7 +180,9 @@ back. **Start fresh**: stop the terminal and delete `local/`. `TERMINAL_LOCAL_DI
 
 | Problem | What to do |
 |---|---|
-| "Windows protected your PC" or scripts disabled | Use the `.cmd` files; unblock a downloaded ZIP before extracting it. |
+| `"Windows protected your PC"` | Click **More info** → **Run anyway** (only needed once; `Install.cmd` unblocks the other `.cmd` files automatically). |
+| `File won't run / "inside the ZIP"` | Right-click the ZIP → **Extract All…**, then open the extracted `Libre-Terminal` folder. |
+| `Install fails inside OneDrive / long folder path` | Move the extracted `Libre-Terminal` folder to a simple local path like `C:\Libre-Terminal` and double-click `Install.cmd` again. |
 | Install stops with an error | Usually a proxy, firewall or antivirus. Fix it and run the install again; it continues where it stopped. |
 | Port already in use | `Start.cmd --ui-port 7950 --v5-port 7900` (remembered for later starts; add `--v4-port 7901` if using `--with-v4`). |
 | A service is not responding | The first start can take minutes. See `local/logs/`. A backend that stops or freezes is restarted automatically (up to 5 times in 10 minutes); the freeze report is in `local/logs/*-freeze-*.txt`. |

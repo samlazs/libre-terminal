@@ -5,7 +5,11 @@
 # This script only makes sure uv is present (installing it for the current user if needed);
 # the install itself is scripts\launcher.py, shared with macOS/Linux install.sh.
 $root = Split-Path -Parent $PSScriptRoot
-Set-Location $root
+Set-Location -LiteralPath $root
+try {
+    Get-ChildItem -LiteralPath $root -Filter "*.cmd" -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
+    Unblock-File -LiteralPath $PSCommandPath -ErrorAction SilentlyContinue
+} catch {}
 
 function Find-Uv {
     $cmd = Get-Command uv -ErrorAction SilentlyContinue
