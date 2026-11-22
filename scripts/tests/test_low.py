@@ -159,7 +159,7 @@ try:
     eur = next(r for r in c.fx_matrix()["results"] if r["ccy"] == "EUR")
     check(seen[0] <= dt.date(2025, 12, 31) and abs(eur["ytd"] - 0.10) < 1e-12, "1 January: YTD of the year just ended, 1.10 vs 1.00 = +10%")
     # review A6: about four significant figures per cell (JPY 0.0064 USD, USD 155.3 JPY)
-    c.history = lambda syms, start, interval="1d": c.PriceHistory({s: [("2026-12-30", 1.0), ("2026-12-31", 0.0064 if s.startswith("JPY") else 1.10)] for s in syms})
+    c.history = lambda syms, start, interval="1d": c.PriceHistory({s: [("2026-12-30", 1.0), ("2026-12-31", 156.25 if s == "JPY=X" else 1.10)] for s in syms})
     m = {r["ccy"]: r for r in c.fx_matrix()["results"]}
     check(m["JPY"]["_fmt"]["USD"] == {"decimalPlaces": 6} and m["USD"]["_fmt"]["JPY"] == {"decimalPlaces": 2} and m["EUR"]["_fmt"]["USD"] == {"decimalPlaces": 4},
           "cross rates: 0.0064 -> 6 decimals, 156.25 -> 2, 1.10 -> 4")

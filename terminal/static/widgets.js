@@ -169,7 +169,7 @@
       || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release)\b/.test(u)
       || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
       || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 60000;
-    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|chart|snapshot|comps|news|fx_matrix|crypto_vol|cds_indices)\b/.test(u)
+    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|chart|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
       || /[?&]provider=(yfinance|cboe|tmx|nasdaq|deribit|finviz)(&|$)/.test(u)
       || /\/api\/v1\/(yfinance|cboe|tmx|nasdaq|deribit|finviz)\//.test(u)) return 30000;
     return REQUEST_TIMEOUT;

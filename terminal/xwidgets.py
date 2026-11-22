@@ -107,6 +107,13 @@ def widgets():
         _col("symbol", "Ticker", "text", "Yahoo Finance symbol. Click to open it (a company opens in Company, anything else in the Markets chart).", **OPEN_SYMBOL),
         _col("stale", "Last trade", "text", "Shown when a row's last price is more than 4 days older than the rest of the board (halted, delisted or "
              "market closed): its date. That row's 1D change is left blank.", hide=True, showIfAny=True),
+        _col("pair_last", "Last", tip="Currencies board: the market quote and its pair (1.43 USD/CAD = 1.43 Canadian dollars per U.S. dollar).", hide=True),
+        _col("pair_pct", "Quote 1D", tip="Currencies board: change of the quote as written under Last. USD/CAD up = the Canadian dollar fell. "
+             "Not coloured, because up is not always good for the currency named.", formatterFn="normalizedPercent", signed=True, hide=True),
+        _col("pair_ytd", "Quote YTD", tip="Currencies board: this year's change of the quote as written under Last.", formatterFn="normalizedPercent", signed=True, hide=True),
+        dict(_pct("usd_pct", "vs USD 1D", "Currencies board: the named currency against the U.S. dollar since the previous 17:00 New York close "
+                  "(+ = currency stronger). Empty for crosses and the dollar index."), hide=True),
+        dict(_pct("usd_ytd", "vs USD YTD", "Currencies board: the named currency against the U.S. dollar this year (+ = currency stronger)."), hide=True),
         _col("low52", "52W low (close)", hide=True), _col("high52", "52W high (close)", hide=True), _col("as_of", "As of", "dateString", hide=True), _col("note", "Note", "text", hide=True),
     ]
     watch_cols = board_cols[:2] + [_col("currency", "Ccy", "text", "Trading currency (GBp = pence).")] + board_cols[2:]
@@ -398,6 +405,14 @@ def widgets():
            cols=[_col("ccy", "1 unit of", "text", pinned="left")] + [_col(c, c, tip=f"Price in {c}.") for c in FX_MATRIX]
                 + [_pct("chg_1d", "vs USD 1D", "Change of the row currency against the U.S. dollar since the previous close."),
                    _pct("ytd", "vs USD YTD", "Change of the row currency against the U.S. dollar this year."), _col("as_of", "As of", "dateString", hide=True)]),
+        _w("x_fx_moves", "Currency strength vs. pair move", "Separates a currency's own move from the dollar's. Own strength: the average move (geometric, equal weights, "
+           "not trade weighted) against the other seven majors. Against USD only: that one exchange rate, signed so + = currency stronger. Under each currency: the pair as quoted.",
+           "chart", "/x/fx_moves", [_p("period", "Period", "1D", "Change window.", typ="tabs", options=PERIODS)],
+           "Performance", YAHOO, w=20, h=20, raw=True, strip=[PERIOD_STRIP], titlePeriod="period"),
+        _w("x_fx_trend", "Currency strength over time", "One panel per major, on one scale: its own strength against the other seven majors, and its move against the U.S. dollar "
+           "alone (up = currency stronger). Where only the second line moves, it was the dollar that moved.",
+           "chart", "/x/fx_trend", [_p("period", "Period", "3M", "Look-back window.", typ="tabs", options=[p for p in LONG_PERIODS if p["value"] in ("1M", "3M", "6M", "YTD", "1Y")])],
+           "Performance", YAHOO, w=20, h=20, raw=True, strip=[PERIOD_STRIP], titlePeriod="period"),
         _w("x_country_monitor", "Country Monitor", "Latest actuals for the main economies (like Bloomberg ECST, without consensus): real GDP growth, consumer-price inflation, unemployment, "
            "policy rate, 3-month and 10-year rates. Click a country to load it in the country widgets on this dashboard.",
            "table", "/x/country_monitor", [], "Economy", ["OECD", "IMF", "BIS"], w=40, h=16, refetch=3600000, dynamicSource=True,

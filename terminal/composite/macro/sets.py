@@ -133,8 +133,8 @@ MACRO_SETS.update({
                                                                           ("Spain", "IRLTLT01ESM156N", 1), ("United Kingdom", "IRLTLT01GBM156N", 1)]),
     # central banks and currencies
     "cb_balance_sheets": ("Central-bank balance sheets: Fed, ECB, BoJ (indexed)", "", "index", [("Federal Reserve", "WALCL", 1), ("European Central Bank", "ECBASSETSW", 1), ("Bank of Japan", "JPNASSETS", 1)]),
-    "reer": ("Real effective exchange rates (BIS, broad, 2020 = 100)", "", None, [("U.S. dollar", "RBUSBIS", 1), ("Euro", "RBXMBIS", 1), ("Yen", "RBJPBIS", 1), ("Sterling", "RBGBBIS", 1),
-                                                                                ("Renminbi", "RBCNBIS", 1), ("Swiss franc", "RBCHBIS", 1)]),
+    "reer": ("Real effective exchange rates (BIS, 2020 = 100, up = stronger)", "", None, [("U.S. dollar", "RBUSBIS", 1), ("Euro", "RBXMBIS", 1), ("Yen", "RBJPBIS", 1), ("Sterling", "RBGBBIS", 1),
+                                                                                ("Renminbi", "RBCNBIS", 1), ("Swiss franc", "RBCHBIS", 1), ("Canadian dollar", "RBCABIS", 1)]),
     "fx_reserves": ("Foreign-exchange reserves excluding gold", " $bn", None, [("China", "TRESEGCNM052N", 1e-3), ("Japan", "TRESEGJPM052N", 1e-3), ("India", "TRESEGINM052N", 1e-3)]),
 })
 

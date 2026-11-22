@@ -42,8 +42,9 @@ from .markets.boards import (  # noqa: F401
     BOARDS, BOARD_OPTIONS, _resolve_board, board, null_warning, STALE_ROW_DAYS, _mark_stale,
     _with_convention, BP_FMT, HORIZONS, currency_view, FUTURES_UNITS, price_decimals, _quote_row,
     _labels, performance, perf_bars, STYLE_BOX, style_box, BOARD_LABELS, STARTER_WATCHLIST, watchlist,
-    FX_MATRIX, fx_matrix,
+    FX_MATRIX, FX_MATRIX_PAIRS, fx_matrix,
 )
+from .markets.fx import FX_MAJORS, _usd_values, _own_strength, fx_changes, fx_moves, fx_trend  # noqa: F401
 from .markets.chart import CHART_VIEWS, chart  # noqa: F401
 from .rates.curve_sources import (  # noqa: F401
     COUNTRIES, CURVE_SOURCES, CURVE_URLS, CURVE_SHORT, CURVE_KIND, curve_label, FRED_CURVE, curve_source,
@@ -116,7 +117,7 @@ def dispatch(name, params):
         out = dict(out, delayed=DELAYED_YAHOO)          # HANDOFF P2: live prices from a free feed say they are delayed
     return out
 
-DELAYED_VIEWS = {"board", "watchlist", "fx_matrix", "chart", "snapshot", "perf_bars", "performance", "comps"}
+DELAYED_VIEWS = {"board", "watchlist", "fx_matrix", "fx_moves", "fx_trend", "chart", "snapshot", "perf_bars", "performance", "comps"}
 
 DELAYED_YAHOO = "Delayed prices from Yahoo Finance (free feed, not real time)"
 
@@ -134,7 +135,9 @@ def static_sources(name, params=None):
     if name == "style_box":
         return [yahoo_source([s for _, row in STYLE_BOX for s in row], "Russell style ETFs, delayed daily closes")]
     if name == "fx_matrix":
-        return [yahoo_source([c + "USD=X" for c in FX_MATRIX if c != "USD"], "currency quotes")]
+        return [yahoo_source(list(FX_MATRIX_PAIRS.values()), "currency quotes")]
+    if name in ("fx_moves", "fx_trend"):
+        return [yahoo_source([s for s in FX_MAJORS.values() if s], "currency quotes; closes at 17:00 New York")]
     if name == "watchlist":
         return [yahoo_source(_syms(p.get("symbols") or STARTER_WATCHLIST, 80))]
     if name == "earnings_release":
@@ -285,7 +288,7 @@ ROUTES = {
     'search': search, 'watchlist': watchlist, 'chart': chart, 'comps': comps, 'snapshot': snapshot,
     'earnings': earnings, 'earnings_history': earnings_history, 'consensus': consensus,
     'earnings_reports': earnings_reports, 'earnings_release': earnings_release,
-    'country_monitor': country_monitor, 'cpi_history': cpi_history, 'fx_matrix': fx_matrix,
+    'country_monitor': country_monitor, 'cpi_history': cpi_history, 'fx_matrix': fx_matrix, 'fx_moves': fx_moves, 'fx_trend': fx_trend,
     'data_status': data_status, 'news': news_view, 'bank_failures': bank_failures_view,
     'bank_quality': bank_quality_view, 'bank_rssd': bank_rssd_view, 'policy_path': policy_path_view,
     'policy_path_table': policy_path_table_view, 'cds_indices': cds_indices_view,

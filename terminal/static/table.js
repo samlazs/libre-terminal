@@ -559,7 +559,7 @@
       }
       if (typeof v === "number") {
         cls += " n";
-        td.textContent = T.fmtNum(v, def, view.transposed ? 1e6 : 1e9);
+        td.textContent = (def.signed && v > 0 ? "+" : "") + T.fmtNum(v, def, view.transposed ? 1e6 : 1e9);
         if (def.paren && v < 0) cls += " neg";                  // statements: (1,234) in red
         td.title = String(v);
         var rf = def.renderFn;

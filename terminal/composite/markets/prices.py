@@ -74,7 +74,8 @@ _HIST_REVALIDATING: set = set()
 
 
 def _sym_hist_path(sym):
-    return C.CACHE_DIR / f"{C.disk_name('h1d', sym)}.json"
+    prefix = "h1d-ny17" if C.fx_pair(sym) else "h1d"          # FX copies saved before 2026-11-22 hold opening rates as closes
+    return C.CACHE_DIR / f"{C.disk_name(prefix, sym)}.json"
 
 
 def _sym_hist_load(sym, interval):

@@ -68,7 +68,7 @@ def NEWS(w=None, h=None, title=None, groups=None, compact=None, **params):
 def OVB(preset, h):
     """A Markets Summary > Overview board: five columns fit a third of the screen (14 of 17 clipped Symbol/Ccy; review F1).
     Yields keep Chg (basis points), currencies their quote convention."""
-    cols = ["name", "quote", "price", "chg_pct", "ytd"] if preset == "fx" else \
+    cols = ["name", "pair_last", "chg_pct", "ytd"] if preset == "fx" else \
         ["name", "price", "chg", "chg_pct", "ytd"] if preset == "fixed_income" else ["name", "price", "chg_pct", "w1", "ytd"]
     return W("x:board", None, h, params={"preset": preset}, cols=cols)
 
@@ -131,7 +131,8 @@ DASHBOARDS = [
                                   [X("policy_rates", 14, 18), X("policy_rate_history", 13, 18), X("board", 13, 18, preset="fixed_income")],
                                   [M("credit_spreads", 14, 16), M("treasury_yields", 13, 16), M("fed_liquidity", 13, 16)],
                                   [X("board", 20, 14, preset="us_rates"), X("cds_indices", 20, 14)]]),
-        T("FX, Commodities & Crypto", rows=[[X("board", 15, 22, preset="fx"), X("perf_bars", 12, 22, preset="fx", period="1M"), PERF("DX-Y.NYB,EURUSD=X,JPY=X,GBPUSD=X", "1Y", w=13, h=22, title="Normalized Performance: majors")],
+        T("FX, Commodities & Crypto", rows=[[X("board", 15, 25, preset="fx", cols=["name", "pair_last", "chg_pct", "ytd"]),
+                                             X("perf_bars", 12, 25, preset="fx", period="1M", title="Ranking: currencies vs USD"), X("fx_moves", 13, 25, period="1M")],
                                             [X("board", 15, 22, preset="commodities"), X("perf_bars", 12, 22, preset="commodities", period="1M"), PERF("CL=F,GC=F,HG=F,NG=F", "1Y", w=13, h=22, title="Normalized Performance: commodities")],
                                             [X("board", 15, 18, preset="crypto"), PERF("BTC-USD,ETH-USD,SOL-USD", "1Y", w=13, h=18, title="Normalized Performance: crypto"), X("crypto_vol", 12, 18, title="Bitcoin implied vs realised volatility")]]),
         T("Risk & Geopolitics", columns=[
@@ -372,16 +373,17 @@ DASHBOARDS = [
     ], more=["derivatives/futures/*", "cftc/*"]),
 
     # ============================================================ FX
-    D("fx", "Currencies", "fx", "Spot boards, cross-rate matrix, policy-rate differentials, history, real effective rates, reserves, forwards, implied volatility and positioning.", [
+    D("fx", "Currencies", "fx", "Spot boards, currency strength, cross-rate matrix, policy-rate differentials, history, real effective rates, reserves, forwards, implied volatility and positioning.", [
         T("Board", columns=[
-            (16, [X("board", h=26, preset="fx"), X("perf_bars", h=18, preset="fx", period="1M")]),
-            (24, [X("fx_matrix", h=12), PERF("DX-Y.NYB,EURUSD=X,GBPUSD=X,JPY=X", "1Y", h=16, title="Normalized Performance: majors"),
-                  X("policy_rates", h=16, title="Policy rates and differential vs the Fed")]),
-        ], rows=[[NEWS(40, 16, subject="eurusd", title="Currency news", groups=[])]]),
+            (20, [X("board", h=26, preset="fx", cols=["name", "pair_last", "pair_pct", "usd_pct", "usd_ytd"]),
+                  X("perf_bars", h=18, title="Ranking: currencies vs USD", preset="fx", period="1M")]),
+            (20, [X("fx_moves", h=22, period="1D"), X("fx_trend", h=22, period="3M")]),
+        ], rows=[[X("fx_matrix", 40, 14)],
+                 [X("policy_rates", 18, 16, title="Policy rates and differential vs the Fed"), NEWS(22, 16, subject="eurusd", title="Currency news", groups=[])]]),
         T("History & Reference", rows=[[W("currency/price/historical", 26, 20, chart=True, params={"symbol": "EURUSD"}), M("dollar", 14, 20, since="2006")],
                                        [M("reer", 20, 16, since="2010"), M("fx_reserves", 20, 16, since="2010")]],
           auto=["currency/reference_rates", "currency/snapshots", "currency/search"]),
-        T("Forwards, Vol & Positioning", rows=[[W("cftc/cot_index", 40, 16, params={"asset_class": "currencies"}, title="Positioning: currencies (COT positioning index)")]],
+        T("Forwards, Vol & Positioning", rows=[[W("cftc/cot_index", 40, 16, params={"asset_class": "currencies"}, title="Positioning: currencies (COT index, high = long the named currency)")]],
           auto=["cftc/fx_forward_curve", "cftc/fx_forward_points", "cftc/fx_implied_vol", "cftc/fx_forward_trades", "cftc/fx_option_trades"]),
     ], more=["currency/*"]),
 

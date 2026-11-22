@@ -1361,6 +1361,291 @@ def montreal_bar_times(dates, tz=MTL_TZ):
     return to_datetime(dates).dt.tz_localize("UTC").dt.tz_convert(tz).dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
+FX_SYMBOL = r"[A-Z]{3}(?:[A-Z]{3})?=X"
+FX_DAILY_INTERVALS = ("1d", "5d", "1wk", "1mo", "3mo")
+FX_OPEN_AS_CLOSE_SINCE = "2010-08-04"          # earlier daily bars carry a real close (probed 2026-11-22, per pair and month)
+FX_HOURLY_SPANS = ((20, "1mo"), (80, "3mo"), (170, "6mo"), (350, "1y"))          # longer: 2y, all the hourly history Yahoo has
+
+
+def fx_daily_bars(daily, hourly=None):
+    """Daily FX bars that close at 17:00 New York (probed 2026-11-22, 19 pairs over 2 years).
+
+    Yahoo stamps a daily FX bar with its London date but its "close" is that date's 00:00 rate, equal to the open: the
+    last day's move is missing and every change is the day before's (USD/JPY Friday 2026-11-20: 159.707, market close
+    158.512). So: where there are hourly bars (UTC, stamped at their start) a session runs 17:00 to 17:00 New York and
+    closes on its last bar; older days close on the next weekday bar's open, the same instant to within two hours. A day
+    with neither has no known close and is left out, as are ticks printed while the market is shut. Before 2010-08-04
+    Yahoo's close was a real one and is kept: shifting there would pull in its bad opens of 2008 (USD/JPY 107.51 for 102.4)."""
+    import pandas as pd
+
+    days = {}
+    if daily is not None and len(daily):
+        d = daily[pd.to_datetime(daily["date"]).dt.weekday < 5].sort_values("date").to_dict("records")
+        for i, bar in enumerate(d):
+            day = str(bar["date"])[:10]
+            if day < FX_OPEN_AS_CLOSE_SINCE:
+                close = bar["close"]
+            elif i + 1 < len(d):
+                close = d[i + 1]["open"]
+            else:
+                continue
+            days[day] = [bar["open"], max(bar["high"], close), min(bar["low"], close), close]
+    if hourly is not None and len(hourly):
+        h = hourly.dropna(subset=["open", "high", "low", "close"]).sort_values("date")
+        ny = pd.to_datetime(h["date"], utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None)
+        session = (ny + pd.Timedelta(hours=7)).dt.normalize()          # 17:00 New York starts the next date
+        trading = session.dt.weekday < 5                               # Friday 17:00 to Sunday 17:00: shut
+        g = h[trading].groupby(session[trading].dt.strftime("%Y-%m-%d"))
+        agg = g.agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last"))
+        for day, o, hi, lo, close in agg.itertuples(name=None):
+            days[day] = [o, hi, lo, close]
+    return pd.DataFrame([[day, *v, 0] for day, v in sorted(days.items())], columns=["date", "open", "high", "low", "close", "volume"])
+
+
+def fx_resample(days, interval):
+    """Weeks (Monday), months and quarters (first day) from corrected days: Yahoo's own carry the same wrong close."""
+    import pandas as pd
+
+    if interval == "1d" or not len(days):
+        return days
+    freq = {"5d": "W", "1wk": "W", "1mo": "M", "3mo": "Q"}[interval]
+    g = days.groupby(pd.to_datetime(days["date"]).dt.to_period(freq))
+    out = g.agg(open=("open", "first"), high=("high", "max"), low=("low", "min"), close=("close", "last"), volume=("volume", "sum"))
+    out.insert(0, "date", out.index.start_time.strftime("%Y-%m-%d"))
+    return out.reset_index(drop=True)
+
+
+def install_fx_session_closes(applied: list):
+    """Daily/weekly/monthly FX history served through yf_download (boards, /x/ charts, exchange-rate history) gets
+    fx_daily_bars; install_fx_chart_fix routes the TradingView datafeed here too.
+    Installed before the Montreal-time patch, so the hourly bars it asks for are still in UTC."""
+    import datetime as dt
+    import re
+
+    import openbb_yfinance.utils.helpers as yh
+    import pandas as pd
+
+    orig = yh.yf_download
+
+    def per_symbol(data, symbols):
+        if "symbol" in data.columns:
+            return {s: g for s, g in data.groupby("symbol")}
+        return {symbols[0]: data} if len(symbols) == 1 else {}
+
+    def yf_download(symbol, start_date=None, end_date=None, interval="1d", *args, _orig=orig, **kwargs):
+        syms = str(symbol).upper().split(",")
+        fx = [s for s in syms if re.fullmatch(FX_SYMBOL, s)]
+        if str(interval) not in FX_DAILY_INTERVALS or not fx:
+            return _orig(symbol, start_date, end_date, interval, *args, **kwargs)
+        parts, others = [], [s for s in syms if s not in fx]
+        if others:
+            try:
+                rest = _orig(",".join(others), start_date, end_date, interval, *args, **kwargs)
+                parts.append(rest if "symbol" in rest.columns else rest.assign(symbol=others[0]))
+            except Exception as e:  # noqa: BLE001  (no data for the others must not blank the pairs)
+                print(f"fx closes: no bars for {','.join(others)} ({type(e).__name__})", flush=True)
+        today = dt.date.today()
+        start = pd.to_datetime(start_date).date() if start_date else None
+        end = pd.to_datetime(end_date).date() if end_date else None
+        # a past end is applied below (its close needs the following bar); today's or none keeps the running session
+        until = end.isoformat() if end and end < today else "9999"
+        since = start.isoformat() if start else ""
+        try:
+            daily = per_symbol(_orig(",".join(fx), start_date, None, "1d", *args, **kwargs), fx)
+            age = (today - start).days if start else 20
+            span = next((p for limit, p in FX_HOURLY_SPANS if age <= limit), "2y")
+            try:
+                hourly = per_symbol(_orig(",".join(fx), None, None, "1h", period=span, ignore_tz=False), fx)
+            except Exception as e:  # noqa: BLE001  (the daily bars still give every close but the last)
+                print(f"fx closes: no hourly bars for {','.join(fx)} ({type(e).__name__}); latest session left out", flush=True)
+                hourly = {}
+            for s in fx:
+                days = fx_daily_bars(daily.get(s), hourly.get(s))
+                days = days[(days["date"] >= since) & (days["date"] <= until)]
+                if len(days):
+                    parts.append(fx_resample(days, str(interval)).assign(symbol=s))
+        except Exception:
+            if not parts:          # nothing else to answer with
+                raise
+        if not parts:
+            from openbb_core.provider.utils.errors import EmptyDataError
+            raise EmptyDataError()
+        out = pd.concat(parts, ignore_index=True)
+        for col in ("dividends", "capital_gains", "stock_splits"):
+            if col in out:
+                out[col] = out[col].fillna(0)
+        if len(syms) == 1:
+            return out.drop(columns=["symbol"])
+        return out.sort_values(["date", "symbol"], ignore_index=True)
+
+    yh.yf_download = yf_download
+    applied.append("Yahoo FX daily closes at 17:00 New York (were each day's opening rate)")
+
+
+def fx_session_date(epoch) -> str | None:
+    """The FX session a moment belongs to (17:00 to 17:00 New York, dated by its end); None while the market is shut."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    d = (dt.datetime.fromtimestamp(epoch, ZoneInfo("America/New_York")).replace(tzinfo=None) + dt.timedelta(hours=7)).date()
+    return d.isoformat() if d.weekday() < 5 else None
+
+
+def fx_decimals(v) -> int:
+    a = abs(v or 0)          # as the boards (composite price_decimals)
+    return 2 if a >= 50 else 4 if a >= 1 else 5 if a >= 0.01 else 6
+
+
+# The chart front end writes every legend and axis price with two decimals (EUR/USD "1.10 -0.00"). Its two legend
+# formatters (one inside a closure, so only reachable in the page text) read window.__terminalPriceDp instead, and the
+# script keeps that and the axis at the boards' precision while the main series is a currency pair (the symbol can be
+# changed inside the chart, so it is looked at again).
+FX_LEGEND_FORMAT = (r"return Number\(v\)\.toLocaleString\(undefined, *\{ *minimumFractionDigits: 2, "
+                    r"maximumFractionDigits: 2 *\}\);")
+FX_LEGEND_FORMAT_DP = ("var dp = window.__terminalPriceDp || 2; "
+                       "return Number(v).toLocaleString(undefined, {minimumFractionDigits: dp, maximumFractionDigits: dp});")
+FX_PRECISION_SCRIPT = """<script>(function () {
+  var done = null;
+  setInterval(function () {
+    var reg = window.__PYWRY_TVCHARTS__ || {};
+    Object.keys(reg).forEach(function (id) {
+      var e = reg[id], s = e && e.seriesMap && e.seriesMap.main;
+      var info = e && e._resolvedSymbolInfo && e._resolvedSymbolInfo.main, bars = e && e._seriesRawData && e._seriesRawData.main;
+      if (!s || !info || !bars || !bars.length) return;
+      var a = Math.abs(bars[bars.length - 1].close), was = window.__terminalPriceDp || 2;
+      var dp = info.type === "Currency" ? (a >= 50 ? 2 : a >= 1 ? 4 : a >= 0.01 ? 5 : 6) : 2;
+      if (dp === was && (dp === 2 || done === s)) return;
+      window.__terminalPriceDp = dp; done = s;
+      s.applyOptions({ priceFormat: { type: "price", precision: dp, minMove: Math.pow(10, -dp) } });
+      window.dispatchEvent(new CustomEvent("pywry:legend-refresh", { detail: { chartId: id } }));
+    });
+  }, 300);
+})();</script>"""
+
+
+def install_fx_chart_fix(applied: list, tvdf=None, tvn=None):
+    """TradingView chart of a currency pair. Its datafeed has three paths of its own, all wrong for FX: candles from
+    Ticker.history (close = open), a header change from Yahoo's previous close with two decimals (EUR/USD "1.10 +0.00"),
+    and "Market Open" all weekend (Yahoo calls FX 24x7). Candles now come through yf_download, the header counts from
+    the previous 17:00 New York close, and ticks printed while the market is shut are ignored."""
+    import datetime as dt
+    import re
+    from zoneinfo import ZoneInfo
+
+    if tvdf is None:
+        from openbb_yfinance.utils import tvchart_datafeed as tvdf, tvchart_native as tvn
+
+    london = ZoneInfo("Europe/London")          # the zone the chart formats a pair's dates in
+    intervals = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+    state: dict = {}                            # symbol -> the running session and the close before it
+
+    def is_fx(symbol):
+        return bool(re.fullmatch(FX_SYMBOL, str(symbol or "").upper()))
+
+    orig_history = tvdf.yf_fetch_full_history
+
+    def yf_fetch_full_history(symbol, resolution):
+        interval = intervals.get(tvdf.normalize_resolution(resolution))
+        if not interval or not is_fx(symbol):
+            return orig_history(symbol, resolution)
+        import openbb_yfinance.utils.helpers as yh
+
+        try:
+            df = yh.yf_download(symbol, "1990-01-01", None, interval, auto_adjust=False)
+        except Exception as e:  # noqa: BLE001  (no data is shown as no data, never as the uncorrected bars)
+            print(f"fx chart: no {interval} bars for {symbol} ({type(e).__name__})", flush=True)
+            return []
+        return [{"time": int(dt.datetime.fromisoformat(str(day)[:10]).replace(tzinfo=london).timestamp()),
+                 "open": round(float(o), 6), "high": round(float(h), 6), "low": round(float(lo), 6), "close": round(float(c), 6), "volume": 0}
+                for day, o, h, lo, c in df[["date", "open", "high", "low", "close"]].itertuples(index=False, name=None)]
+
+    def emit_header(app, s):
+        def put(slot, text, color=None):
+            app.emit("toolbar:marquee-set-item", {"ticker": slot, "text": text, **({"styles": {"color": color}} if color else {})})
+
+        chg, dp = s["last"] - s["prev"], fx_decimals(s["last"])
+        color = "#26a69a" if chg >= 0 else "#ef5350"
+        put("ws-price", f"{s['last']:,.{dp}f}", color)
+        put("ws-change", f"{'▲' if chg >= 0 else '▼'} {chg:+,.{dp}f} ({chg / s['prev'] * 100:+.2f}%)", color)
+        for slot, key in (("ws-open", "open"), ("ws-high", "high"), ("ws-low", "low")):
+            put(slot, f"{s[key]:,.{dp}f}")
+        put("ws-volume", "—")          # spot FX has no consolidated volume
+        put("ws-session", *session_label())
+
+    def session_label():
+        return ("Market Open", "#26a69a") if fx_session_date(time.time()) else ("Closed", "#787b86")
+
+    orig_seed = tvdf._seed_marquee
+
+    def _seed_marquee(app, symbol):
+        orig_seed(app, symbol)
+        if not is_fx(symbol):
+            return
+        bars = tvdf.BarCache().get(symbol, "1d")
+        if len(bars) < 2:
+            for slot in ("ws-price", "ws-change"):
+                app.emit("toolbar:marquee-set-item", {"ticker": slot, "text": "—"})
+            return
+        b = bars[-1]
+        s = state[symbol.upper()] = {"day": dt.datetime.fromtimestamp(b["time"], london).date().isoformat(), "prev": bars[-2]["close"],
+                                     "last": b["close"], "open": b["open"], "high": b["high"], "low": b["low"]}
+        emit_header(app, s)
+
+    orig_update = tvdf.RealtimeStreamer._update_marquee
+
+    def _update_marquee(self, symbol, msg):
+        if not is_fx(symbol):
+            return orig_update(self, symbol, msg)
+        s, price = state.get(symbol.upper()), msg.get("price")
+        if not s or price is None:
+            return None
+        try:
+            at = float(msg.get("time") or time.time())
+        except (TypeError, ValueError):
+            at = time.time()
+        day = fx_session_date(at / 1000 if at > 1e11 else at)          # Yahoo's stream stamps milliseconds
+        if not day or day < s["day"]:
+            return None
+        px = float(price)
+        if day > s["day"]:
+            s.update(day=day, prev=s["last"], open=px, high=px, low=px)
+        s.update(last=px, high=max(s["high"], px), low=min(s["low"], px))
+        emit_header(self._app, s)
+        return None
+
+    orig_overnight, orig_label = tvdf.is_overnight, tvdf.current_session_label
+    tvdf.yf_fetch_full_history = yf_fetch_full_history
+    tvdf._seed_marquee = _seed_marquee
+    tvdf.RealtimeStreamer._update_marquee = _update_marquee
+    tvdf.is_overnight = lambda epoch, symbol: fx_session_date(epoch) is None if is_fx(symbol) else orig_overnight(epoch, symbol)
+    tvdf.current_session_label = lambda symbol: session_label() if is_fx(symbol) else orig_label(symbol)
+    if tvn is not None:
+        orig_html = tvn.tvchart_widget_html
+
+        async def tvchart_widget_html(symbol: str = "AAPL", interval: str = "1d", theme: str = "dark") -> str:
+            html = re.sub(FX_LEGEND_FORMAT, lambda _: FX_LEGEND_FORMAT_DP, await orig_html(symbol, interval, theme))
+            return html.replace("</body>", f"{FX_PRECISION_SCRIPT}</body>", 1) if "</body>" in html else html + FX_PRECISION_SCRIPT
+
+        tvn.tvchart_widget_html = tvchart_widget_html
+    applied.append("TradingView FX candles, header change and session use 17:00 New York closes")
+
+
+def install_cot_canada(applied: list):
+    """The curated COT universe has five currencies and not the Canadian dollar (CME contract 090741)."""
+    import openbb_cftc.models.cot_index as ci
+    import openbb_cftc.utils.cot_markets as cm
+
+    code = "CFTC_090741"
+    markets = list(cm.COT_MARKETS)
+    if any(m["code"] == code for m in markets):
+        return
+    at = next((i + 1 for i, m in enumerate(markets) if m["label"] == "Franc"), len(markets))
+    markets.insert(at, {"code": code, "label": "Canadian Dollar", "asset_class": "currencies", "contract": "CANADIAN DOLLAR"})
+    cm.COT_MARKETS = tuple(markets)
+    ci.CftcCotIndexFetcher._terminal_cache_rev = "cot_cad"          # CFTC answers are cached on disk
+    applied.append("COT currencies include the Canadian dollar")
+
+
 def install_montreal_times(applied: list):
     """Every time shown is Montreal time (owner, 2026-11-19). Two sources send naive times in another zone (probed
     2026-11-19): Yahoo intraday bars in the exchange's local time (SAP.DE 17:25 = Frankfurt) and Nasdaq Nordic notices in
@@ -2682,6 +2967,10 @@ def apply_fixes():
     except Exception as e:  # noqa: BLE001
         _not_applied("SEC company facts quarters from year-to-date chains", e)
     try:
+        install_fx_session_closes(applied)          # before the Montreal-time patch: it reads hourly bars in UTC
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Yahoo FX daily closes", e)
+    try:
         install_montreal_times(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("Montreal time for Yahoo intraday bars and Nasdaq Nordic notices", e)
@@ -2805,6 +3094,14 @@ def apply_fixes():
         install_tvchart_fix(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("TradingView chart cache & loading indicator", e)
+    try:
+        install_fx_chart_fix(applied)          # after the chart cache, which calls the history function it replaces
+    except Exception as e:  # noqa: BLE001
+        _not_applied("TradingView FX closes", e)
+    try:
+        install_cot_canada(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("COT Canadian dollar", e)
     say("[fixes] " + ("; ".join(applied) if applied else "none applied"))
     return applied
 

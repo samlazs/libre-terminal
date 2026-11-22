@@ -139,6 +139,10 @@ nothing covers it the card says so and names what each source covers.
 Applied in memory at start; no installed file is modified.
 
 - Synchronous fetchers run in worker threads, so one slow source cannot freeze the event loop.
+- Yahoo's daily FX "close" is that date's 00:00 London rate (the open). Histories through `yf_download` close at 17:00
+  New York from hourly bars (last 2 years), older days on the next bar's open, days before 2010-08-04 on Yahoo's own
+  close, which was real then (`fx_daily_bars`, `test_fx.py`). The TradingView datafeed is routed through the same
+  bars, and its header counts from the previous of those closes (`install_fx_chart_fix`).
 - Output streams are guarded (no "I/O operation on closed file" crash), and log records are redacted.
 - Disk cache for slow providers (EIA, FiscalData, Fama-French, CFTC, USDA, BLS, IMF) in `local/cache/backend/`,
   with a bounded wait and background fill.
@@ -240,6 +244,7 @@ terminal/composite/
           figures.py   palette, layout, _note, NBER recession shading
   markets/ prices.py   history, per-symbol SWR disk cache, ohlc, FX conversion
            boards.py   BOARDS, quote rows, performance, style box, watchlist, FX matrix
+           fx.py       currency strength: pair as quoted / vs USD / own strength (vs the other seven majors)
            chart.py    compare chart
   rates/   curve_sources.py  Bundesbank, MoF, BoC, Riksbank, BoE, Tesouro, OECD fetchers
            curves.py   countries, curves, curve table, global yields

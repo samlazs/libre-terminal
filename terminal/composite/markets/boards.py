@@ -48,11 +48,12 @@ BOARDS = {
     # Rows named after a currency show that currency against the dollar (+ = currency stronger), whatever way Yahoo
     # quotes the pair; the "Quote" column gives the market quote. Rows named as a pair (EUR/JPY) are that pair as quoted.
     "fx": ("Currencies", [
-        ("Majors: each currency against the U.S. dollar (+ = currency stronger)", [("U.S. Dollar Index (DXY)", "DX-Y.NYB"), ("Euro", "EURUSD=X"), ("British Pound", "GBPUSD=X"),
+        ("Dollar index (+ = USD stronger)", [("U.S. Dollar Index (DXY)", "DX-Y.NYB")]),
+        ("Majors vs USD (+ = currency stronger)", [("Euro", "EURUSD=X"), ("British Pound", "GBPUSD=X"),
                            ("Japanese Yen", "JPY=X"), ("Swiss Franc", "CHF=X"), ("Canadian Dollar", "CAD=X"), ("Australian Dollar", "AUDUSD=X"), ("New Zealand Dollar", "NZDUSD=X")]),
-        ("Emerging: each currency against the U.S. dollar (+ = currency stronger)", [("Chinese Yuan", "CNY=X"), ("Indian Rupee", "INR=X"), ("Brazilian Real", "BRL=X"), ("Mexican Peso", "MXN=X"),
+        ("Emerging vs USD (+ = currency stronger)", [("Chinese Yuan", "CNY=X"), ("Indian Rupee", "INR=X"), ("Brazilian Real", "BRL=X"), ("Mexican Peso", "MXN=X"),
                              ("South African Rand", "ZAR=X"), ("Turkish Lira", "TRY=X"), ("Korean Won", "KRW=X")]),
-        ("Crosses", [("EUR/JPY", "EURJPY=X"), ("EUR/GBP", "EURGBP=X"), ("EUR/CHF", "EURCHF=X"), ("GBP/JPY", "GBPJPY=X"), ("AUD/JPY", "AUDJPY=X")]),
+        ("Crosses (+ = first currency stronger)", [("EUR/JPY", "EURJPY=X"), ("EUR/GBP", "EURGBP=X"), ("EUR/CHF", "EURCHF=X"), ("GBP/JPY", "GBPJPY=X"), ("AUD/JPY", "AUDJPY=X")]),
     ]),
     "commodities": ("Commodities (front-month futures)", [
         ("Energy", [("WTI Crude", "CL=F"), ("Brent Crude", "BZ=F"), ("Natural Gas (U.S.)", "NG=F"), ("Natural Gas (Europe TTF)", "TTF=F"), ("Gasoline", "RB=F"), ("Heating Oil", "HO=F"), ("Uranium (physical trust)", "U-UN.TO")]),
@@ -170,12 +171,31 @@ def board(preset="us_equity", symbols=None, **_):
         if title:
             rows.append({"_section": title})
         for label, s in items:
-            rows.append(C._quote_row(label, s, hist.get(s) or [], divs.get(s) if basis == "total" else None))
+            row = C._quote_row(label, s, hist.get(s) or [], divs.get(s) if basis == "total" else None)
+            if preset == "fx" and not symbols and row.get("price") is not None:
+                _fx_columns(row, s, hist[s])
+            rows.append(row)
     out = C._with_convention({"results": C._mark_stale(rows), "sources": [C.yahoo_source(syms)]}, syms, basis)
+    if preset == "fx" and not symbols:          # no distributions to speak of: say which closes the changes run between
+        days = [r["as_of"][:10] for r in rows if r.get("as_of")]
+        if days:
+            out["convention"] = f"Closes at 17:00 New York, to {max(days)}"
     warn = C.null_warning(rows)
     if warn:
         out["warning"] = warn
     return out
+
+
+def _fx_columns(row, s, ser):
+    """Currencies board: the pair as quoted and the currency against the dollar, each in a column that says so."""
+    row.update(pair_last=row["price"], pair_pct=ser[-1][1] / ser[-2][1] - 1, pair_ytd=C._ret(ser, "YTD"), usd_pct=None, usd_ytd=None)
+    pair = C.fx_pair(s)
+    dp = C.price_decimals(row["price"])
+    if 0.1 <= abs(row["price"]) < 1:          # pairs are quoted to the pip (0.6623 AUD/USD): the pair beside it needs the room
+        dp = 4
+    row["_fmt"]["pair_last"] = {"decimalPlaces": dp, "suffix": " " + C.fx_pair_label(s) if pair else ""}
+    if pair and "USD" in pair:          # a cross and the dollar index are not a currency against the dollar
+        row.update(usd_pct=row["chg_pct"], usd_ytd=row["ytd"])
 
 
 def null_warning(rows, share=0.5):
@@ -201,6 +221,7 @@ def _mark_stale(rows):
     for r in rows:
         if r.get("as_of") and (newest - dt.date.fromisoformat(r["as_of"][:10])).days > STALE_ROW_DAYS:
             r.update(stale=r["as_of"][:10], chg=None, chg_pct=None)
+            r.update({k: None for k in ("pair_pct", "usd_pct") if k in r})
     return rows
 
 
@@ -361,6 +382,9 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
     period = str(period or "1D").upper()
     sections = C._resolve_board(preset, symbols)
     items = [(label, s) for _, its in sections for label, s in its]
+    vs_usd = preset == "fx" and not symbols          # one measure only: DXY and the crosses are not a currency against the dollar
+    if vs_usd:
+        items = [(label, s) for label, s in items if "USD" in (C.fx_pair(s) or ())]
     hist = C.history([s for _, s in items], dt.date.today() - dt.timedelta(days=410))
     yields = [(label, s) for label, s in items if C.is_yield(s)]
     bp = bool(yields) and len(yields) == len(items)          # a board of yields ranks changes in basis points
@@ -387,15 +411,23 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
     lay["xaxis"].update({"ticksuffix": unit, "showgrid": True, "gridcolor": C.INK["grid"], "zeroline": True, "zerolinecolor": C.INK["axis"]})
     lay["yaxis"].update({"showgrid": False, "tickfont": {"color": C.INK["text2"]}})
     lay["bargap"] = 0.3
-    text = "; ".join(([] if bp else [C.CONVENTION_SHORT[basis]]) + (["Not ranked (yields; see the board for their change in bp): " + ", ".join(left_out)] if left_out else []))
+    if vs_usd:          # under the axis, where it cannot cover the lowest bar, and room for the values past both ends
+        xs = [0.0] + [v for _, v in vals]
+        pad = (max(xs) - min(xs) or 1) * 0.30          # a value label is up to a third of a narrow card's plot
+        lay["margin"]["b"] = 40
+        lay["xaxis"].update(range=[min(xs) - (pad if min(xs) < 0 else 0), max(xs) + (pad if max(xs) > 0 else 0)],
+                            title={"text": "Against USD · right = stronger", "font": {"size": 10}})
+    text = "; ".join(([] if bp or vs_usd else [C.CONVENTION_SHORT[basis]]) + (["Not ranked (yields; see the board for their change in bp): " + ", ".join(left_out)] if left_out else []))
     if text:
         lay["annotations"] = [{"text": text, "xref": "paper", "yref": "paper", "x": 1, "y": 0,
                                "xanchor": "right", "showarrow": False, "font": {"color": C.INK["muted"], "size": 10}}]
     fmt = (lambda v: f"{v:+.0f} bp") if bp else (lambda v: f"{v:+.2f}%")
+    longest = max(abs(v) for _, v in vals)          # currencies: the longest bars carry their value inside, clear of the names
+    where = ["inside" if longest and abs(v) >= 0.75 * longest else "outside" for _, v in vals] if vs_usd else "outside"
     return {"data": [{
         "type": "bar", "orientation": "h", "y": [v[0] for v in vals], "x": [round(v[1], 2) for v in vals],
         "marker": {"color": [C.UP if v[1] >= 0 else C.DOWN for v in vals]},
-        "text": [fmt(v[1]) for v in vals], "textposition": "outside", "textfont": {"color": C.INK["text2"], "size": 11}, "cliponaxis": False,
+        "text": [fmt(v[1]) for v in vals], "textposition": where, "textfont": {"color": C.INK["text2"], "size": 11}, "cliponaxis": False,
         "hovertemplate": "%{y}: %{x:+.2f}" + unit + "<extra></extra>",
     }], "layout": lay}
 
@@ -444,16 +476,20 @@ def watchlist(symbols=None, list=None, **_):  # noqa: A002
 # ---------------------------------------------------------------- currency cross matrix (Bloomberg FXC)
 FX_MATRIX = ["USD", "EUR", "JPY", "GBP", "CHF", "CAD", "AUD", "NZD", "CNY"]
 
+# the board's own symbols, so a change reads the same on both cards (Yahoo rounds JPYUSD=X to four figures)
+FX_MATRIX_PAIRS = {c: c + ("USD=X" if c in ("EUR", "GBP", "AUD", "NZD") else "=X") for c in FX_MATRIX if c != "USD"}
+
 
 def fx_matrix(**_):
     """Cross rates of the major currencies: each row is one unit of that currency priced in the column currency."""
-    pairs = {c: c + "USD=X" for c in FX_MATRIX if c != "USD"}
     today = C._today()
     # YTD needs the close of the year before the last bar's year: early in January the last bar can still be 31 Dec
-    hist = C.history(list(pairs.values()), dt.date(today.year - (2 if today.timetuple().tm_yday <= 10 else 1), 12, 20))
+    hist = C.history(list(FX_MATRIX_PAIRS.values()), dt.date(today.year - (2 if today.timetuple().tm_yday <= 10 else 1), 12, 20))
     usd = {"USD": [("", 1.0)]}
-    for c, p in pairs.items():
+    for c, p in FX_MATRIX_PAIRS.items():
         ser = hist.get(p) or []
+        if C.fx_pair(p)[0] == "USD":
+            ser = C._invert(ser)
         if len(ser) >= 2:
             usd[c] = ser
     if len(usd) < 3:
