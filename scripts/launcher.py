@@ -63,6 +63,7 @@ ENVS = {"v5": ".venv-v5", "v4": ".venv-v4"}
 NAMES = {"v5": "Data backend (OpenBB Platform 5)", "v4": "Legacy data backend (OpenBB 4.7)", "ui": "Terminal UI"}
 PROBE = {"v5": "/", "v4": "/", "ui": "/api/config"}
 START_TIMEOUT = 300                     # seconds; the very first start builds OpenBB's command index
+WARM_WAIT_TIMEOUT = 90                  # seconds to wait for initial landing data and charts before opening the browser
 
 FREE_KEYS = [
     ("FRED", "800k+ U.S. and international macro series, credit spreads, commodity spot, SLOOS", "https://fredaccount.stlouisfed.org/apikeys"),
@@ -218,7 +219,7 @@ def cmd_install(a):
         lock = ROOT / "config" / f"requirements-{env}.lock.txt"
         if not lock.exists():
             fail(f"{lock.relative_to(ROOT)} is missing.", "Restore it from the repository (git checkout -- config) or run with --upgrade.")
-        run_step([uv, "pip", "sync", "--python", py, lock], f"Installing packages into {ENVS[env]}", net_hint)
+        run_step([uv, "pip", "sync", "--compile-bytecode", "--python", py, lock], f"Installing packages into {ENVS[env]}", net_hint)
         say("  Preparing OpenBB (builds its command index; up to a minute)...")
         run_step([py, "-c", "from openbb import obb; print('  providers:', len(obb.coverage.providers), ' commands:', len(obb.coverage.commands))"],
                  f"Loading OpenBB in {ENVS[env]}", "Run the install again; if it keeps failing, delete the " + ENVS[env] + " folder and retry.", env=child_env())
@@ -421,6 +422,66 @@ def apply_keys_if_changed(running: bool) -> None:
         warn("API keys changed while the data backends were running: stop and start the terminal to use them.")
 
 
+def wait_for_warm(port: int, timeout: float = WARM_WAIT_TIMEOUT, poll: float = 1.0) -> dict | None:
+    """Wait for phase-1 landing caches & charts before opening the browser, printing live progress."""
+    url = f"http://{HOST}:{port}/api/warm"
+    started = time.time()
+    deadline = started + timeout
+    announced = False
+    reported: set[str] = set()
+    last_tick = started
+    last_data: dict | None = None
+
+    def _report_steps(data: dict) -> bool:
+        progressed = False
+        for st in data.get("steps") or []:
+            if st.get("phase") != "landing":
+                continue
+            sid = st.get("id")
+            state = st.get("state")
+            if sid and sid not in reported and state in ("done", "failed"):
+                reported.add(sid)
+                progressed = True
+                label = st.get("label") or sid
+                if state == "done":
+                    ok(f"{label} ({(st.get('ms') or 0) / 1000:.1f} s)")
+                else:
+                    warn(f"{label} (will retry in UI)")
+        return progressed
+
+    while True:
+        data = None
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except (OSError, ValueError, urllib.error.URLError):
+            data = None
+        if isinstance(data, dict):
+            last_data = data
+            if data.get("landing_ready"):
+                if announced:
+                    _report_steps(data)
+                    elapsed = data.get("elapsed_s") if data.get("elapsed_s") is not None else (time.time() - started)
+                    ok(f"Initial data ready ({elapsed:.0f} s); secondary caches continue in the background.")
+                return data
+            if not announced:
+                say("Preparing initial market data and charts (first start fills the local cache)...")
+                announced = True
+                last_tick = time.time()
+            if _report_steps(data):
+                last_tick = time.time()
+            elif time.time() - last_tick >= 12:
+                cur = data.get("current") or "building caches"
+                elapsed = data.get("elapsed_s") if data.get("elapsed_s") is not None else (time.time() - started)
+                say(f"  ... still preparing: {cur} ({elapsed:.0f} s)")
+                last_tick = time.time()
+        if time.time() >= deadline:
+            if announced or last_data is not None:
+                warn(f"Still building initial caches after {int(timeout)} s; opening the terminal now (cards finish loading automatically).")
+            return last_data
+        time.sleep(poll)
+
+
 def cmd_start(a):
     p = resolve_ports(a)
     prune_local()
@@ -489,6 +550,8 @@ def cmd_start(a):
     # Without V4 (default, or down this time) build anyway when there is no previous set to fall back on.
     if up.get("v5") and (up.get("v4") or "v4" not in services or not local_paths.DASHBOARDS_FILE.exists()):
         rebuild_dashboards(p, quiet=True, with_v4=bool(up.get("v4")))
+    if up.get("ui") and up.get("v5") and not getattr(a, "no_wait", False):
+        wait_for_warm(p["ui"])
     url = f"http://{HOST}:{p['ui']}"
     say(f"\nTerminal: {url}")
     if up.get("ui") and not a.no_browser:
@@ -823,6 +886,7 @@ def main():
     s.add_argument("--skip-v4", action="store_true", help="backward-compatible alias (V5-only is now the default)")
     s = sub.add_parser("start", parents=[ports], help="start everything that is not running (V5 + UI default; --with-v4 adds legacy V4)")
     s.add_argument("--no-browser", action="store_true")
+    s.add_argument("--no-wait", action="store_true", help="open the browser right away without waiting for initial data/chart warming")
     s.add_argument("--with-v4", action="store_true", help="also start the optional legacy V4 backend")
     s.add_argument("--skip-v4", action="store_true", help="backward-compatible alias (V5-only is now the default)")
     s = sub.add_parser("stop", parents=[ports], help="stop all or selected service(s)")
@@ -830,6 +894,7 @@ def main():
     s = sub.add_parser("restart", parents=[ports], help="restart all or selected service(s) (e.g. restart ui)")
     s.add_argument("service", nargs="?", default="all", choices=["all", "ui", "v5", "v4", "backends"])
     s.add_argument("--no-browser", action="store_true")
+    s.add_argument("--no-wait", action="store_true", help="skip waiting for initial data/chart warming after restart")
     s.add_argument("--with-v4", action="store_true", help="also start/restart the optional legacy V4 backend")
     s.add_argument("--skip-v4", action="store_true", help="backward-compatible alias (V5-only is now the default)")
     s.add_argument("--dashboards", action="store_true", help="rebuild local/dashboards.json during restart")

@@ -92,7 +92,7 @@ from .equity.filings import (  # noqa: F401
     _period_pts, ratio_pct, combine, yoy_pct, compare,
 )
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
-from .warm import _safe, warm  # noqa: F401
+from .warm import _safe, warm, warm_status  # noqa: F401
 
 def dispatch(name, params):
     fn = ROUTES.get(name)

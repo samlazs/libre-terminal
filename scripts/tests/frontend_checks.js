@@ -998,6 +998,72 @@
     }
   })();
 
+  // ---- UX pre-warm banner, slow-source retry backoff & non-disruptive backend arrival
+  (function () {
+    ok(Array.isArray(T.SLOW_RETRY_DELAYS) && T.SLOW_RETRY_DELAYS.length >= 3 && T.SLOW_RETRY_DELAYS[0] >= 10, "slow-source auto-retry schedule exported");
+    ok(/15 s/.test(T.slowRetryMessage(15)), "slowRetryMessage formats countdown clearly");
+
+    var keepWarm = T.S.warm;
+    var wBan = document.getElementById("warm-banner"), wSt = document.getElementById("warm-status");
+    try {
+      T.paintWarm({ phase: "landing", done: 2, total: 4, current: "Market news" });
+      ok(wBan && !wBan.classList.contains("hidden") && /2\/4/.test(wBan.textContent) && wSt && !wSt.classList.contains("hidden"), "paintWarm shows banner & sidebar status during landing phase");
+      T.paintWarm({ phase: "background", bg_done: 1, bg_total: 4 });
+      ok(wBan.classList.contains("hidden") && !wSt.classList.contains("hidden") && /1\/4/.test(wSt.textContent), "paintWarm hides banner and shows subtle sidebar pill in background phase");
+      T.paintWarm({ phase: "ready" });
+      ok(wBan.classList.contains("hidden") && wSt.classList.contains("hidden"), "paintWarm clears indicators when ready");
+      T.paintWarm({ phase: "idle" });
+      ok(wBan.classList.contains("hidden") && wSt.classList.contains("hidden"), "paintWarm clears indicators when idle");
+    } finally {
+      T.paintWarm(keepWarm || null);
+    }
+
+    var canvasEl = document.getElementById("canvas");
+    var keepCurW = T.S.cur, keepTabW = T.S.tabId, keepCardsW = T.S.cards, keepWidgetsW = T.S.widgets,
+      keepStateW = T.S.state, keepByIdW = T.S.byId, keepGridW = T.S.grid;
+    var keepCanvasChildren = canvasEl ? [].slice.call(canvasEl.childNodes) : [];
+    try {
+      var missingItem = { uid: "m1", backend: "v5", widgetId: "w_rec", x: 0, y: 0, w: 6, h: 6, manual: "Click to load", params: {} };
+      var healthyItem = { uid: "h1", backend: "v5", widgetId: "w_ok", x: 6, y: 0, w: 6, h: 6, params: {} };
+      var missingCard = T.missingWidget(missingItem, function () {}, { id: "v5", name: "V5", up: false });
+      var healthyNode = document.createElement("div");
+      healthyNode.className = "w";
+      var healthyRetried = 0;
+      var replacedUids = [];
+      var healthyCard = {
+        node: healthyNode, item: healthyItem, def: null, missing: false, backend: "v5",
+        retryIfFailed: function () { healthyRetried++; }, destroy: function () {}
+      };
+      canvasEl.appendChild(missingCard.node);
+      canvasEl.appendChild(healthyNode);
+      T.S.cur = { id: "d:test", name: "Test", groups: [], tabs: [{ id: "t1", name: "T1", items: [missingItem, healthyItem] }] };
+      T.S.tabId = "t1";
+      T.S.state = { v: 4, dashboards: {}, groups: {}, view: {}, libsel: {}, srcsel: {}, colsel: {}, cardview: {}, ui: {} };
+      T.S.byId = Object.assign({}, keepByIdW, { v5: { id: "v5", name: "V5", url: "http://127.0.0.1:6900", up: true } });
+      T.S.grid = {
+        replace: function (it, node) {
+          replacedUids.push(it.uid);
+          if (missingCard.node.parentNode) missingCard.node.parentNode.replaceChild(node, missingCard.node);
+        },
+        remove: function () {},
+        layout: function () {}
+      };
+      T.S.cards = [missingCard, healthyCard];
+      T.S.widgets = Object.assign({}, keepWidgetsW, {
+        v5: { w_rec: { widgetId: "w_rec", name: "Recovered", endpoint: "/api/v1/none", type: "table", params: [] } }
+      });
+      T.applyBackendArrival({ id: "v5", name: "V5", up: true });
+      var replacedMissing = T.S.cards.filter(function (c) { return c.item && c.item.uid === "m1"; })[0];
+      ok(replacedUids.join() === "m1" && replacedMissing && !replacedMissing.missing, "applyBackendArrival replaces only previously missing card");
+      ok(healthyNode.parentNode === canvasEl && healthyRetried === 1, "applyBackendArrival preserves healthy card DOM without tearing it down");
+    } finally {
+      (T.S.cards || []).forEach(function (c) { if (c && c.destroy) try { c.destroy(); } catch (e) {} });
+      T.S.cur = keepCurW; T.S.tabId = keepTabW; T.S.cards = keepCardsW; T.S.widgets = keepWidgetsW;
+      T.S.state = keepStateW; T.S.byId = keepByIdW; T.S.grid = keepGridW;
+      if (canvasEl) { canvasEl.textContent = ""; keepCanvasChildren.forEach(function (n) { canvasEl.appendChild(n); }); }
+    }
+  })();
+
   console.log("frontend checks: " + n + " passed");
   return n;
 })(window.T);

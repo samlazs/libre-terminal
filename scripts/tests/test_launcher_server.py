@@ -357,6 +357,119 @@ not_txt = not_raw.decode("utf-8")
 check(not not_raw.startswith(b"\xef\xbb\xbf") and b"\r" not in not_raw, "NOTICE is UTF-8 without BOM and pure LF")
 check("Libre Terminal" in not_txt and "Open " + "Terminal" not in not_txt, "NOTICE uses Libre Terminal and has no old name")
 
+
+def _test_warm_and_install():
+    import http.server as _hs
+    import importlib as _imp
+    import inspect as _ins
+    import subprocess as _sp
+    import sys as _sys
+    import threading as _th
+
+    for _p in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "terminal")):
+        if _p not in _sys.path:
+            _sys.path.insert(0, _p)
+    import composite  # noqa: E402
+    import launcher  # noqa: E402
+
+    _cw = _imp.import_module("composite.warm")
+
+    _st_warm, _body_warm = req("GET", "/api/warm")
+    _w0 = json.loads(_body_warm)
+    check(
+        _st_warm == 200
+        and isinstance(_w0, dict)
+        and {"phase", "landing_ready", "done", "total", "bg_done", "bg_total"} <= set(_w0),
+        "GET /api/warm returns structured progress JSON",
+    )
+
+    _calls = []
+    _orig = {}
+    _stubs = {
+        "history": lambda syms, *_a, **_kw: _calls.append(("history", len(syms))) or {},
+        "watchlist": lambda *_a, **_kw: _calls.append(("watchlist",)) or [],
+        "board": lambda preset="us_equity", *_a, **_kw: _calls.append(("board", preset)) or {},
+        "performance": lambda syms="", *_a, **_kw: _calls.append(("performance", syms)) or {},
+        "style_box": lambda *_a, **_kw: _calls.append(("style_box",)) or {},
+        "news_view": lambda **_kw: _calls.append(("news",)) or {},
+        "global_yields": lambda *_a, **_kw: _calls.append(("global_yields",)) or {},
+        "policy_rates": lambda *_a, **_kw: _calls.append(("policy_rates",)) or {},
+        "yield_curves": lambda *_a, **_kw: _calls.append(("yield_curves",)) or {},
+        "_gpr": lambda *_a, **_kw: _calls.append(("gpr",)) or {},
+        "_chokepoints": lambda *_a, **_kw: _calls.append(("chokepoints",)) or {},
+        "_eia_key": lambda: "",
+        "_eia_one": lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("EIA fetched without key")),
+        "http_json": lambda url, *_a, **_kw: _calls.append(("http_json", url)) or {"ok": True, "bars": 250},
+    }
+    for _k, _v in _stubs.items():
+        _orig[_k] = getattr(composite, _k)
+        setattr(composite, _k, _v)
+    try:
+        _cw._reset_warm_state()
+        _t1 = _cw.warm()
+        _t2 = _cw.warm()
+        check(_t1 is _t2 and _t1 is not None, "composite.warm() is idempotent and returns active thread")
+        _t1.join(timeout=10)
+        _st = _cw.warm_status()
+        check(
+            _st["phase"] == "ready"
+            and _st["landing_ready"] is True
+            and _st["done"] == _st["total"] == 4
+            and _st["bg_done"] == _st["bg_total"] == 4
+            and all(s["state"] == "done" for s in _st["steps"]),
+            "composite.warm() finishes landing + background phases cleanly",
+        )
+        check(
+            any(c[0] == "http_json" and "/_terminal/warm_chart?symbol=%5EGSPC" in c[1] for c in _calls)
+            and any(c[0] == "performance" for c in _calls)
+            and any(c[0] == "style_box" for c in _calls),
+            "composite.warm() pre-warms TradingView chart, performance, and style_box",
+        )
+    finally:
+        for _k, _v in _orig.items():
+            setattr(composite, _k, _v)
+        _cw._reset_warm_state()
+
+    _responses = [
+        {"phase": "landing", "landing_ready": False, "done": 2, "total": 4, "current": "Market news"},
+        {"phase": "background", "landing_ready": True, "done": 4, "total": 4, "current": ""},
+    ]
+    _idx = {"n": 0}
+
+    class _MockWarmHandler(_hs.BaseHTTPRequestHandler):
+        def do_GET(self):
+            i = min(_idx["n"], len(_responses) - 1)
+            _idx["n"] += 1
+            body = json.dumps(_responses[i]).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_a):
+            pass
+
+    _ms = _hs.ThreadingHTTPServer(("127.0.0.1", 0), _MockWarmHandler)
+    _th.Thread(target=_ms.serve_forever, daemon=True).start()
+    try:
+        _res_ok = launcher.wait_for_warm(_ms.server_address[1], timeout=5, poll=0.02)
+        check(bool(_res_ok and _res_ok.get("landing_ready") is True), "wait_for_warm waits until landing_ready transitions True")
+        _responses[:] = [{"phase": "landing", "landing_ready": False, "done": 0, "total": 4, "current": "Charts"}]
+        _idx["n"] = 0
+        _res_to = launcher.wait_for_warm(_ms.server_address[1], timeout=0.12, poll=0.03)
+        check(bool(_res_to and _res_to.get("landing_ready") is False), "wait_for_warm exits cleanly when timeout expires")
+    finally:
+        _ms.shutdown()
+        _ms.server_close()
+
+    _hp = _sp.run([_sys.executable, str(ROOT / "scripts" / "launcher.py"), "start", "--help"], capture_output=True, text=True, timeout=15)
+    check(_hp.returncode == 0 and "--no-wait" in _hp.stdout, "launcher.py start --help exposes --no-wait")
+    check("--compile-bytecode" in _ins.getsource(launcher.cmd_install), "cmd_install pre-compiles venv bytecode with --compile-bytecode")
+
+
+_test_warm_and_install()
+
 httpd.shutdown()
 
 done("test_launcher_server")

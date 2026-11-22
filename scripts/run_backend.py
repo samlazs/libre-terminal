@@ -1540,6 +1540,197 @@ def install_tmx_asset_info_cache(applied: list):
     applied.append("TMX asset info cached in memory (180 s)")
 
 
+_TV_INFO_TTL = 600.0
+_TV_BAR_TTL = 300.0
+
+
+def install_tvchart_fix(applied: list):
+    """Share TradingView symbol metadata and history bars across iframe renders, and show a loading overlay until
+    the WebSocket datafeed finishes delivering bars."""
+    import functools
+
+    try:
+        from openbb_yfinance.utils import tvchart_datafeed as tvdf, tvchart_native as tvn
+    except ImportError:
+        return
+    if getattr(tvdf, "_terminal_tvchart_patched", False):
+        return
+
+    meta_lock = threading.Lock()
+    info_cache: dict = {}
+    info_locks: dict = {}
+    bar_cache: dict = {}
+    bar_locks: dict = {}
+
+    orig_info = tvdf.yf_symbol_info
+
+    @functools.wraps(orig_info)
+    def yf_symbol_info(symbol: str):
+        key = str(symbol or "").upper()
+        now = time.monotonic()
+        with meta_lock:
+            hit = info_cache.get(key)
+            if hit and now - hit[0] < _TV_INFO_TTL:
+                return dict(hit[1])
+            lk = info_locks.setdefault(key, threading.Lock())
+        with lk:
+            now = time.monotonic()
+            with meta_lock:
+                hit = info_cache.get(key)
+                if hit and now - hit[0] < _TV_INFO_TTL:
+                    return dict(hit[1])
+            val = orig_info(symbol)
+            if val is not None:
+                with meta_lock:
+                    info_cache[key] = (time.monotonic(), dict(val))
+                return dict(val)
+            return None
+
+    orig_invalidate = tvdf.BarCache.invalidate
+
+    def get(self, symbol: str, resolution: str) -> list:
+        res = tvdf.normalize_resolution(resolution)
+        key = (str(symbol or "").upper(), res)
+        with self._lock:
+            if key in self._cache and self._cache[key]:
+                return list(self._cache[key])
+        now = time.monotonic()
+        with meta_lock:
+            hit = bar_cache.get(key)
+            if hit and now - hit[0] < _TV_BAR_TTL:
+                bars = list(hit[1])
+                with self._lock:
+                    self._cache[key] = list(bars)
+                return bars
+            lk = bar_locks.setdefault(key, threading.Lock())
+        with lk:
+            now = time.monotonic()
+            with meta_lock:
+                hit = bar_cache.get(key)
+                if hit and now - hit[0] < _TV_BAR_TTL:
+                    bars = list(hit[1])
+                    with self._lock:
+                        self._cache[key] = list(bars)
+                    return bars
+            derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
+            if res in derived_map:
+                derived = derived_map[res]
+                source_bars = self.get(symbol, derived["source"])
+                bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
+            else:
+                bars = tvdf.yf_fetch_full_history(symbol, resolution)
+            if bars:
+                copied = list(bars)
+                with meta_lock:
+                    bar_cache[key] = (time.monotonic(), copied)
+                with self._lock:
+                    self._cache[key] = list(copied)
+                return list(copied)
+            return []
+
+    def refresh(self, symbol: str, resolution: str) -> list:
+        res = tvdf.normalize_resolution(resolution)
+        key = (str(symbol or "").upper(), res)
+        derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
+        if res in derived_map:
+            derived = derived_map[res]
+            source_bars = self.refresh(symbol, derived["source"])
+            bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
+        else:
+            bars = tvdf.yf_fetch_full_history(symbol, res)
+        if bars:
+            copied = list(bars)
+            with meta_lock:
+                bar_cache[key] = (time.monotonic(), copied)
+            with self._lock:
+                self._cache[key] = list(copied)
+            return list(copied)
+        return []
+
+    def invalidate(self, symbol: str, resolution: str | None = None) -> None:
+        orig_invalidate(self, symbol, resolution)
+        sym = str(symbol or "").upper()
+        with meta_lock:
+            if resolution:
+                bar_cache.pop((sym, tvdf.normalize_resolution(resolution)), None)
+            else:
+                for k in [k for k in bar_cache if k[0] == sym]:
+                    bar_cache.pop(k, None)
+
+    orig_html = tvn.tvchart_widget_html
+
+    @functools.wraps(orig_html)
+    async def tvchart_widget_html(symbol: str = "AAPL", interval: str = "1d", theme: str = "dark") -> str:
+        html = await orig_html(symbol, interval, theme)
+        is_light = str(theme).lower() == "light"
+        bg = "#ffffff" if is_light else "#1a1a19"
+        fg = "#4b5563" if is_light else "#c3c2b7"
+        ring = "#e5e7eb" if is_light else "#2c2c2a"
+        overlay = (
+            f'<div id="obb-tv-loading" style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;'
+            f'align-items:center;justify-content:center;gap:10px;background:{bg};color:{fg};'
+            f'font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;transition:opacity .15s ease">'
+            f'<div style="width:20px;height:20px;border:2px solid {ring};border-top-color:#3987e5;border-radius:50%;'
+            f'animation:obbSpin .8s linear infinite"></div>'
+            f'<span>Loading chart data…</span></div>'
+            f'<style>@keyframes obbSpin{{to{{transform:rotate(360deg)}}}}</style>'
+            '<script>(function(){'
+            'var el=document.getElementById("obb-tv-loading"),done=false;'
+            'function hide(){if(done)return;done=true;if(el){el.style.opacity="0";setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},160);}'
+            'try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:"openbb-chart-ready"},"*");}catch(e){}}'
+            'function hasBars(){var reg=window.__PYWRY_TVCHARTS__;if(!reg)return false;for(var k in reg){var e=reg[k];'
+            'if(e&&(e._seriesRawData&&e._seriesRawData.main&&e._seriesRawData.main.length||e._rawData&&e._rawData.length))return true;}return false;}'
+            'var hooked=false,ticks=0;'
+            'function wire(){if(hooked)return;if(hasBars()){requestAnimationFrame(hide);return;}'
+            'var w=window.pywry,ready=(window.__obbTvBridgePatched||(ticks>25&&w&&typeof w.on==="function"));'
+            'if(ready&&w&&typeof w.on==="function"){hooked=true;'
+            '["tvchart:datafeed-history-response","tvchart:data-response"].forEach(function(ev){w.on(ev,function(){requestAnimationFrame(hide);});});'
+            'w.on("tvchart:datafeed-resolve-response",function(d){if(d&&d.error)requestAnimationFrame(hide);});'
+            'if(hasBars())requestAnimationFrame(hide);return;}'
+            'ticks++;setTimeout(wire,20);}'
+            'wire();setTimeout(hide,25000);'
+            '})();</script>'
+        )
+        return html.replace("</body>", f"{overlay}</body>", 1) if "</body>" in html else html + overlay
+
+    tvdf.yf_symbol_info = yf_symbol_info
+    tvdf.BarCache.get = get
+    tvdf.BarCache.refresh = refresh
+    tvdf.BarCache.invalidate = invalidate
+    tvn.tvchart_widget_html = tvchart_widget_html
+    tvdf._terminal_tvchart_patched = True
+    applied.append("TradingView charts share cached bars/metadata and show loading status")
+
+
+async def warm_tvchart(symbol: str = "^GSPC") -> dict:
+    """Pre-mount PyWry's inline WS bridge and warm TradingView symbol metadata, bars, and PyWry assets."""
+    import asyncio
+
+    sym = str(symbol or "^GSPC").strip() or "^GSPC"
+    try:
+        from openbb_yfinance.utils import pywry_server, tvchart_datafeed
+        from pywry import assets as pywry_assets, toolbar as pywry_toolbar
+    except ImportError as e:
+        return {"ok": False, "symbol": sym, "error": redact(str(e))[:200]}
+
+    try:
+        pywry_server.ensure_pywry_mounted()
+        pywry_server.bind_loop()
+
+        def _warm_sync():
+            pywry_assets.get_pywry_css()
+            pywry_assets.get_scrollbar_js()
+            pywry_toolbar.get_toolbar_script(with_script_tag=True)
+            tvchart_datafeed.yf_symbol_info(sym)
+            bars = tvchart_datafeed.BarCache().get(sym, "1d")
+            return len(bars or ())
+
+        count = await asyncio.to_thread(_warm_sync)
+        return {"ok": True, "symbol": sym, "bars": count}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "symbol": sym, "error": redact(str(e))[:200]}
+
+
 FUT_MIN_AVG_VOLUME = 10     # contracts a day over three months: below this Yahoo's prices for a month are not a market
 FUT_MAX_SPREAD = 0.01          # the bid/ask mid only when the spread is within 1% of it
 
@@ -2169,6 +2360,10 @@ def apply_fixes():
         install_tmx_asset_info_cache(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("TMX asset info cache", e)
+    try:
+        install_tvchart_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("TradingView chart cache & loading indicator", e)
     say("[fixes] " + ("; ".join(applied) if applied else "none applied"))
     return applied
 
@@ -2427,6 +2622,18 @@ def install_guard(port: str):
                 return await send({"type": "http.response.body", "body": body})
             if scope["type"] == "websocket":
                 return await self.app(scope, receive, send)
+            if scope.get("path") == "/_terminal/warm_chart":
+                from urllib.parse import parse_qs
+
+                qs = parse_qs((scope.get("query_string") or b"").decode("latin-1"))
+                sym = (qs.get("symbol") or ["^GSPC"])[0]
+                res = await warm_tvchart(sym)
+                body = json.dumps(res).encode("utf-8")
+                hs = [(b"content-type", b"application/json; charset=utf-8"), (b"content-length", str(len(body)).encode())]
+                if origin:
+                    hs.extend([(b"vary", b"Origin"), (b"access-control-allow-origin", origin.encode("latin-1"))])
+                await send({"type": "http.response.start", "status": 200, "headers": hs})
+                return await send({"type": "http.response.body", "body": body})
             if route_method(scope.get("method", ""), scope.get("path", "")) != scope.get("method"):
                 scope = dict(scope, method="GET")
             state = {"start": None, "chunks": [], "sent": False}

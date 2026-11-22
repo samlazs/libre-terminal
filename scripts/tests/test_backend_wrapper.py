@@ -585,4 +585,133 @@ san_fred = rb.sanitize_error_body(fred_err)
 check("https://" not in san_fred and "502" in san_fred and "HTML error page instead of JSON" in san_fred, "sanitize_error_body strips FRED ContentTypeError URL")
 check(rb.sanitize_error_body(rb.FRED_KEY_MESSAGE) == rb.FRED_KEY_MESSAGE, "sanitize_error_body preserves friendly FRED signup URL")
 
+
+def _test_tvchart_and_warm_route():
+    import json as _json
+    import sys as _sys
+    import threading as _th
+    import types as _types
+
+    _mod_names = (
+        "openbb_yfinance",
+        "openbb_yfinance.utils",
+        "openbb_yfinance.utils.tvchart_datafeed",
+        "openbb_yfinance.utils.tvchart_native",
+    )
+    _saved_mods = {m: _sys.modules.get(m) for m in _mod_names}
+    _info_calls = []
+    _fetch_calls = []
+
+    _pkg = _types.ModuleType("openbb_yfinance")
+    _utils = _types.ModuleType("openbb_yfinance.utils")
+    _tvdf = _types.ModuleType("openbb_yfinance.utils.tvchart_datafeed")
+    _tvn = _types.ModuleType("openbb_yfinance.utils.tvchart_native")
+
+    _tvdf.DERIVED_RESOLUTIONS = {"4h": {"source": "1h", "factor": 4}}
+    _tvdf.normalize_resolution = lambda r: str(r or "1d").lower()
+    _tvdf.aggregate_bars = lambda bars, _factor: [bars[0]] if bars else []
+
+    def _yf_info(sym):
+        _info_calls.append(sym)
+        return None if sym == "EMPTY" else {"name": sym, "ticker": sym}
+
+    def _yf_fetch(sym, res):
+        _fetch_calls.append((sym, res))
+        return [] if sym == "EMPTY" else [{"time": 1700000000, "close": 500.0}]
+
+    class _FakeBarCache:
+        def __init__(self):
+            self._lock = _th.Lock()
+            self._cache = {}
+
+        def invalidate(self, symbol, resolution=None):
+            sym = str(symbol or "").upper()
+            with self._lock:
+                if resolution:
+                    self._cache.pop((sym, _tvdf.normalize_resolution(resolution)), None)
+                else:
+                    for k in [k for k in self._cache if k[0] == sym]:
+                        self._cache.pop(k, None)
+
+    async def _orig_tv_html(symbol="AAPL", interval="1d", theme="dark"):
+        return f"<html><body><div id='tv'>{symbol}-{interval}-{theme}</div></body></html>"
+
+    _tvdf.yf_symbol_info = _yf_info
+    _tvdf.yf_fetch_full_history = _yf_fetch
+    _tvdf.BarCache = _FakeBarCache
+    _tvn.tvchart_widget_html = _orig_tv_html
+    _pkg.utils = _utils
+    _utils.tvchart_datafeed = _tvdf
+    _utils.tvchart_native = _tvn
+
+    _orig_warm_tvchart = rb.warm_tvchart
+    try:
+        for _n, _m in zip(_mod_names, (_pkg, _utils, _tvdf, _tvn)):
+            _sys.modules[_n] = _m
+
+        _applied = []
+        rb.install_tvchart_fix(_applied)
+        check(bool(_applied) and getattr(_tvdf, "_terminal_tvchart_patched", False), "install_tvchart_fix applies patches")
+
+        _s1 = _tvdf.yf_symbol_info("SPY")
+        _s2 = _tvdf.yf_symbol_info("spy")
+        check(_s1 == _s2 and len(_info_calls) == 1, "install_tvchart_fix caches yf_symbol_info case-insensitively")
+        _tvdf.yf_symbol_info("EMPTY")
+        _tvdf.yf_symbol_info("EMPTY")
+        check(_info_calls.count("EMPTY") == 2, "install_tvchart_fix never caches None symbol info")
+
+        _b1 = _tvdf.BarCache().get("SPY", "1d")
+        _b2 = _tvdf.BarCache().get("SPY", "1d")
+        check(_b1 == _b2 and len(_b1) == 1 and _fetch_calls.count(("SPY", "1d")) == 1, "BarCache shares bars across instances")
+        check(_tvdf.BarCache().get("EMPTY", "1d") == [] and _tvdf.BarCache().get("EMPTY", "1d") == [] and _fetch_calls.count(("EMPTY", "1d")) == 2, "BarCache never caches empty bars")
+
+        _tvdf.BarCache().invalidate("SPY", "1d")
+        _tvdf.BarCache().get("SPY", "1d")
+        check(_fetch_calls.count(("SPY", "1d")) == 2, "BarCache.invalidate clears shared entry")
+
+        _html = asyncio.run(_tvn.tvchart_widget_html("SPY", "1d", "dark"))
+        check('id="obb-tv-loading"' in _html and "openbb-chart-ready" in _html, "tvchart_widget_html injects loading overlay and ready notifier")
+
+        _st403, _, _ = _call_r("GET", "/_terminal/warm_chart", [(b"origin", b"http://evil.example")])
+        check(_st403 == 403, "/_terminal/warm_chart rejects foreign Origin")
+
+        async def _fake_warm(symbol="^GSPC"):
+            return {"ok": True, "symbol": symbol, "bars": 42}
+
+        rb.warm_tvchart = _fake_warm
+        _sent = []
+
+        async def _send(msg):
+            _sent.append(msg)
+
+        async def _recv():
+            return {"type": "http.request"}
+
+        asyncio.run(guard_r({
+            "type": "http",
+            "method": "GET",
+            "path": "/_terminal/warm_chart",
+            "query_string": b"symbol=AAPL",
+            "headers": [(b"host", b"127.0.0.1:6900"), (b"origin", b"http://127.0.0.1:6950")],
+        }, _recv, _send))
+        _start = next(m for m in _sent if m["type"] == "http.response.start")
+        _hdrs = {k.decode().lower(): v.decode() for k, v in _start["headers"]}
+        _body = _json.loads(b"".join(m.get("body", b"") for m in _sent if m["type"] == "http.response.body").decode("utf-8"))
+        check(
+            _start["status"] == 200
+            and _hdrs.get("access-control-allow-origin") == "http://127.0.0.1:6950"
+            and _body == {"ok": True, "symbol": "AAPL", "bars": 42},
+            "/_terminal/warm_chart runs inside Guard with CORS headers",
+        )
+    finally:
+        rb.warm_tvchart = _orig_warm_tvchart
+        for _n, _old in _saved_mods.items():
+            if _old is None:
+                _sys.modules.pop(_n, None)
+            else:
+                _sys.modules[_n] = _old
+
+
+_test_tvchart_and_warm_route()
+
 done("test_backend_wrapper")

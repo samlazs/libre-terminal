@@ -412,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, config_for(self.headers.get("Host", "")))
         if path == "/api/services":
             return self._json(200, service_status())
+        if path == "/api/warm":
+            return self._json(200, composite.warm_status())
         if path == "/widgets.json":
             return self._json(200, xwidgets.widgets())
         if path == "/api/dashboards":

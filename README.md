@@ -39,7 +39,9 @@ sh install.sh
 sh start.sh          # opens http://127.0.0.1:6950 ; stop with: sh stop.sh
 ```
 
-The first start takes a minute or two. Everything listens on `127.0.0.1` only; nothing leaves your
+The first start pre-warms initial dashboard data and TradingView chart caches before opening the
+browser (usually 15–60 s on a cold cache; pass `--no-wait` to open immediately while warming
+continues in the background). Everything listens on `127.0.0.1` only; nothing leaves your
 computer except the data requests themselves.
 
 ## What is inside

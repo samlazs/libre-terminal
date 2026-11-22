@@ -39,8 +39,8 @@ scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
-terminal/server.py           UI server: static files, /api/config, /api/dashboards, /api/state, /x/*
-terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...)
+terminal/server.py           UI server: static files, /api/config, /api/warm, /api/dashboards, /api/state, /x/*
+terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...) and two-phase cache warmer (warm.py)
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
 terminal/bonds.py            FINRA TRACE corporate bond lookup and yield-by-maturity curve (/x/bond_lookup, /x/bond_curve)
@@ -152,7 +152,10 @@ Applied in memory at start; no installed file is modified.
   The stock fetcher halved one-sided quotes and drew 0.00 for unquoted months.
 - Request guard: Host allow-list (blocks DNS rebinding), Origin must be the UI (any local host name, case-insensitive),
   requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names that origin only, error
-  bodies redacted. The UI page carries a Content-Security-Policy (server.py `content_security_policy`).
+  bodies redacted; `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without
+  altering OpenAPI. The UI page carries a Content-Security-Policy (server.py `content_security_policy`).
+- TradingView widget: `install_tvchart_fix` shares TTL caches across `yf_symbol_info` (600 s) and `BarCache` (300 s),
+  never caching empty results, and injects `#obb-tv-loading` / `openbb-chart-ready` into `tvchart_widget_html`.
 - Each fix that does not apply logs one `[fixes] WARNING` line; `local/run/patches-<name>.json` feeds the
   "Backend fixes" table in Data Explorers > Data status.
 - Watchdog: if the backend stops answering for 45 s it writes every thread's stack to

@@ -1,6 +1,6 @@
 @echo off
 REM Double-click to start the V5 data backend and the terminal UI, then open the terminal in your browser.
-REM Options from a command prompt: Start.cmd --no-browser, Start.cmd --with-v4, Start.cmd --ui-port 7950 --v5-port 7900
+REM Options from a command prompt: Start.cmd --no-browser, Start.cmd --no-wait, Start.cmd --with-v4, Start.cmd --ui-port 7950 --v5-port 7900
 cd /d "%~dp0"
 if not exist ".venv-v5\Scripts\python.exe" (
   echo Not installed yet - double-click Install.cmd first.

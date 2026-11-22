@@ -409,6 +409,11 @@
     return null;
   };
 
+  T.SLOW_RETRY_DELAYS = [15, 20, 25, 30];
+  T.slowRetryMessage = function (delayS) {
+    return "Building in the background — checking again automatically in " + delayS + " s (or press ↻ now).";
+  };
+
   T.widget = function (ctx) {
     var item = ctx.item, def = ctx.def, base = ctx.backend.url;
     item.params = item.params || {};
@@ -491,7 +496,7 @@
     var rz = el("div", { class: "w-resize", title: "Resize" });
     node.appendChild(head); node.appendChild(strip); node.appendChild(pbar); node.appendChild(body); node.appendChild(foot); node.appendChild(rz);
 
-    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, showAllParams = false, seq = 0;
+    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0;
     var fileParam = def.params.filter(function (p) { return (p.roles || []).indexOf("fileSelector") >= 0; })[0] || null;
     var lastFileSig = null;          // the other parameters the current document pick was made for
     var isFrame = def.type === "iframe" || def.type === "html";
@@ -602,6 +607,7 @@
       if (ctx.setView && (stripParams().indexOf(p.paramName) >= 0 || (p.paramName === "period" && T.statementKind && T.statementKind(def)))) ctx.setView(item, p.paramName, null);
       delete live[p.paramName];
       item.params[p.paramName] = v;
+      slowRetries = 0;
       ctx.onChange();
       drawParams();
       paintTitle();
@@ -733,6 +739,8 @@
     // ---------- body states ----------
     function clearBody() {
       if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+      if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
+      if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
       if (plotNode && window.Plotly) { try { window.Plotly.purge(plotNode); } catch (e) { /* ignore */ } }
       plotNode = null; tv = null;
       blobUrls.forEach(function (u) { URL.revokeObjectURL(u); }); blobUrls = [];
@@ -1076,6 +1084,8 @@
     // ---------- loading ----------
     async function load(force) {
       pending = false;
+      if (force) slowRetries = 0;
+      if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
       var my = ++seq;
       if (abort) abort.abort();
       abort = new AbortController();
@@ -1132,7 +1142,7 @@
           fr2.style.visibility = "hidden";
           // the SEC filing viewer is a white document page on another origin: shown inverted to the dark palette (review G1)
           if (/filing_viewer_app/.test(frameSrc)) fr2.classList.add("dark-doc");
-          frameTimer = setTimeout(function () { if (wait.isConnected) wait.textContent = "Still loading: this tool is slow to answer. It appears here when ready."; }, 30000);
+          frameTimer = setTimeout(function () { if (wait.isConnected) wait.textContent = "Still building this chart in the background — it appears here when ready."; }, 12000);
           fr2.addEventListener("load", function () {
             if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
             if (wait.parentNode) wait.parentNode.removeChild(wait);
@@ -1157,6 +1167,16 @@
           return;
         }
         message("load", "Loading…");
+        loadTimer = setTimeout(function () {
+          if (!alive || my !== seq) return;
+          var sp = body.querySelector(".msg span");
+          if (sp) sp.textContent = "Still loading — first build fetches from upstream…";
+          loadTimer = setTimeout(function () {
+            if (!alive || my !== seq) return;
+            var sp2 = body.querySelector(".msg span");
+            if (sp2) sp2.textContent = "Building in the background — slow datasets take a bit longer on first launch.";
+          }, 10000);
+        }, 5000);
         if (isFiles) {
           var files;
           if (fileParam) {
@@ -1185,6 +1205,7 @@
             files = await getJSON(endpoint + qs(p), force, abort.signal);
           }
           if (my !== seq) return;
+          slowRetries = 0;
           clearBody(); renderFiles(files); drawTools();
           return;
         }
@@ -1194,6 +1215,7 @@
         if (json && Array.isArray(json.sources)) answerSources = json.sources;
         if (def.strip) drawStrip();
         failed = false;
+        slowRetries = 0;
         if (ctx.backend.id === "x" && json && Array.isArray(json.results)) json.results.forEach(function (r) { if (r && r.symbol && r.name) T.sec.learn(r.symbol, r.name); });   // names for recent tickers
         if (json == null) { drawTools(); foot.textContent = ""; return message("info", noData(), sibsHint()); }
         renderData();
@@ -1228,6 +1250,15 @@
           param: function (n) { var np = def.params.filter(function (x) { return x.paramName === n; })[0]; return np ? (np.label || pretty(n)) : pretty(n); }
         });
         failed = true;
+        if (c.cls === "slow" && slowRetries < T.SLOW_RETRY_DELAYS.length) {
+          var delayS = T.SLOW_RETRY_DELAYS[slowRetries++];
+          message("load", c.text || "This dataset is still building in the background.", T.slowRetryMessage(delayS));
+          slowTimer = setTimeout(function () {
+            slowTimer = null;
+            if (alive && my === seq) load(false);
+          }, delayS * 1000);
+          return;
+        }
         if (c.cls === "key" || c.cls === "paid") item._keyBlocked = true;
         if (c.cls === "input" && c.param && item.compact) { item.compact = false; drawParams(); }
         if (c.cls === "bug") reportBug(c);
@@ -1305,6 +1336,7 @@
       retryIfFailed: function () { if (failed && alive) { failed = false; pending = true; check(); } },
       backend: ctx.backend.id,
       redrawParams: function (changedParam) {      // the dashboard ticker changed: row picks no longer apply
+        slowRetries = 0;
         if (changedParam === "symbol" && dropPriceParams()) ctx.onChange();
         clearLive(changedParam);
       },

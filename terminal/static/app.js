@@ -848,21 +848,35 @@
    * dashboard if any of its cards waited for this backend (sources and dataset picks are applied again then).
    */
   var arrivedTimer = null;
+  function applyBackendArrival(b) {
+    paintSidebar();
+    if (!S.cur) return openDefault();
+    var ss = S.state.srcsel && S.state.srcsel[S.cur.id];
+    var replaced = false;
+    S.cards.slice().forEach(function (c) {
+      var uid = c.item && c.item.uid;
+      var savedSrc = uid && ss && typeof ss[uid] === "string" && ss[uid].indexOf(b.id + ":") === 0 &&
+        ss[uid] !== c.item.backend + ":" + c.item.widgetId && validSource(c.item, ss[uid]);
+      if (savedSrc) {
+        applySource(c.item, ss[uid]);
+        replaceCard(c.item);
+        replaced = true;
+      } else if (c.missing && c.backend === b.id) {
+        replaceCard(c.item);
+        replaced = true;
+      } else if (c.backend === b.id || (c.item && c.item.backend === b.id)) {
+        c.retryIfFailed();
+      }
+    });
+    if (replaced) { paintGroups(); paintEmpty(); }
+  }
   function backendArrived(b) {
     if (!S.booted) return;
     clearTimeout(arrivedTimer);
-    arrivedTimer = setTimeout(function () {
-      paintSidebar();
-      if (!S.cur) return openDefault();
-      var ss = S.state.srcsel && S.state.srcsel[S.cur.id];
-      var need = S.cards.some(function (c) {
-        return c.missing || (c.item && ss && typeof ss[c.item.uid] === "string" && ss[c.item.uid].indexOf(b.id + ":") === 0 &&
-          ss[c.item.uid] !== c.item.backend + ":" + c.item.widgetId && validSource(c.item, ss[c.item.uid]));
-      });
-      if (need) { var at = [S.cur.id, S.tabId]; S.cur = null; if (!openDashboard(at[0], at[1])) openDefault(); }
-      else S.cards.forEach(function (c) { if (c.backend === b.id || (c.item && c.item.backend === b.id)) c.retryIfFailed(); });
-    }, 250);
+    arrivedTimer = setTimeout(function () { applyBackendArrival(b); }, 250);
   }
+  T.backendArrived = backendArrived;
+  T.applyBackendArrival = applyBackendArrival;
   /**
    * A backend stopped answering (crash, restart, not started yet): say so once in the banner, poll it, and when it
    * answers again reload what it serves (cards that failed retry; cards it never described are rebuilt).
@@ -937,6 +951,37 @@
   function notice(text) {
     S.notices = (S.notices || []).concat([text]);
     paintStatus();
+  }
+  function paintWarm(w) {
+    S.warm = w || null;
+    var ban = $("warm-banner"), st = $("warm-status");
+    if (!ban || !st) return;
+    if (!w || w.phase === "idle" || w.phase === "ready") {
+      ban.classList.add("hidden"); ban.textContent = "";
+      st.classList.add("hidden"); st.textContent = "";
+      return;
+    }
+    if (w.phase === "landing") {
+      ban.classList.remove("hidden"); ban.textContent = "";
+      ban.appendChild(el("div", { class: "spin sm" }));
+      ban.appendChild(el("span", null, "Preparing initial market data and charts (" + (w.done || 0) + "/" + (w.total || 0) + " ready" + (w.current ? " · " + w.current : "") + "). Cards and graphs appear automatically as they finish."));
+      st.classList.remove("hidden"); st.textContent = "";
+      st.appendChild(el("div", { class: "spin sm" }));
+      st.appendChild(el("span", null, "Warming initial data (" + (w.done || 0) + "/" + (w.total || 0) + ")…"));
+      return;
+    }
+    ban.classList.add("hidden"); ban.textContent = "";
+    st.classList.remove("hidden"); st.textContent = "";
+    st.appendChild(el("div", { class: "spin sm" }));
+    st.appendChild(el("span", null, "Warming background caches (" + (w.bg_done || 0) + "/" + (w.bg_total || 0) + ")…"));
+  }
+  T.paintWarm = paintWarm;
+  function pollWarmStatus() {
+    fetchT("/api/warm", 4000).then(function (r) { return r.ok ? r.json() : null; }).then(function (w) {
+      if (!w) return;
+      paintWarm(w);
+      if (w.phase === "landing" || w.phase === "background") setTimeout(pollWarmStatus, 2000);
+    }).catch(function () {});
   }
 
   // ---------- widget index (same data function across providers / backends) ----------
@@ -2184,13 +2229,21 @@
       if (m.released.length || m2.migrated.length || m2.released.length) saveNow();
     });
     // The page is drawn at once from the dashboards; the terminal's own views (this server) come first, and each data
-    // backend fills its cards as soon as it answers (status per backend in the sidebar).
+    // backend fills its cards as soon as it answers (status per backend in the sidebar). Remote backends start loading
+    // concurrently and are given a bounded grace window so initial views/charts do not flash "starting" before opening.
     safely(function () { paintStatus(); paintSidebar(); paintEmpty(); });
     var local = S.backends.filter(function (b) { return !b.url; });
+    var remote = S.backends.filter(function (b) { return b.url; });
+    var remoteP = Promise.all(remote.map(loadBackend));
     await Promise.all(local.map(loadBackend));
+    if (remote.length) {
+      await Promise.race([
+        remoteP,
+        new Promise(function (r) { setTimeout(r, 4000); })
+      ]);
+    }
     S.booted = true;
-    safely(function () { paintSidebar(); openDefault(); });
-    S.backends.filter(function (b) { return b.url; }).forEach(function (b) { loadBackend(b); });
+    safely(function () { paintSidebar(); openDefault(); pollWarmStatus(); });
   }
   boot();
 })(window.T);
