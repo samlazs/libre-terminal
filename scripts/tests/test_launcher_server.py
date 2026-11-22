@@ -271,6 +271,40 @@ check(evicted == 1 and prot.exists() and not old_evict.exists() and new_keep.exi
 for f in (prot, new_keep):
     f.unlink(missing_ok=True)
 
+# B9: daily background timer in server.py runs local_paths.prune_local() safely and stops cleanly
+check(local_paths.prune_local is launcher.prune_local and server.PRUNE_INTERVAL_S == 86400,
+      "B9: prune_local lives in local_paths and server PRUNE_INTERVAL_S is 24h")
+b9_prot = cd / "curvestore_eu.json"
+b9_old = cd / "h1d_B9_OLD.json"
+b9_prot.write_bytes(b"p" * 100)
+b9_old.write_bytes(b"x" * 100)
+os.utime(b9_prot, (t_base - 45 * 86400, t_base - 45 * 86400))
+os.utime(b9_old, (t_base - 45 * 86400, t_base - 45 * 86400))
+b9_calls = [0]
+b9_done = threading.Event()
+
+
+def _b9_tick():
+    b9_calls[0] += 1
+    if b9_calls[0] == 1:
+        raise RuntimeError("transient prune error")
+    gone = local_paths.prune_local(now=t_base)
+    if b9_calls[0] >= 2:
+        b9_done.set()
+    return gone
+
+
+b9_thread, b9_stop = server.start_prune_timer(interval_s=0.02, prune_fn=_b9_tick)
+try:
+    check(b9_thread.daemon and b9_done.wait(timeout=2.0), "B9: prune timer runs in daemon thread and survives exceptions")
+    check(b9_prot.exists() and not b9_old.exists(), "B9: periodic prune removes expired cache file while keeping protected store")
+finally:
+    b9_stop.set()
+    b9_thread.join(timeout=2.0)
+    b9_prot.unlink(missing_ok=True)
+    b9_old.unlink(missing_ok=True)
+check(not b9_thread.is_alive(), "B9: prune timer exits cleanly on stop")
+
 # W3: V5-only default, --with-v4 opt-in, --skip-v4 backward-compatible alias, and server config_for()
 check(not launcher.want_v4(types.SimpleNamespace()), "want_v4 defaults to False (single-backend V5)")
 check(launcher.want_v4(types.SimpleNamespace(with_v4=True, skip_v4=False)), "want_v4 is True with --with-v4")

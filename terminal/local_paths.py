@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -119,3 +120,58 @@ def saved_ports() -> dict:
         return {k: int(v) for k, v in json.loads(PORTS_FILE.read_text(encoding="utf-8")).items() if k in ("v5", "v4", "ui")}
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
+
+
+PROTECTED_CACHE = ("curvestore_", "catalog-", "earnings_consensus.json", "health-history.json", "yahoo_meta.json")
+
+
+def _is_protected_cache(path: Path) -> bool:
+    name = path.name
+    return any(name.startswith(p) or name == p for p in PROTECTED_CACHE)
+
+
+def prune_local(now: float | None = None, max_cache_mb: float = 150.0) -> int:
+    """Disk caches and freeze dumps do not grow for ever: drop cache files untouched for 30 days (the history stores
+    curvestore_*, catalog snapshots and earnings/health history stay), backend cache entries after 14 days, freeze dumps
+    after 14; then trim non-protected files under local/cache/ oldest-first to stay within max_cache_mb."""
+    now = now or time.time()
+    gone = 0
+    rules = [(CACHE_DIR, "*.json", 30), (CACHE_DIR / "backend", "**/*.pkl.gz", 14), (LOGS_DIR, "*-freeze-*.txt", 14)]
+    for folder, pattern, days in rules:
+        if not folder.exists():
+            continue
+        for f in folder.glob(pattern):
+            if folder == CACHE_DIR and _is_protected_cache(f):
+                continue
+            try:
+                if f.is_file() and now - f.stat().st_mtime > days * 86400:
+                    f.unlink()
+                    gone += 1
+            except OSError:
+                pass
+    cap = int(max_cache_mb * 1024 * 1024)
+    if cap > 0 and CACHE_DIR.exists():
+        evictable = []
+        total = 0
+        for f in CACHE_DIR.rglob("*"):
+            try:
+                if not f.is_file():
+                    continue
+                st = f.stat()
+                total += st.st_size
+                if not _is_protected_cache(f):
+                    evictable.append((st.st_mtime, st.st_size, f))
+            except OSError:
+                pass
+        if total > cap:
+            evictable.sort(key=lambda x: x[0])
+            for _, size, f in evictable:
+                if total <= cap:
+                    break
+                try:
+                    f.unlink()
+                    total -= size
+                    gone += 1
+                except OSError:
+                    pass
+    return gone

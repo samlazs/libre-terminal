@@ -158,7 +158,8 @@ def check_all(defs: dict, built: dict, state: dict | None = None, root: Path = R
         d = (defs.get(it["backend"]) or {}).get(it["widgetId"])
         if d and (f"{it['backend']}:{it['widgetId']}" in in_concept or d.get("sourceParam") or len(by_ep.get(d.get("endpoint"), [])) > 1):
             picker += 1
-    code_hits = [p for p in list((root / "terminal").rglob("*.py")) + list((root / "terminal" / "static").glob("*.js")) + [root / "scripts" / "build_dashboards.py"]
+    code_hits = [p for p in list((root / "terminal").rglob("*.py")) + list((root / "terminal" / "static").glob("*.js"))
+                 + list((root / "scripts" / "dashboards").rglob("*.py")) + [root / "scripts" / "build_dashboards.py"]
                  if p.exists() and "Source shown" in p.read_text(encoding="utf-8", errors="replace")]
     n_cards = sum(len(t["items"]) for d in built.get("dashboards", []) for t in d.get("tabs", []))
     n_tabs = sum(len(d["tabs"]) for d in built.get("dashboards", []))

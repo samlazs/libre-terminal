@@ -550,6 +550,32 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"ok": True, "rev": obj["_rev"]})
 
 
+PRUNE_INTERVAL_S = 24 * 3600
+
+
+def start_prune_timer(
+    interval_s: float = PRUNE_INTERVAL_S,
+    stop_event: threading.Event | None = None,
+    prune_fn=None,
+) -> tuple[threading.Thread, threading.Event]:
+    """Run local_paths.prune_local() daily in a daemon thread so long sessions keep local/cache/ bounded (audit B9)."""
+    stop = stop_event or threading.Event()
+    fn = prune_fn or local_paths.prune_local
+
+    def _loop():
+        while not stop.wait(interval_s):
+            try:
+                gone = fn()
+                if gone:
+                    log(f"pruned {gone} stale cache file(s)")
+            except Exception:  # noqa: BLE001
+                log("cache prune failed: " + redact(traceback.format_exc()))
+
+    t = threading.Thread(target=_loop, daemon=True, name="local-cache-prune")
+    t.start()
+    return t, stop
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -572,10 +598,13 @@ def main():
     if PLOTLY_JS is None:
         print("  WARNING: plotly.min.js not found; charts will not render", file=sys.stderr)
     composite.warm()
+    _, prune_stop = start_prune_timer()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        prune_stop.set()
 
 
 if __name__ == "__main__":

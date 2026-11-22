@@ -153,39 +153,20 @@
   };
   var limitedUntil = 0, limitedMsg = "";      // set when OECD refuses us; no OECD requests are sent until it passes
   function isRateLimited(url) { return /[?&]provider=oecd(&|$)|\/api\/v1\/oecd\//.test(url); }
-  /** How long an answer may be reused from the browser's cache (0 = not at all). Prices and news are never kept. */
-  function keepFor(url) {
-    if (isRateLimited(url)) return 12 * 3600 * 1000;                               // OECD: monthly data, strict request limits
-    if (/[?&]provider=(eia|bls|fred|usda|imf|ecb|famafrench|us_treasury|congress_gov|federal_reserve|econdb|multpl)(&|$)/.test(url)
-      || /\/api\/v1\/(eia|bls|usda|imf|ecb|jodi|famafrench|federal_reserve|ustreasury|uscongress)\//.test(url)) return 3600 * 1000;   // official statistics: an hour
-    return 0;
+  function fetchOptions(force, signal) {
+    return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" } } : { signal: signal };
   }
-  T._reqSlots = { acquire: acquire, release: release, slots: slots, keepFor: keepFor, isRateLimited: isRateLimited, max: MAX_PARALLEL };
-  async function slowCacheGet(url, ttl) {
-    try {
-      var c = await caches.open("obb-slow-v1"), hit = await c.match(url);
-      if (hit && Date.now() - Number(hit.headers.get("x-saved")) < ttl) return await hit.json();
-    } catch (e) { /* cache storage unavailable: just fetch */ }
-    return undefined;
-  }
-  // once per page load: drop browser-cached answers older than the longest time they may be used (12 hours)
-  setTimeout(function () {
-    try {
-      caches.open("obb-slow-v1").then(function (c) {
-        return c.keys().then(function (reqs) {
-          reqs.forEach(function (rq) { c.match(rq).then(function (hit) { if (!hit || Date.now() - Number(hit.headers.get("x-saved")) > 12 * 3600 * 1000) c.delete(rq); }); });
-        });
-      }).catch(function () {});
-    } catch (e) { /* no cache storage */ }
-  }, 20000);
-  function slowCachePut(url, txt) {
-    try { caches.open("obb-slow-v1").then(function (c) { return c.put(url, new Response(txt, { headers: { "content-type": "application/json", "x-saved": String(Date.now()) } })); }).catch(function () {}); } catch (e) { /* ignore */ }
-  }
+  T._reqSlots = { acquire: acquire, release: release, slots: slots, isRateLimited: isRateLimited, fetchOptions: fetchOptions, max: MAX_PARALLEL };
+  // Server CACHE_POLICY is now the sole authoritative persistent cache; remove any legacy browser Cache API store once on boot.
+  try {
+    if (typeof caches !== "undefined" && caches && typeof caches.delete === "function") {
+      caches.delete("obb-slow-v1").catch(function () {});
+    }
+  } catch (e) { /* cache storage unavailable */ }
 
-  /** Forget one answer (memory and browser cache): a forced reload of one card must not wipe every card's cache. */
+  /** Forget one answer from the short in-memory cache; forced card reloads also send X-Terminal-Refresh: 1 to the backend. */
   function dropCached(url) {
     dataCache.delete(url);
-    if (keepFor(url)) { try { caches.open("obb-slow-v1").then(function (c) { return c.delete(url); }).catch(function () {}); } catch (e) { /* no cache storage */ } }
   }
   T.dropCached = dropCached;
   T._dataCache = dataCache;                    // for the offline checks
@@ -220,8 +201,7 @@
   async function getJSON(url, force, outerSignal) {
     var c = dataCache.get(url);
     if (!force && c && Date.now() - c.t < TTL) return c.json;
-    var ttl = keepFor(url), slow = isRateLimited(url);
-    if (ttl && !force) { var kept = await slowCacheGet(url, ttl); if (kept !== undefined) { dataCache.set(url, { t: Date.now(), json: kept }); return kept; } }
+    var slow = isRateLimited(url);
     if (slow && Date.now() < limitedUntil) throw new Error(limitedMsg);
     var host = /^https?:\/\/[^/]+/.exec(url); host = host ? host[0] : "self";
     await acquire(host, outerSignal);
@@ -232,10 +212,11 @@
     var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, timeoutMs);
     function relay() { ctl.abort(); }
     if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
+    var fetchOpts = fetchOptions(force, signal);
     try {
       if (signal && signal.aborted) { var ab = new Error("aborted"); ab.name = "AbortError"; throw ab; }
       var r;
-      try { r = await fetch(url, { signal: signal }); }
+      try { r = await fetch(url, fetchOpts); }
       catch (e) {
         // one automatic retry for a dropped connection, but only while the backend itself still answers
         if (e && e.name === "AbortError") throw e;
@@ -243,7 +224,7 @@
         var alive = base ? await fetch(base[0] + "/", { mode: "no-cors", signal: signal }).then(function () { return true; }, function () { return false; }) : true;
         if (!alive) { var down = new Error("BACKEND_DOWN"); down.backendDown = true; throw down; }
         await wait(1500);
-        r = await fetch(url, { signal: signal });
+        r = await fetch(url, fetchOpts);
       }
       if (!r.ok) {
         var etxt = await r.text();
@@ -251,7 +232,7 @@
         // Rate limits are not retried (that only prolongs them).
         if (/database is locked|RemoteDisconnected|Invalid Crumb/i.test(etxt)) {
           await wait(1200 + Math.random() * 1500);
-          r = await fetch(url, { signal: signal });
+          r = await fetch(url, fetchOpts);
           etxt = r.ok ? null : await r.text();
         }
       }
@@ -267,17 +248,15 @@
       var txt = await r.text();
       if (!txt && /[?&]provider=yfinance(&|$)/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
         await wait(1200);
-        r = await fetch(url, { signal: signal });
+        r = await fetch(url, fetchOpts);
         txt = r.ok ? await r.text() : "";
       }
       json = txt ? JSON.parse(txt) : null;
-      // a backend answer served from a saved copy because the source failed (HANDOFF P2): kept with the answer, and
-      // not stored in the browser's long-lived cache (a later fresh answer must not be hidden behind it)
+      // a backend answer served from a saved copy because the source failed (HANDOFF P2): kept with the answer in memory
       var staleH = r.headers.get("X-Terminal-Stale");
       if (staleH && json && typeof json === "object" && !Array.isArray(json) && json.stale == null) json.stale = staleH;
       var lateH = r.headers.get("X-Terminal-Delayed");
       if (lateH && json && typeof json === "object" && !Array.isArray(json) && json.delayed == null) json.delayed = lateH;
-      if (ttl && txt && txt.length < 12e6 && !staleH) slowCachePut(url, txt);
     } catch (e2) {
       if (e2 && (e2.message === "TOO_LARGE" || e2.backendDown)) throw e2;
       if (timedOut) throw new Error("No answer after " + Math.round(timeoutMs / 1000) + " seconds. The source is slow or not responding.");

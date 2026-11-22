@@ -31,7 +31,8 @@ restarted, at most 5 times in 10 minutes. `stop` kills only processes this termi
 ```
 scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / check / snapshot / diff / run
 scripts/run_backend.py       starts a backend with the runtime patches below and the freeze watchdog
-scripts/build_dashboards.py  dashboard structure and generator -> local/dashboards.json
+scripts/build_dashboards.py  compact dashboard generator engine -> local/dashboards.json
+scripts/dashboards/          pure dashboard data & spec DSL (overrides.py, layouts.py)
 scripts/apply_keys.py        local/api_keys.env -> ~/.openbb_platform/user_settings.json
 scripts/check_sources.py     source-contract check (--offline or live; checks built-in + v4 saved state)
 scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding/lint/hygiene checks
@@ -63,7 +64,8 @@ ruff.toml                    static bug-check configuration for terminal/ and sc
 
 ## Dashboards and the generator
 
-`scripts/build_dashboards.py` holds the whole structure as data (`DASHBOARDS`, `SECTIONS`) and writes
+`scripts/dashboards/` holds the plain structure and override data (`overrides.py`, `layouts.py`) while
+`scripts/build_dashboards.py` is the compact generator engine (re-exporting all public data/DSL symbols) that writes
 `local/dashboards.json` on every start (`launcher.py dashboards` rebuilds it; `--report` prints the layout).
 Current default V5-only build: 28 dashboards, 118 tabs, 766 cards, 29 concept families; 929 of 929 data functions placed, none by fallback (with `--with-v4`: 28 dashboards, 119 tabs, 809 cards, 42 concepts, 990 functions).
 
@@ -240,8 +242,13 @@ terminal/composite/
   status.py, warm.py
 ```
 
-Remaining in Phase 2B: separate `scripts/build_dashboards.py` taxonomy/override tables (plain data) from the layout
-engine, and retire the legacy browser Cache API layer once server cache policy is sole authority (W8).
+Phase 2B (W9 + W8) is also complete: `scripts/build_dashboards.py` data tables and spec DSL moved into
+`scripts/dashboards/{overrides.py,layouts.py}` with the compact generator engine re-exporting all public symbols;
+`scripts/run_backend.py` `CACHE_POLICY` is now the sole authoritative persistent cache (covering EIA, Fama-French,
+FiscalData, CFTC, BLS, USDA, IMF, OECD 12 h / `attempts=1`, ECB 6 h, Federal Reserve 3 h, FRED 3 h, JODI 12 h with
+`_is_cacheable_result()` and `X-Terminal-Refresh: 1` manual bypass), legacy browser Cache API `obb-slow-v1` is
+retired (one-time `caches.delete("obb-slow-v1")` on boot), and `terminal/server.py` runs `local_paths.prune_local()`
+every 24 h in a daemon thread (audit B9).
 
 ## Using the data from Python or MCP
 

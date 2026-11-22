@@ -665,7 +665,9 @@
     ok(rs.slots[host].n === 0, "all slots released back to 0");
     delete rs.slots[host];
     ok(rs.isRateLimited("/api/v1/oecd/gdp?country=US") && !rs.isRateLimited("/api/v1/economy/gdp/nominal?provider=fred"), "OECD is rate-limited, FRED is not");
-    ok(rs.keepFor("/api/v1/oecd/gdp") === 12 * 3600 * 1000 && rs.keepFor("/api/v1/economy/gdp/nominal?provider=fred") === 3600 * 1000 && rs.keepFor("/api/v1/yfinance/equity/price/historical") === 0, "keepFor cache TTLs by source");
+    var foNorm = rs.fetchOptions(false, ac.signal), foForce = rs.fetchOptions(true, ac.signal);
+    ok(rs.keepFor === undefined && !foNorm.headers && foForce.headers && foForce.headers["X-Terminal-Refresh"] === "1",
+      "browser Cache API retired (no keepFor); forced refresh sends X-Terminal-Refresh: 1 while normal fetches send no extra header");
 
     var gItems = [
       { uid: "g0", x: 0, y: 10, w: 20, h: 4 },

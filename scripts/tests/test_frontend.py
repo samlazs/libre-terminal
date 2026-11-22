@@ -101,6 +101,10 @@ mm = re.match(r"frontend checks: (\d+) passed", result)
 check(mm is not None, result)
 n = int(mm.group(1))
 check(n >= 230, f"all browser checks ran ({n})")
+wjs = (STATIC / "widgets.js").read_text(encoding="utf-8")
+check('caches.delete("obb-slow-v1")' in wjs and 'caches.open("obb-slow-v1")' not in wjs
+      and "slowCacheGet" not in wjs and "slowCachePut" not in wjs,
+      "W8: widgets.js retires obb-slow-v1 with one-time caches.delete cleanup")
 # count the browser checks as checks of this file
 import _common  # noqa: E402
 _common._count[0] += n - 1

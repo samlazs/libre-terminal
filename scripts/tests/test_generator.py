@@ -202,4 +202,16 @@ else:
     bk_dash = next((d for d in dashes if d["id"] == "d:banking"), None)
     bk_rssd = next((g for g in (bk_dash or {}).get("groups", []) if g["name"] == "RSSD"), None)
     check(bk_rssd is not None and bk_rssd.get("syncFrom") == "Bank" and bk_rssd.get("syncUrl") == "/x/bank_rssd", "d:banking RSSD group carries syncFrom and syncUrl")
+
+import dashboards as db_pkg  # noqa: E402
+from dashboards import layouts as db_layouts, overrides as db_overrides  # noqa: E402
+
+check(bd.CONCEPTS is db_overrides.CONCEPTS and bd.DASHBOARDS is db_layouts.DASHBOARDS,
+      "W9: build_dashboards re-exports CONCEPTS and DASHBOARDS by identity from scripts/dashboards")
+for _sym in ("CONCEPTS", "DASHBOARDS", "Index", "LAST_REPORT", "OPT_LABELS", "RENAMED_TABS",
+             "REQUIRED_PARAMS", "SKIP", "TITLES", "build", "credentials", "load", "macro_key_provider", "slug"):
+    check(hasattr(bd, _sym), f"W9: build_dashboards exports {_sym}")
+check(db_pkg.CONCEPTS is db_overrides.CONCEPTS and db_pkg.DASHBOARDS is db_layouts.DASHBOARDS,
+      "W9: dashboards package __init__ re-exports overrides and layouts")
+
 done("test_generator")

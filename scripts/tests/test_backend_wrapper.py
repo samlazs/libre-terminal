@@ -427,4 +427,153 @@ finally:
             sys.modules[k] = v
 
 sys.stdout, sys.stderr = real_out, real_err
+# ---- W8: authoritative server CACHE_POLICY, complete-answer check, forced refresh header & CORS preflight
+for _p, _ttl, _att in (
+    ("openbb_oecd", 12 * 3600, 1),
+    ("openbb_ecb", 6 * 3600, 2),
+    ("openbb_federal_reserve", 3 * 3600, 2),
+    ("openbb_fred", 3 * 3600, 2),
+    ("openbb_jodi", 12 * 3600, 2),
+):
+    check(_p in rb.CACHE_POLICY and rb.CACHE_POLICY[_p][0] == _ttl and rb.CACHE_POLICY[_p][2] == _att,
+          f"W8: CACHE_POLICY covers {_p} (ttl={_ttl}s, attempts={_att})")
+for _live_p in ("openbb_yfinance", "openbb_cboe", "openbb_tmx", "openbb_nasdaq", "openbb_deribit", "openbb_sec", "openbb_news"):
+    check(_live_p not in rb.CACHE_POLICY, f"W8: live/equity fetcher {_live_p} excluded from CACHE_POLICY")
+
+from openbb_core.provider.abstract.annotated_result import AnnotatedResult  # noqa: E402
+from openbb_core.provider.abstract.fetcher import Fetcher  # noqa: E402
+
+check(not rb._is_cacheable_result(None) and not rb._is_cacheable_result([]) and not rb._is_cacheable_result({}),
+      "W8: _is_cacheable_result rejects None and empty containers")
+check(not rb._is_cacheable_result(AnnotatedResult(result=[])) and not rb._is_cacheable_result(AnnotatedResult(result=None)),
+      "W8: _is_cacheable_result rejects empty AnnotatedResult")
+check(not rb._is_cacheable_result(types.SimpleNamespace(empty=True)),
+      "W8: _is_cacheable_result rejects empty DataFrame-like result")
+check(rb._is_cacheable_result([{"v": 1}]) and rb._is_cacheable_result(AnnotatedResult(result=[{"v": 1}])),
+      "W8: _is_cacheable_result accepts non-empty answers")
+
+# Guard: OPTIONS preflight allows X-Terminal-Refresh and GET propagates FORCE_REFRESH + X-Terminal-Cache
+async def _refresh_probe_app(scope, receive, send):
+    if scope["path"] == "/refresh_probe":
+        cs = rb.CACHE_STATUS.get()
+        if cs is not None:
+            cs[:] = ["refresh" if rb.FORCE_REFRESH.get() else "hit"]
+        body = (b"refreshed" if rb.FORCE_REFRESH.get() else b"cached")
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+        return
+    await app(scope, receive, send)
+
+
+cfg_r = FakeConfig(_refresh_probe_app)
+cfg_r.load()
+guard_r = cfg_r.loaded_app
+
+
+def _call_r(method, path, extra_headers=None):
+    sent = []
+    hdrs = [(b"host", b"127.0.0.1:6900"), (b"origin", b"http://127.0.0.1:6950")] + list(extra_headers or [])
+
+    async def send(msg):
+        sent.append(msg)
+
+    async def receive():
+        return {"type": "http.request"}
+
+    asyncio.run(guard_r({"type": "http", "method": method, "path": path, "headers": hdrs}, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return start["status"], {k.decode().lower(): v.decode() for k, v in start["headers"]}, body
+
+
+st_opt, hs_opt, _ = _call_r("OPTIONS", "/refresh_probe", [(b"access-control-request-headers", b"x-terminal-refresh")])
+check(st_opt == 200 and "x-terminal-refresh" in hs_opt.get("access-control-allow-headers", "").lower(),
+      "W8: OPTIONS preflight allows X-Terminal-Refresh")
+st_n, hs_n, b_n = _call_r("GET", "/refresh_probe")
+check(st_n == 200 and b_n == b"cached" and hs_n.get("x-terminal-cache") == "hit", "W8: normal GET omits forced refresh")
+st_f, hs_f, b_f = _call_r("GET", "/refresh_probe", [(b"x-terminal-refresh", b"1")])
+check(st_f == 200 and b_f == b"refreshed" and hs_f.get("x-terminal-cache") == "refresh"
+      and "x-terminal-cache" in hs_f.get("access-control-expose-headers", "").lower(),
+      "W8: X-Terminal-Refresh: 1 sets FORCE_REFRESH and exposes X-Terminal-Cache")
+check(rb.FORCE_REFRESH.get() is False and rb.CACHE_STATUS.get() is None, "W8: guard resets FORCE_REFRESH and CACHE_STATUS")
+
+# End-to-end install_fetch_cache behavior (cold miss -> warm hit -> forced refresh -> stale fallback on 429 -> empty skipped)
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+orig_fetch_data = Fetcher.fetch_data
+orig_backend_cache = rb.BACKEND_CACHE
+with tempfile.TemporaryDirectory() as td_w8:
+    rb.BACKEND_CACHE = Path(td_w8)
+    try:
+        oecd_calls = [0]
+        oecd_mode = ["ok"]
+
+        class _FakeOecdFetcher(Fetcher):
+            @staticmethod
+            def transform_query(params, **kwargs):
+                return dict(params)
+
+            @staticmethod
+            async def aextract_data(query, credentials=None, **kwargs):
+                oecd_calls[0] += 1
+                if oecd_mode[0] == "fail":
+                    raise RuntimeError("HTTP 429 rate limit")
+                if oecd_mode[0] == "empty":
+                    return []
+                return [{"country": query.get("country"), "call": oecd_calls[0]}]
+
+            @staticmethod
+            def transform_data(query, data, **kwargs):
+                return data
+
+        _FakeOecdFetcher.__module__ = "openbb_oecd.models.gdp_real"
+        _FakeOecdFetcher.__qualname__ = "_FakeOecdFetcher"
+        cache_applied = []
+        rb.install_fetch_cache(cache_applied)
+        check(len(cache_applied) == 1 and "OECD" in cache_applied[0], "W8: install_fetch_cache reports OECD in applied fixes")
+
+        async def _run_cache_cases():
+            # 1) Cold miss
+            cs1, sn1 = [], []
+            t1, t2 = rb.CACHE_STATUS.set(cs1), rb.STALE_NOTES.set(sn1)
+            r1 = await _FakeOecdFetcher.fetch_data({"country": "DEU"})
+            rb.CACHE_STATUS.reset(t1); rb.STALE_NOTES.reset(t2)
+
+            # 2) Warm hit (no upstream call)
+            cs2 = []
+            t1 = rb.CACHE_STATUS.set(cs2)
+            r2 = await _FakeOecdFetcher.fetch_data({"country": "DEU"})
+            rb.CACHE_STATUS.reset(t1)
+
+            # 3) Forced refresh bypasses TTL and updates cache
+            cs3 = []
+            t1, t3 = rb.CACHE_STATUS.set(cs3), rb.FORCE_REFRESH.set(True)
+            r3 = await _FakeOecdFetcher.fetch_data({"country": "DEU"})
+            rb.FORCE_REFRESH.reset(t3); rb.CACHE_STATUS.reset(t1)
+
+            # 4) Forced refresh while OECD fails -> 1 attempt (no retry), serves saved copy + X-Terminal-Stale
+            oecd_mode[0] = "fail"
+            cs4, sn4 = [], []
+            t1, t2, t3 = rb.CACHE_STATUS.set(cs4), rb.STALE_NOTES.set(sn4), rb.FORCE_REFRESH.set(True)
+            r4 = await _FakeOecdFetcher.fetch_data({"country": "DEU"})
+            rb.FORCE_REFRESH.reset(t3); rb.STALE_NOTES.reset(t2); rb.CACHE_STATUS.reset(t1)
+
+            # 5) Empty result is not cached (second call hits upstream again)
+            oecd_mode[0] = "empty"
+            r5 = await _FakeOecdFetcher.fetch_data({"country": "FRA"})
+            r6 = await _FakeOecdFetcher.fetch_data({"country": "FRA"})
+            return (cs1, r1), (cs2, r2), (cs3, r3), (cs4, sn4, r4), (r5, r6)
+
+        (cs1, r1), (cs2, r2), (cs3, r3), (cs4, sn4, r4), (r5, r6) = asyncio.run(_run_cache_cases())
+        check(cs1 == ["miss"] and r1 == [{"country": "DEU", "call": 1}], "W8: cold fetch populates cache with status miss")
+        check(cs2 == ["hit"] and r2 == [{"country": "DEU", "call": 1}], "W8: warm fetch hits disk cache without upstream call")
+        check(cs3 == ["refresh"] and r3 == [{"country": "DEU", "call": 2}], "W8: forced refresh hits upstream and refreshes cache")
+        check(cs4 == ["stale"] and len(sn4) == 1 and "OECD not answering" in sn4[0] and r4 == [{"country": "DEU", "call": 2}],
+              "W8: failed forced refresh serves saved copy with stale note")
+        check(r5 == [] and r6 == [] and oecd_calls[0] == 5, "W8: OECD attempts=1 (no retry on failure) and empty answers are never cached")
+    finally:
+        Fetcher.fetch_data = orig_fetch_data
+        rb.BACKEND_CACHE = orig_backend_cache
+
 done("test_backend_wrapper")

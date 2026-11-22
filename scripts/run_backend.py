@@ -217,6 +217,11 @@ CACHE_POLICY = {
     "openbb_bls": (6 * 3600, None, 2, "BLS"),
     "openbb_usda": (12 * 3600, 45, 2, "USDA"),
     "openbb_imf": (12 * 3600, None, 2, "IMF"),
+    "openbb_oecd": (12 * 3600, None, 1, "OECD"),       # strict hourly quota: 12 h TTL, never retry
+    "openbb_ecb": (6 * 3600, 45, 2, "ECB"),
+    "openbb_federal_reserve": (3 * 3600, 45, 2, "Federal Reserve"),
+    "openbb_fred": (3 * 3600, 45, 2, "FRED"),
+    "openbb_jodi": (12 * 3600, 45, 2, "JODI"),
 }
 STALE_FOR = 14 * 86400          # a failed refresh serves the last good answer up to this old
 
@@ -278,6 +283,8 @@ import contextvars as _contextvars  # noqa: E402
 
 STALE_NOTES = _contextvars.ContextVar("terminal_stale_notes", default=None)     # set per HTTP request by the guard
 CALLER_POOL = _contextvars.ContextVar("terminal_caller_pool", default="ui")     # "x" from composite views, "ui" from direct card calls
+FORCE_REFRESH = _contextvars.ContextVar("terminal_force_refresh", default=False)
+CACHE_STATUS = _contextvars.ContextVar("terminal_cache_status", default=None)
 
 
 def stale_message(label: str, saved_at: float, now: float | None = None) -> str:
@@ -317,6 +324,20 @@ def delayed_note(path: str, query: bytes) -> str:
     if prov == "deribit":
         return ""
     return f"Delayed prices from {DELAYED_LABELS.get(prov, 'the source')} (free feed, not real time)"
+
+
+def _is_cacheable_result(value) -> bool:
+    """Complete-answer rule for disk cache: skip None, empty containers, empty DataFrames, and empty AnnotatedResult."""
+    if value is None:
+        return False
+    inner = value.result if hasattr(value, "result") and hasattr(value, "metadata") else value
+    if inner is None:
+        return False
+    if getattr(inner, "empty", False) is True:
+        return False
+    if isinstance(inner, (list, tuple, dict, set, str, bytes)) and len(inner) == 0:
+        return False
+    return True
 
 
 def install_fetch_cache(applied: list):
@@ -369,7 +390,11 @@ def install_fetch_cache(applied: list):
         key = hashlib.sha1(f"{cls.__module__}.{cls.__qualname__}{'@' + rev if rev else ''}|{ident}".encode()).hexdigest()[:24]
         p = path_for(key, prov)
         t, saved = await asyncio.to_thread(read, p)
-        if saved is not None and time.time() - t < ttl:
+        force = bool(FORCE_REFRESH.get())
+        cache_status = CACHE_STATUS.get()
+        if not force and saved is not None and time.time() - t < ttl:
+            if cache_status is not None:
+                cache_status[:] = ["hit"]
             return saved
 
         async def run():
@@ -377,7 +402,8 @@ def install_fetch_cache(applied: list):
             for attempt in range(attempts):
                 try:
                     value = await orig(cls, params, credentials, **kwargs)
-                    await asyncio.to_thread(write, p, value)
+                    if _is_cacheable_result(value):
+                        await asyncio.to_thread(write, p, value)
                     return value
                 except Exception as e:  # noqa: BLE001
                     last = e
@@ -391,10 +417,14 @@ def install_fetch_cache(applied: list):
                 notes = STALE_NOTES.get()
                 if notes is not None:
                     notes.append(stale_message(label, t))
+                if cache_status is not None:
+                    cache_status[:] = ["stale"]
                 return saved
             if prov == "openbb_imf":
                 fallback = await asyncio.to_thread(_stale_chokepoint_fallback, cls, params, read, path_for)
                 if fallback is not None:
+                    if cache_status is not None:
+                        cache_status[:] = ["stale"]
                     return fallback
             if _transient(last):
                 raise OpenBBError(f"{label} is not answering right now (the connection was dropped or timed out). Try again later.") from None
@@ -407,12 +437,16 @@ def install_fetch_cache(applied: list):
             task.add_done_callback(lambda _t, k=key: inflight.pop(k, None) if inflight.get(k) is _t else None)
             task.add_done_callback(lambda _t: _t.exception() if not _t.cancelled() else None)    # never "exception was never retrieved"
         if bound is None:
-            return await asyncio.shield(task)
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=bound)
-        except asyncio.TimeoutError:
-            raise OpenBBError(f"{label} is slow to answer the first request for this dataset. It keeps loading in the background and is "
-                              f"kept for later: reload this card in a minute.") from None
+            res = await asyncio.shield(task)
+        else:
+            try:
+                res = await asyncio.wait_for(asyncio.shield(task), timeout=bound)
+            except asyncio.TimeoutError:
+                raise OpenBBError(f"{label} is slow to answer the first request for this dataset. It keeps loading in the background and is "
+                                  f"kept for later: reload this card in a minute.") from None
+        if cache_status is not None and not cache_status:
+            cache_status[:] = ["refresh" if force else "miss"]
+        return res
 
     Fetcher.fetch_data = classmethod(fetch_data)
     applied.append("slow sources cached on disk (" + ", ".join(v[3].split(" (")[0] for v in CACHE_POLICY.values()) + ")")
@@ -775,6 +809,7 @@ def install_rescales(applied: list):
             return [rescale_fields(r, _fields, _factor) for r in _orig(query, data, **kwargs)]
 
         cls.transform_data = staticmethod(transform_data)
+        cls._terminal_cache_rev = f"rescale_{factor:g}"
         applied.append(label)
 
 
@@ -882,6 +917,7 @@ def install_fred_bond_index_unit(applied: list):
         return out
 
     F.transform_data = staticmethod(transform_data)
+    F._terminal_cache_rev = "bond_unit"
     applied.append("FRED bond indices say their unit (yield / OAS in percent, total return as an index level)")
 
 
@@ -1380,6 +1416,7 @@ def install_oecd_gdp_units(applied: list):
             return out
 
         cls.transform_data = staticmethod(transform_data)
+        cls._terminal_cache_rev = "gdp_unit"
         done += 1
     if done:
         applied.append("OECD GDP rows say their unit (PPP or exchange rates, price base, annual rate)")
@@ -2383,8 +2420,11 @@ def install_guard(port: str):
             to_frame = headers.get("sec-fetch-dest") == "iframe"       # Firefox (90+) and Chrome send it on frame loads
             dark = scope.get("path") in DARK_HTML_PATHS
             stale_notes: list = []
-            STALE_NOTES.set(stale_notes)                  # this request's context (each ASGI request runs in its own)
+            cache_status: list = []
+            stale_tok = STALE_NOTES.set(stale_notes)        # this request's context (each ASGI request runs in its own)
             pool_tok = CALLER_POOL.set("x" if headers.get("x-terminal-pool") == "x" else "ui")
+            refresh_tok = FORCE_REFRESH.set(headers.get("x-terminal-refresh", "").strip().lower() in ("1", "true", "yes"))
+            cache_tok = CACHE_STATUS.set(cache_status)
 
             async def send2(msg):
                 if msg["type"] == "http.response.start":
@@ -2400,6 +2440,9 @@ def install_guard(port: str):
                     if stale_notes:
                         hs.append((b"x-terminal-stale", stale_header(stale_notes)))
                         expose.append(b"X-Terminal-Stale")
+                    if cache_status:
+                        hs.append((b"x-terminal-cache", cache_status[0].encode("ascii")))
+                        expose.append(b"X-Terminal-Cache")
                     late = delayed_note(scope.get("path", ""), scope.get("query_string") or b"") if msg.get("status", 200) < 400 else ""
                     if late:
                         hs.append((b"x-terminal-delayed", stale_header([late])))
@@ -2412,6 +2455,15 @@ def install_guard(port: str):
                             # Starlette's 500 answer bypasses the CORS layer, so the page saw only "Failed to fetch" and
                             # could not say what failed. The origin was checked above.
                             hs.append((b"access-control-allow-origin", origin.encode("latin-1")))
+                        if scope.get("method") == "OPTIONS":
+                            allow_hdrs = [(i, v) for i, (k, v) in enumerate(hs) if k.lower() == b"access-control-allow-headers"]
+                            if not allow_hdrs:
+                                hs.append((b"access-control-allow-headers", b"X-Terminal-Refresh, Content-Type"))
+                            else:
+                                idx, cur_val = allow_hdrs[0]
+                                parts = [p.strip().lower() for p in cur_val.decode("latin-1").split(",") if p.strip()]
+                                if "*" not in parts and "x-terminal-refresh" not in parts:
+                                    hs[idx] = (b"access-control-allow-headers", (cur_val.decode("latin-1") + ", X-Terminal-Refresh").encode("latin-1"))
                     msg = dict(msg, headers=hs)
                     if msg.get("status", 200) >= 400 or dark:
                         state["start"] = msg           # hold it: the body is redacted first (or the dark palette added)
@@ -2456,7 +2508,10 @@ def install_guard(port: str):
                 say(f"ERROR:    {scope.get('path')} -> {type(e).__name__}: {redact(str(e))[:300]}")
                 return None
             finally:
+                STALE_NOTES.reset(stale_tok)
                 CALLER_POOL.reset(pool_tok)
+                FORCE_REFRESH.reset(refresh_tok)
+                CACHE_STATUS.reset(cache_tok)
 
     orig_load = uc.Config.load
 

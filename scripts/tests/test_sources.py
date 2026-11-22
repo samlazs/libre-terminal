@@ -92,4 +92,14 @@ res_ok = cs.check_all(mini_defs, mini_built, sample_state)
 check(res_ok["seen"] == 4 and res_ok["bad"] == ["(saved) user:mine > Mine: w_user -> ''"] and not res_ok["code_hits"],
       f"check_all validates built-in + saved cards and catches BAD placeholder sources: {res_ok['bad']}")
 
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+with tempfile.TemporaryDirectory() as td_cs:
+    r_cs = Path(td_cs)
+    (r_cs / "scripts" / "dashboards").mkdir(parents=True)
+    (r_cs / "scripts" / "dashboards" / "fake.py").write_text('MSG = "Source shown"\n', encoding="utf-8")
+    res_hit = cs.check_all({"x": {}, "v4": {}, "v5": {}}, {"concepts": {}, "dashboards": []}, {}, root=r_cs)
+    check(len(res_hit["code_hits"]) == 1 and res_hit["code_hits"][0].name == "fake.py",
+          "check_sources scans scripts/dashboards/*.py for 'Source shown'")
+
 done("test_sources")
