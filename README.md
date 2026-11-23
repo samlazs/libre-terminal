@@ -7,7 +7,8 @@ It brings equities, options, sovereign yield curves, corporate bonds, credit spr
 Most of the terminal works immediately with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add deeper U.S. economic, energy, labor, and legislative series.
 
 ![Cross-asset Markets Summary in Libre Terminal](docs/markets-summary.jpg)
-*Markets Summary: watchlists, U.S. indices and sectors, normalized returns, currencies, country ETFs, and top market news on a single screen.*
+
+*Markets Summary: watchlist, top market news, index and Treasury futures, U.S. indices and sectors, normalized returns, currencies, and country ETFs on a single screen.*
 
 ## Download and run (Windows 10 / 11)
 
@@ -32,10 +33,13 @@ Everything runs locally on your machine. Nothing leaves your computer except the
 
 Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to pull up price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview sits an editable comparable companies table with market cap and enterprise value converted to USD, multiples, margins, growth, leverage, and peer medians. Statements switch between reported values, common size (percent of revenue or of total assets), and year-over-year change. Growth & Ratios plots five years of P/E, EV/EBITDA, or P/B against their own median and 10th-90th percentile band, built from figures as they were known on each day (SEC filings for U.S. companies, Yahoo Finance elsewhere), beside ROIC and a DuPont breakdown of ROE. For U.S. banks, the snapshot adds FDIC asset-quality figures and skips multiples that have no meaning for a bank. Separate tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons (such as capital expenditure or debt across major cloud providers).
 
-| | |
-|---|---|
-| ![Company overview for Apple](docs/company-overview.jpg) | ![Comparable companies table for Apple](docs/company-comps.jpg) |
-| *Company Overview: interactive price chart, valuation and profitability snapshot, analyst consensus, and company news.* | *Comparable Companies: peer multiples, margins, growth, and ROE with peer medians alongside recent analyst actions.* |
+![Company overview for Apple](docs/company-overview.jpg)
+
+*Company Overview: interactive price chart, valuation and profitability snapshot, analyst consensus, and company news.*
+
+![Comparable companies table for Apple with peer medians and risk versus peers](docs/company-comps.jpg)
+
+*Company > Price & Peers: editable peer table with multiples, margins, growth, ROE, leverage, and peer medians, above metrics, quote, and risk-versus-peers cards.*
 
 ### Earnings day and options volatility
 
@@ -43,10 +47,13 @@ On earnings day, the Estimates tab puts expected versus reported EPS and revenue
 
 For derivatives work, the options views go beyond raw chains to plot implied volatility term structure, out-of-the-money volatility smiles, 3D volatility surfaces, open interest by expiration, and strategy payoffs (straddles, strangles, and spreads). The Volatility tab adds dealer gamma exposure by strike with the Max Pain level, and a cone of realised volatility over 10 to 126 days with today's implied volatility on top. Ticker routing happens automatically: U.S. stocks pull from Yahoo Finance, Nasdaq, or Cboe, Canadian names route to the Montreal Exchange (TMX), and crypto options route to Deribit.
 
-| | |
-|---|---|
-| ![Earnings scorecard and SEC 8-K release](docs/company-earnings.jpg) | ![Options term structure, volatility smile, 3D surface, and open interest](docs/options-volatility.jpg) |
-| *Company > Estimates: consensus vs. reported results, options-implied vs. realized moves, revisions, and the inline SEC 8-K release.* | *Company > Options: volatility term structure, OTM implied-volatility smile, 3D volatility surface, and open interest by expiration.* |
+![Earnings scorecard and SEC 8-K release](docs/company-earnings.jpg)
+
+*Company > Estimates: consensus vs. reported results, options-implied vs. realized moves, revisions, and the inline SEC 8-K release.*
+
+![Dealer gamma exposure, volatility cone, implied-volatility smile, and 3D volatility surface](docs/options-volatility.jpg)
+
+*Equity Options > Volatility: dealer gamma exposure by strike with the Max Pain level, a cone of realised volatility with today's implied volatility on top, the implied-volatility smile, and the 3D volatility surface.*
 
 ### Sovereign yield curves and central bank policy paths
 
@@ -54,10 +61,25 @@ Government curves come directly from central banks and ministries of finance rat
 
 On Policy Expectations, meeting-dated overnight index swap (OIS) trade reports from the CFTC are turned into market-implied rate paths for six major central banks (Fed, ECB, BoE, BoJ, BoC, and RBA), comparing today's pricing against one week and one month ago. A table lists each meeting period with the step priced at that meeting (in basis points and as a share of a 25 bp move) and how it has changed over the week and the month. FOMC statements, minutes, and economic projections open directly underneath, followed by San Francisco Fed term-premium estimates and Atlanta Fed rate probabilities.
 
-| | |
-|---|---|
-| ![U.S. yield curve now versus 1 month and 1 year ago](docs/rates-by-country.jpg) | ![OIS-implied Federal Reserve policy path and FOMC statement](docs/rates-policy-path.jpg) |
-| *Rates & Curves > By Country: Treasury par curve against 1M and 1Y ago, basis-point table, BIS policy history, and OECD 10Y yields.* | *Rates & Curves > Policy Expectations: OIS-implied Fed path (today vs. 1W and 1M ago) from CFTC swap prints above FOMC releases.* |
+![U.S. yield curve now versus 1 month and 1 year ago](docs/rates-by-country.jpg)
+
+*Rates & Curves > By Country: Treasury par curve against 1M and 1Y ago, basis-point table, BIS policy history, and OECD 10Y yields.*
+
+![OIS-implied Federal Reserve policy path and FOMC statement](docs/rates-policy-path.jpg)
+
+*Rates & Curves > Policy Expectations: OIS-implied Fed path (today vs. 1W and 1M ago) from CFTC swap prints above FOMC releases.*
+
+### Futures and currencies
+
+One front-month board covers equity-index, Treasury, currency, commodity, and CME crypto futures, with the one-day move measured from the last settlement (on Sunday evening, from Friday's close) and a ranking of those moves. Beneath it sit the VIX term structure, Fed funds implied policy rates by month, and the WTI curve. The Currencies dashboard pairs a spot board with currency strength (each currency against the other seven majors, set beside its move against the dollar alone), using 17:00 New York closes.
+
+![Futures board across asset classes with move ranking, VIX, Fed funds, and WTI curves](docs/futures-positioning.jpg)
+
+*Futures & Positioning > Futures: front-month board across asset classes, ranking of the day's moves, price history, and the VIX, Fed funds implied-rate, and WTI curves.*
+
+![Currencies board with currency strength versus pair moves](docs/currencies-board.jpg)
+
+*Currencies > Board: spot board by region, currency strength against pair moves, and a ranking against the dollar.*
 
 ### Corporate credit: FINRA TRACE bonds, spreads, and CDS indices
 
@@ -65,10 +87,13 @@ Enter a U.S. ticker, company name, or CUSIP on Bond Lookup to pull an issuer's t
 
 For broader credit markets, the Spreads tab pairs ICE BofA option-adjusted spreads (investment grade, high yield, rating tiers from AAA to CCC, and regional corporate spreads) with live on-the-run 5-year CDS index levels (CDX IG, HY, and EM; iTraxx Main and Crossover) derived from CFTC swap-repository prints. Additional credit tabs cover private credit (BDCs, leveraged loans, CLOs, and listed alternative managers), corporate leverage, NY Fed bond distress, and bank lending surveys.
 
-| | |
-|---|---|
-| ![FINRA TRACE bond table, issuer yield curve, and bond price history](docs/credit-bonds-trace.jpg) | ![ICE BofA credit spreads and CFTC 5-year CDS indices](docs/credit-spreads-cds.jpg) |
-| *Credit > Bond Lookup (TRACE): active Apple bond schedule, plotted issuer yield curve, and historical TRACE pricing for a selected CUSIP.* | *Credit > Spreads: ICE BofA option-adjusted spreads by rating and region alongside CFTC 5-year CDX and iTraxx index levels and history.* |
+![FINRA TRACE bond table, issuer yield curve, bond pricer, debt maturity wall, and price history](docs/credit-bonds-trace.jpg)
+
+*Credit > Bond Lookup (TRACE): active Apple bonds with ratings and yields, the issuer yield curve, a bond pricer, the debt maturity wall from the latest 10-K, and TRACE price history for the selected CUSIP.*
+
+![ICE BofA credit spreads and CFTC 5-year CDS indices](docs/credit-spreads-cds.jpg)
+
+*Credit > Spreads: ICE BofA option-adjusted spreads by rating and region alongside CFTC 5-year CDX and iTraxx index levels and history.*
 
 ### Energy markets and EIA physical fundamentals
 
@@ -76,10 +101,13 @@ The Energy desk covers crude benchmarks (WTI and Brent), refining margins (3-2-1
 
 Adding a free U.S. EIA API key populates weekly and monthly physical balances: commercial and Strategic Petroleum Reserve crude inventories, Cushing, gasoline, and distillate stocks plotted against their 5-year seasonal ranges and averages, refinery utilization, U.S. crude trade flows, LNG exports, and Short-Term Energy Outlook forecasts. International crude production and exports from JODI are built in as well.
 
-| | |
-|---|---|
-| ![Energy markets board, spot prices, crack spreads, and tanker transits](docs/energy-overview.jpg) | ![EIA crude, Cushing, gasoline, and distillate 5-year seasonal inventory bands](docs/energy-eia-fundamentals.jpg) |
-| *Energy > Overview: energy futures and equities, WTI/Brent, TTF vs. Henry Hub, crack spreads, and tanker transits through key straits.* | *Energy > Oil: commercial and SPR crude stocks, 5-year seasonal bands for Cushing, gasoline, and diesel, plus production, trade, and demand (uses free EIA key).* |
+![Energy markets board, spot prices, crack spreads, and tanker transits](docs/energy-overview.jpg)
+
+*Energy > Overview: energy futures and equities, WTI/Brent, TTF vs. Henry Hub, crack spreads, and tanker transits through key straits.*
+
+![EIA crude, Cushing, gasoline, and distillate 5-year seasonal inventory bands](docs/energy-eia-fundamentals.jpg)
+
+*Energy > Oil: commercial and SPR crude stocks, 5-year seasonal bands for Cushing, gasoline, and diesel, plus production, trade, and demand (uses free EIA key).*
 
 ### Maritime shipping, global macro, and situation-room news
 
@@ -89,12 +117,16 @@ Across macro and banking, the Country Monitor puts GDP growth, inflation, unempl
 
 The News dashboard separates curated market headlines (folding duplicate wire stories into a single row) from a dedicated stream of official releases published by central banks, statistical offices, and financial regulators.
 
-| | |
-|---|---|
-| ![IMF PortWatch maritime chokepoint monitor and shipping lane charts](docs/trade-chokepoints.jpg) | ![17-economy global macro Country Monitor with IMF CPI and BIS rate history](docs/macro-country-monitor.jpg) |
-| *Trade & Shipping > Chokepoints: daily vessel counts vs. 1Y ago and 2023, oil tanker transits, Red Sea vs. Cape diversions, and Asian lanes.* | *Economy by Country > Country Monitor: 17-economy macro scorecard with IMF consumer-price inflation and BIS policy-rate history.* |
+![IMF PortWatch maritime chokepoint monitor and shipping lane charts](docs/trade-chokepoints.jpg)
+
+*Trade & Shipping > Chokepoints: daily vessel counts vs. 1Y ago and 2023, oil tanker transits, Red Sea vs. Cape diversions, and Asian lanes.*
+
+![17-economy global macro Country Monitor with IMF CPI and BIS rate history](docs/macro-country-monitor.jpg)
+
+*Economy by Country > Country Monitor: 17-economy macro scorecard with IMF consumer-price inflation and BIS policy-rate history.*
 
 ![Market monitor news feed alongside official central bank and regulator releases](docs/news-situation-room.jpg)
+
 *News > Markets: curated financial press with duplicate stories folded on the left, beside official releases from the Fed, SEC, BEA, and other regulators.*
 
 ## Coverage across 28 dashboards
@@ -190,7 +222,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 ### Startup and backend options
 
 - **Skip the first-launch wait:** `Start.cmd --no-wait` opens the browser immediately while data finishes loading in the background.
-- **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` if setting custom ports). The default V5 install includes **28 dashboards, 118 tabs, 766 cards, and 929 data functions**. Opting into V4 adds about 43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) for **28 dashboards, 119 tabs, 809 cards, and 990 functions**. A free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) works with `--with-v4`.
+- **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` if setting custom ports). The default V5 install includes **28 dashboards, 120 tabs, 786 cards, and 941 data functions**. Opting into V4 adds about 43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) and one tab. A free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) works with `--with-v4`.
 - **Custom local folder:** Set `TERMINAL_LOCAL_DIR` before launching. Services bind to `127.0.0.1` only.
 
 ### macOS / Linux (experimental, untested)
