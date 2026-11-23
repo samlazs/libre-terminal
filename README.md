@@ -222,7 +222,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 ### Startup and backend options
 
 - **Skip the first-launch wait:** `Start.cmd --no-wait` opens the browser immediately while data finishes loading in the background.
-- **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` if setting custom ports). The default V5 install includes **28 dashboards, 120 tabs, 786 cards, and 941 data functions**. Opting into V4 adds about 43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) and one tab. A free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) works with `--with-v4`.
+- **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` if setting custom ports). The default V5 install includes **28 dashboards, 120 tabs, 786 cards, and 941 data functions**. Opting into V4 adds 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) across the same 120 tabs (1,002 data functions total). A free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) works with `--with-v4`.
 - **Custom local folder:** Set `TERMINAL_LOCAL_DIR` before launching. Services bind to `127.0.0.1` only.
 
 ### macOS / Linux (experimental, untested)

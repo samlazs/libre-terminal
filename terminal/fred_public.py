@@ -1,6 +1,6 @@
 """FRED without an API key: the public CSV download (fredgraph.csv) and the series page for titles and units.
 
-Used by the terminal's own views (composite.py) and, through scripts/run_backend.py, by the backend's FRED
+Used by the terminal's own views (terminal/composite/) and, through scripts/run_backend.py, by the backend's FRED
 provider when no FRED key is set. Standard library only.
 
 FRED's edge network answers scripts that say what they are (the default Python user agent) but stalls requests

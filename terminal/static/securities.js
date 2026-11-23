@@ -100,7 +100,7 @@
   };
 
   // ---------- watchlists and peer lists ----------
-  // Starter list for a fresh install (same symbols as STARTER_WATCHLIST in terminal/composite.py).
+  // Starter list for a fresh install (same symbols as STARTER_WATCHLIST in terminal/composite/markets/boards.py).
   var DEFAULT_LISTS = [{ id: "main", name: "My watchlist", symbols: ["AAPL", "MSFT", "NVDA", "ASML", "7203.T", "SHEL.L", "RHM.DE", "^GSPC", "EURUSD=X", "GC=F", "BTC-USD"] }];
   T.lists = {};
   T.lists.all = function () { var w = st().watchlists; return w && w.length ? w : DEFAULT_LISTS; };

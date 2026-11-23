@@ -13,7 +13,7 @@ Two local processes by default (plus an optional third legacy backend via `--wit
 | Data backend V5 | 6900 | OpenBB Platform 5 in `.venv-v5`: about 20 data sources (default). |
 | Legacy backend V4 *(opt-in)* | 6901 | OpenBB 4.7 in `.venv-v4`, kept for sources V5 dropped (FMP, EconDB, Finviz, Intrinio, Polygon, Tiingo and others). Opt-in via `install --with-v4` and `start --with-v4` (`--skip-v4` accepted as a backward-compatible alias). |
 
-**V5-only is the default; V4 is opt-in.** `.venv-v4` adds about 480 MB (~1.5 GB total vs ~1 GB V5-only) and a second backend process for ~43 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ, plus `Segments & KPIs`). S&P 500 valuation multiples (`multpl.com`) are owned directly by `terminal/multpl.py` (`/x/sp500_multiples`), `Screeners & Movers > Screener` uses V5's Yahoo Finance screener, and `ETFs & Mutual Funds > ETF Profile` stays complete with 7 keyless V5 cards. With `--with-v4`, the generator includes the legacy cards and exposes V4 options in source pickers; by default (`V5-only`), it builds without them so nothing shows broken.
+**V5-only is the default; V4 is opt-in.** `.venv-v4` adds about 480 MB (~1.5 GB total vs ~1 GB V5-only) and a second backend process for 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ, including the legacy cards on `Segments & KPIs`). S&P 500 valuation multiples (`multpl.com`) are owned directly by `terminal/multpl.py` (`/x/sp500_multiples`), `Screeners & Movers > Screener` uses V5's Yahoo Finance screener, and `ETFs & Mutual Funds > ETF Profile` stays complete with 7 keyless V5 cards. With `--with-v4`, the generator includes the legacy cards and exposes V4 options in source pickers; by default (`V5-only`), it builds without them so nothing shows broken.
 
 **Platform support.** Windows 10/11 is the officially supported and tested platform. The root `.sh` scripts (`install.sh`, `start.sh`, `stop.sh`, `setup-keys.sh`) share `scripts/launcher.py` and are kept clearly marked experimental/untested.
 
@@ -73,7 +73,7 @@ ruff.toml                    static bug-check configuration for terminal/ and sc
 `scripts/dashboards/` holds the plain structure and override data (`overrides.py`, `layouts.py`) while
 `scripts/build_dashboards.py` is the compact generator engine (re-exporting all public data/DSL symbols) that writes
 `local/dashboards.json` on every start (`launcher.py dashboards` rebuilds it; `--report` prints the layout).
-Current default V5-only build: 28 dashboards, 120 tabs, 786 cards, 30 concept families; every data function placed, none by fallback (`--with-v4` adds about 43 legacy cards and one tab).
+Current default V5-only build: 28 dashboards, 120 tabs, 786 cards, 30 concept families; every data function placed, none by fallback (`--with-v4` adds 39 legacy cards across the same 120 tabs, 43 concept families, and 1,002 data functions).
 
 Conventions:
 
@@ -198,7 +198,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 
 | File | Covers |
 |---|---|
-| `test_numbers.py`, `test_returns.py`, `test_rates.py`, `test_ev.py`, `test_peer_ratios.py`, `test_gauges.py` | FX direction, yield changes in bp, total/price returns, EV currency normalization, peer ratios, regional/Fed gauges, `country_monitor`, `_rolling`, `CALCS`, `chokepoint_monitor` |
+| `test_numbers.py`, `test_fx.py`, `test_returns.py`, `test_rates.py`, `test_ev.py`, `test_peer_ratios.py`, `test_gauges.py` | FX direction, 17:00 NY FX closes, TradingView FX fix, currency strength, yield changes in bp, total/price returns, EV currency normalization, peer ratios, regional/Fed gauges, `country_monitor`, `_rolling`, `CALCS`, `chokepoint_monitor` |
 | `test_curves.py`, `test_policy_path.py`, `test_cds.py`, `test_bonds.py`, `test_banks.py`, `test_cryptovol.py` | Sovereign curve parsers/store, CFTC OIS policy path, CDS index conventions, FINRA TRACE bond lookup, FDIC/FFIEC bank views, Deribit DVOL vs realised vol |
 | `test_earnings.py`, `test_snapshot.py`, `test_sec_quarters.py`, `test_sec_growth.py`, `test_futures.py`, `test_funds.py`, `test_nasdaq_etf.py` | Earnings model & implied move, snapshot text, SEC YTD-derived quarters & growth units, futures curves, fund multiples/TMX holdings, Nasdaq ETF fallback |
 | `test_columns.py`, `test_sources.py`, `test_trust.py`, `test_timezone.py`, `test_news.py`, `test_fred.py`, `test_links.py`, `test_multpl.py` | Column headers/formats/units, source contract & v4 saved-state check, stale/delayed/fallback trust signals, Montreal timezones, news ranking/dedup, keyless FRED CSV, company jump links, multpl.com S&P 500 valuation multiples |
@@ -209,7 +209,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_redact.py`, `test_backend_wrapper.py` | key redaction, stream guard, log redaction, Host/Origin guard |
 | `test_launcher_server.py` | restart policy, stop scope, V5-only default / `--with-v4` / `--skip-v4` CLI, UI server Host/Origin/state/config rules, v4 override validation, corrupt state recovery, ETags, CSP, keys applied on start, cache pruning |
 | `test_health.py`, `test_workflow.py` | relative NY dates, card/choice URL builder, error classifier, secret redaction, mock OECD-429 health run; publishable manifest, snapshots, snapshot diffs, EOL/BOM/hygiene checks, parallel test filter |
-| `test_frontend.py` | runs `frontend_checks.js` (239+ browser checks) in headless Edge (or Chrome) against a temporary UI server; skipped with a notice when no such browser is installed |
+| `test_frontend.py` | runs `frontend_checks.js` (274 browser checks) in headless Edge (or Chrome) against a temporary UI server; skipped with a notice when no such browser is installed |
 
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,
@@ -233,14 +233,14 @@ A supervisor that gives up writes `local/run/<name>.stopped.json`; `/api/service
 - **Restart scope:** After editing `terminal/*.py`, run `launcher.py restart ui` (~2 s); after editing `scripts/run_backend.py`,
   run `launcher.py restart backends` (or `stop` then `start`).
 
-## Planned refactor
+## Completed refactors
 
 `terminal/composite/` (split from the 5,095-line `terminal/composite.py` alongside `news.py`, `banks.py`, `bonds.py`,
 `cds.py`, `policy_path.py`, `cryptovol.py`, `links.py`, `multpl.py`, `fred_public.py`, and the later `valuation.py`, `risk.py`,
 `bond_math.py`, `etfs.py`, `optionsx.py`) is the terminal's composite
 views package, keeping the exact import name `composite` with zero behaviour change. `terminal/composite/__init__.py`
 re-exports `dispatch`, `warm`, `CompositeError`, `ROUTES` (all 54 routes), the 9 option lists `xwidgets.py` imports by
-reference, `time`, and all 320 module-level symbols. Submodules import `composite as C` and look up cross-module calls
+reference, `time`, and 317 re-exported symbols (plus `dispatch`, wrappers, and `ROUTES`). Submodules import `composite as C` and look up cross-module calls
 and patchable globals through `C.<name>` at runtime so offline tests can monkey-patch `composite` attributes directly.
 
 ```
