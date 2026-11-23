@@ -40,7 +40,7 @@ from .markets.prices import (  # noqa: F401
 )
 from .markets.boards import (  # noqa: F401
     BOARDS, BOARD_OPTIONS, _resolve_board, board, null_warning, STALE_ROW_DAYS, _mark_stale,
-    _with_convention, BP_FMT, HORIZONS, currency_view, FUTURES_UNITS, price_decimals, _quote_row,
+    _with_convention, BP_FMT, HORIZONS, currency_view, FUTURES_UNITS, FUTURES_DECIMALS, price_decimals, _quote_row,
     _labels, performance, perf_bars, STYLE_BOX, style_box, BOARD_LABELS, STARTER_WATCHLIST, watchlist,
     FX_MATRIX, FX_MATRIX_PAIRS, fx_matrix,
 )

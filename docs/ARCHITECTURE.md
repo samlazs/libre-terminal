@@ -154,7 +154,8 @@ Applied in memory at start; no installed file is modified.
 - Yahoo futures curves: only months that trade (3-month average volume of at least 10 contracts a day), priced at the
   bid/ask mid when both sides are quoted within 1%, else the previous close (a `basis` column says which); for
   precious metals a month more than 3% off a robust line through the curve is left out (stale or off-market quotes).
-  The stock fetcher halved one-sided quotes and drew 0.00 for unquoted months.
+  The stock fetcher halved one-sided quotes and drew 0.00 for unquoted months. CBOT 30-day Fed funds (`ZQ`) rows
+  also carry `implied_rate` = 100 - price, in percent (`FUT_RATE_ROOTS`).
 - Cboe `delayed_quotes` refused (HTTP 403; never worked around): `derivatives/options/chains?provider=cboe` and options
   analytics share a concurrent Yahoo chain loader at the regular-session price and time and calculate IV and Greeks
   (`terminal/option_math.py`: parity forward, Black-76, one IV per strike; Yahoo's own IV is a placeholder without

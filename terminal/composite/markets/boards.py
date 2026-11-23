@@ -55,6 +55,25 @@ BOARDS = {
                              ("South African Rand", "ZAR=X"), ("Turkish Lira", "TRY=X"), ("Korean Won", "KRW=X")]),
         ("Crosses (+ = first currency stronger)", [("EUR/JPY", "EURJPY=X"), ("EUR/GBP", "EURGBP=X"), ("EUR/CHF", "EURCHF=X"), ("GBP/JPY", "GBPJPY=X"), ("AUD/JPY", "AUDJPY=X")]),
     ]),
+    # One board across asset classes: CME/CBOT front months, so the Sunday-evening reopen shows in 1D against Friday's close.
+    # Currency futures are quoted in dollars per unit of the currency (+ = currency stronger), never inverted.
+    # Treasury futures are prices (+ = yields lower). No VIX future (Yahoo has none; the VX curve is on Cboe).
+    "futures": ("Futures (front month, all asset classes)", [
+        ("Equity indices", [("E-mini S&P 500", "ES=F"), ("E-mini Nasdaq-100", "NQ=F"), ("E-mini Dow", "YM=F"), ("E-mini Russell 2000", "RTY=F"),
+                            ("Nikkei 225 (USD)", "NKD=F")]),
+        ("Treasuries (price: + = yields lower)", [("2-Year Note", "ZT=F"), ("5-Year Note", "ZF=F"), ("10-Year Note", "ZN=F"), ("30-Year Bond", "ZB=F"),
+                                                 ("Ultra Bond", "UB=F")]),
+        ("Currencies ($ per unit: + = currency stronger)", [("Euro", "6E=F"), ("Japanese Yen", "6J=F"), ("British Pound", "6B=F"), ("Canadian Dollar", "6C=F"),
+                                                            ("Australian Dollar", "6A=F"), ("Swiss Franc", "6S=F")]),
+        ("Commodities", [("WTI Crude", "CL=F"), ("Brent Crude", "BZ=F"), ("Natural Gas (U.S.)", "NG=F"), ("Gold", "GC=F"), ("Silver", "SI=F"), ("Copper", "HG=F"),
+                         ("Corn", "ZC=F"), ("Soybeans", "ZS=F")]),
+        ("Crypto (CME)", [("Bitcoin", "BTC=F"), ("Ether", "ETH=F")]),
+    ]),
+    # Markets Summary > Overview: the futures a desk checks first; currencies and commodities have their own boards there
+    "futures_brief": ("Index and Treasury futures (front month)", [
+        ("Equity indices", [("E-mini S&P 500", "ES=F"), ("E-mini Nasdaq-100", "NQ=F"), ("E-mini Dow", "YM=F"), ("E-mini Russell 2000", "RTY=F")]),
+        ("Treasuries (price: + = yields lower)", [("10-Year Note", "ZN=F"), ("30-Year Bond", "ZB=F")]),
+    ]),
     "commodities": ("Commodities (front-month futures)", [
         ("Energy", [("WTI Crude", "CL=F"), ("Brent Crude", "BZ=F"), ("Natural Gas (U.S.)", "NG=F"), ("Natural Gas (Europe TTF)", "TTF=F"), ("Gasoline", "RB=F"), ("Heating Oil", "HO=F"), ("Uranium (physical trust)", "U-UN.TO")]),
         ("Metals", [("Gold", "GC=F"), ("Silver", "SI=F"), ("Copper", "HG=F"), ("Platinum", "PL=F"), ("Palladium", "PA=F")]),
@@ -248,7 +267,16 @@ def currency_view(label, symbol) -> bool:
 FUTURES_UNITS = {"CL=F": "$/bbl", "BZ=F": "$/bbl", "NG=F": "$/MMBtu", "TTF=F": "EUR/MWh", "RB=F": "$/gal", "HO=F": "$/gal",
                  "GC=F": "$/oz", "SI=F": "$/oz", "PL=F": "$/oz", "PA=F": "$/oz", "HG=F": "$/lb",
                  "ZC=F": "¢/bu", "ZW=F": "¢/bu", "KE=F": "¢/bu", "ZS=F": "¢/bu", "ZM=F": "$/short ton", "ZL=F": "¢/lb",
-                 "KC=F": "¢/lb", "SB=F": "¢/lb", "CT=F": "¢/lb", "CC=F": "$/t", "LE=F": "¢/lb", "HE=F": "¢/lb", "U-UN.TO": "C$"}
+                 "KC=F": "¢/lb", "SB=F": "¢/lb", "CT=F": "¢/lb", "CC=F": "$/t", "LE=F": "¢/lb", "HE=F": "¢/lb", "U-UN.TO": "C$",
+                 # financial futures (CME, CBOT): index points; Treasuries in points of par (decimal, not 32nds); dollars per currency unit
+                 "ES=F": "pts", "NQ=F": "pts", "YM=F": "pts", "RTY=F": "pts", "NKD=F": "pts",
+                 "ZT=F": "% of par", "ZF=F": "% of par", "ZN=F": "% of par", "ZB=F": "% of par", "UB=F": "% of par",
+                 "6E=F": "$/EUR", "6J=F": "$/JPY", "6B=F": "$/GBP", "6C=F": "$/CAD", "6A=F": "$/AUD", "6S=F": "$/CHF",
+                 "BTC=F": "$/BTC", "ETH=F": "$/ETH"}
+# Decimals where size-based precision hides the exchange tick: Treasury futures move in 32nds (ZT 1/256 = 0.0039),
+# currency futures in 0.00005 (6J in 0.0000005).
+FUTURES_DECIMALS = {"ZT=F": 4, "ZF=F": 4, "ZN=F": 4, "ZB=F": 4, "UB=F": 4,
+                    "6E=F": 5, "6B=F": 5, "6C=F": 5, "6A=F": 5, "6S=F": 5, "6J=F": 7}
 
 
 def price_decimals(v) -> int:
@@ -297,7 +325,7 @@ def _quote_row(label, s, ser, divs=None):
     if pair:
         row["quote"] = pair
     # one precision per instrument: 2 decimals for indices, futures and USD/JPY, 4 for EUR/USD, more for sub-dollar coins
-    dp = C.price_decimals(last)
+    dp = FUTURES_DECIMALS.get(s) or C.price_decimals(last)
     row["_fmt"] = {"price": {"decimalPlaces": dp}, "chg": {"decimalPlaces": dp}}
     if s in FUTURES_UNITS:                      # TTF 85.48 EUR/MWh beside Henry Hub 3.10 $/MMBtu (review A6)
         row["_fmt"]["price"]["suffix"] = " " + FUTURES_UNITS[s]

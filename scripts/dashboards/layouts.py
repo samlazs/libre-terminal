@@ -107,7 +107,7 @@ PERF = lambda syms, period="YTD", **kw: X("performance", symbols=syms, period=pe
 
 DASHBOARDS = [
     # ============================================================ OVERVIEW
-    D("markets", "Markets Summary", "overview", "Cross-asset overview: equities, sectors, rates, credit, currencies, commodities, crypto, movers and news on one screen.", [
+    D("markets", "Markets Summary", "overview", "Cross-asset overview: equities, index and Treasury futures, sectors, rates, credit, currencies, commodities, crypto, movers and news on one screen.", [
         T("Overview", columns=[
             (12, [W("x:watchlist", h=16, groups=[], cols=["name", "currency", "price", "chg_pct", "ytd"]), OVB("us_equity", 15), OVB("us_sectors", 17), OVB("fixed_income", 22)]),
             # review G2: the chart was ~610 px and Global Yields 42 rows while Market News showed two headlines
@@ -116,7 +116,9 @@ DASHBOARDS = [
                   W("yfinance/tv_widget/view", h=15, title="Chart"),
                   X("global_yields", h=16, countries="g10", title="Global Yields (G10)", cols=["country", "m3", "y2", "y10", "slope_2s10s", "policy"]),
                   X("style_box", h=9)]),
-            (12, [OVB("fx", 15), OVB("global_markets", 30), OVB("commodities", 25), OVB("crypto", 20)]),
+            # index and Treasury futures on top: 1D is the move since the last settlement (Sunday evening: since Friday's close).
+            # Added in the last column so per-card overrides keyed by position (overview-4, overview-5) keep pointing at their cards.
+            (12, [OVB("futures_brief", 12), OVB("fx", 15), OVB("global_markets", 26), OVB("commodities", 25), OVB("crypto", 20)]),
         ]),
         T("Chart", rows=[[W("yfinance/tv_widget/view", 28, 26), WATCH(12, 26)],
                          [X("chart", 28, 22, title="Compare chart",compare="^NDX,^RUT", view="pct", period="1Y", studies="ma50,ma200"), X("board", 12, 22, preset="megacaps")],
@@ -359,16 +361,29 @@ DASHBOARDS = [
     ], groups=[dict(SYMBOL, value="AAPL")], more=["cboe/options/*", "derivatives/options/*"]),
 
     # Swaps (SDR) and FX derivatives live in Rates & Curves and Currencies; CDS index trades in Credit
-    D("futures", "Futures & Positioning", "derivatives", "Front-month futures, curves and history, contract reference, and Commitments of Traders positioning.", [
-        T("Futures", rows=[[X("board", 16, 24, preset="commodities"), CURVE("CL", "Crude oil futures curve (WTI)", 24, 24)],
-                           [W("derivatives/futures/historical", 20, 16, provider="yfinance", params={"symbol": "ES"}, title="Futures price history",
-                             tparam={"param": "symbol", "labels": {"ES": "E-mini S&P 500", "NQ": "E-mini Nasdaq-100", "CL": "WTI crude", "GC": "Gold", "ZN": "10-year T-note"}}),
-                            CURVE("GC", "Gold futures curve", 20, 16)]],
+    D("futures", "Futures & Positioning", "derivatives", "Front-month futures across equity indices, Treasuries, currencies, commodities and crypto; "
+      "VIX and Fed funds curves; history, contract reference, and Commitments of Traders positioning.", [
+        # cross-asset first: the 1D column is the move since the last settlement (Sunday evening: since Friday), the bars rank it
+        T("Futures", columns=[
+            (16, [X("board", h=32, preset="futures")]),
+            (24, [X("perf_bars", h=14, preset="futures", period="1D", title="Ranking: futures moves"),
+                  W("derivatives/futures/historical", None, 18, provider="yfinance", params={"symbol": "ES"}, title="Futures price history",
+                    tparam={"param": "symbol", "labels": {"ES": "E-mini S&P 500", "NQ": "E-mini Nasdaq-100", "RTY": "E-mini Russell 2000", "ZN": "10-year T-note",
+                                                          "ZB": "30-year T-bond", "6E": "Euro FX", "6J": "Japanese yen", "CL": "WTI crude", "GC": "Gold",
+                                                          "BTC": "CME bitcoin"}})]),
+        ], rows=[[W("derivatives/futures/curve", 14, 16, provider="cboe", params={"symbol": "VX"}, title="VIX futures curve (term structure)",
+                    plot={"x": "expiration", "ys": ["price"], "split": "", "type": "line"}),
+                  W("derivatives/futures/curve", 13, 16, provider="yfinance", params={"symbol": "ZQ"}, title="Fed funds futures: implied policy rate by month (%)",
+                    plot={"x": "expiration", "ys": ["implied_rate"], "split": "", "type": "line"}, only=["yfinance"]),
+                  CURVE("CL", "Crude oil futures curve (WTI)", 13, 16)]],
           auto=["cboe/futures/settlement_prices", "derivatives/futures/instruments"]),
-        # the positioning index (spec score, zones) first; the raw report last
+        # the positioning index (spec score, zones) first; the raw report last. Commodity reports sit on Commodities, Energy, Agriculture.
         T("Positioning (COT)", rows=[[W("cftc/cot_index", 24, 18, title="COT positioning index (all markets)"), W("cftc/cot_movers", 16, 18)],
-                                     [W("cftc/cot_search", 14, 16, params={"query": "crude"}), W("cftc/cot", 26, 16, params={"code": "067651"}, title="Commitments of Traders report",
-                                                                                                                     tparam={"param": "code", "labels": {"067651": "067651 · WTI crude"}})]],
+                                     [W("cftc/cot_search", 14, 16, params={"query": "S&P 500"}), W("cftc/cot", 26, 16, params={"code": "13874A"}, title="Commitments of Traders report",
+                                                                                                                       tparam={"param": "code", "labels": {
+                                                                                                                           "13874A": "13874A · E-mini S&P 500", "209742": "209742 · E-mini Nasdaq-100",
+                                                                                                                           "043602": "043602 · 10-year T-note", "099741": "099741 · Euro FX",
+                                                                                                                           "097741": "097741 · Japanese yen", "067651": "067651 · WTI crude"}})]],
           auto=[W("cftc/cot_positioning", plot={"x": "report_date", "ys": ["large_specs_net_pct_oi", "commercials_net_pct_oi", "small_specs_net_pct_oi"], "split": "", "type": "line"})]),
     ], more=["derivatives/futures/*", "cftc/*"]),
 

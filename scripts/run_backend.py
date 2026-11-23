@@ -2536,6 +2536,7 @@ async def warm_tvchart(symbol: str = "^GSPC") -> dict:
 
 FUT_MIN_AVG_VOLUME = 10     # contracts a day over three months: below this Yahoo's prices for a month are not a market
 FUT_MAX_SPREAD = 0.01          # the bid/ask mid only when the spread is within 1% of it
+FUT_RATE_ROOTS = {"ZQ"}        # interest-rate futures priced 100 - rate: the rows also carry the implied rate in percent
 
 
 def futures_curve_points(quotes: list, expiration_of) -> list:
@@ -2559,7 +2560,10 @@ def futures_curve_points(quotes: list, expiration_of) -> list:
             price, basis = prev, "previous close"
         else:
             continue
-        out.append({"expiration": expiration_of(q["symbol"]), "price": price, "basis": basis, "_root": str(q["symbol"])[:2]})
+        row = {"expiration": expiration_of(q["symbol"]), "price": price, "basis": basis, "_root": str(q["symbol"])[:2]}
+        if row["_root"] in FUT_RATE_ROOTS:          # CBOT 30-day Fed funds: price = 100 - the month's average rate (%)
+            row["implied_rate"] = round(100 - price, 4)
+        out.append(row)
     out.sort(key=lambda r: r["expiration"])
     if len(out) >= 5 and all(r["_root"] in FUT_NO_ARB for r in out):
         out = _drop_off_curve(out)
@@ -2610,7 +2614,7 @@ def install_yfinance_futures_curve_fix(applied: list):
         with open(os.devnull, "w") as devnull, redirect_stdout(devnull), redirect_stderr(devnull), suppress(ClientError):
             data = await YFinanceEquityQuoteFetcher().fetch_data(params={"symbol": ",".join(symbols)}, credentials={})
         rows = futures_curve_points([d.model_dump() for d in data or ()], yh.get_expiration_month)
-        return DataFrame(rows, columns=["expiration", "price", "basis"])
+        return DataFrame(rows, columns=["expiration", "price", "basis"] + (["implied_rate"] if any("implied_rate" in r for r in rows) else []))
 
     yh.get_futures_quotes = get_futures_quotes
     applied.append("Yahoo futures curves: traded months only, mid or previous close (labelled), no 0.00 or half prices")

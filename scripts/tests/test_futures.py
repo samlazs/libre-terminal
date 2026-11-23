@@ -52,4 +52,11 @@ check(gp["2028-06"] == 4098.9 and gp["2028-10"] == 4161.55, "gold neighbours kee
 gas = [("NGX26.NYM", 3.20, 3.21), ("NGZ26.NYM", 4.10, 4.11), ("NGF27.NYM", 4.60, 4.61), ("NGH27.NYM", 3.70, 3.71), ("NGJ27.NYM", 3.10, 3.11)]
 ng = rb.futures_curve_points([{"symbol": s, "bid": b, "ask": a, "prev_close": b, "volume_average": 500.0} for s, b, a in gas], exp)
 check(len(ng) == 5, "natural gas: winter premium kept (no screen outside precious metals)")
+
+# CBOT 30-day Fed funds is priced 100 - rate: the curve rows carry the implied rate in percent; other roots do not
+zq = rb.futures_curve_points([{"symbol": "ZQZ26.CBT", "bid": 95.86, "ask": 95.87, "prev_close": 95.85, "volume_average": 9000.0},
+                              {"symbol": "ZQF27.CBT", "bid": 0.0, "ask": 0.0, "prev_close": 95.875, "volume_average": 4000.0}], exp)
+check(zq[0]["price"] == 95.865 and zq[0]["implied_rate"] == 4.135, "ZQ Dec-26: mid 95.865 -> implied rate 100 - 95.865 = 4.135%")
+check(zq[1]["implied_rate"] == 4.125 and zq[1]["basis"] == "previous close", "ZQ Jan-27 from the previous close: 4.125%")
+check(all("implied_rate" not in p for p in pts + ng), "crude, gold and gas rows carry no implied rate")
 done("test_futures")

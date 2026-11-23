@@ -37,6 +37,19 @@ for _, rows in c.BOARDS["risk_monitor"][1]:
         if c.fx_pair(sym):
             check("/" in label or c.currency_view(label, sym), f"risk monitor row {label} follows one convention")
 
+# ---- the cross-asset futures board: every row declares its unit; currency futures are $ per unit (never inverted)
+for _, rows in c.BOARDS["futures"][1] + c.BOARDS["futures_brief"][1]:
+    for label, sym in rows:
+        check(sym in c.FUTURES_UNITS, f"futures board row {label} ({sym}) declares its quoting unit")
+        check(not c.fx_pair(sym) and not c.currency_view(label, sym) and not c.is_yield(sym), f"futures board row {label} is shown as quoted")
+eu = c._quote_row("Euro", "6E=F", series("2026-01-01", [1.0900] * 40 + [1.0987]))
+check(eu["chg_pct"] > 0 and abs(eu["chg"] - 0.0087) < 1e-9 and "quote" not in eu, "6E up = euro stronger, change in $ per euro")
+check(eu["_fmt"]["price"] == {"decimalPlaces": 5, "suffix": " $/EUR"}, "6E: five decimals (0.00005 tick), unit $/EUR")
+zn = c._quote_row("10-Year Note", "ZN=F", series("2026-01-01", [106.84375] * 40 + [106.625]))
+check(abs(zn["chg"] + 0.21875) < 1e-12 and zn["_fmt"]["price"]["decimalPlaces"] == 4, "ZN: -7/32 = -0.21875 kept to 4 decimals")
+es = c._quote_row("E-mini S&P 500", "ES=F", series("2026-01-01", [6935.0] * 40 + [7077.75]))
+check(abs(es["chg_pct"] - (7077.75 / 6935 - 1)) < 1e-12 and es["_fmt"]["price"]["suffix"] == " pts", "ES 1D: 7,077.75 / 6,935 - 1 = +2.06%, in points")
+
 # ---- M1: yields move in basis points, never in percent of the yield
 tnx = series("2026-01-01", [4.00] * 40 + [4.05])
 row = c._quote_row("10-Year Note", "^TNX", tnx)

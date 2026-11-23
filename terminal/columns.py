@@ -199,7 +199,7 @@ RAW_NOTE = "Unit not confirmed by the source: shown as delivered."
 # Fields a runtime patch (scripts/run_backend.py) adds to a provider's rows; the widget catalog, built from OpenBB's
 # static reference, does not list them, but the rows carry them.
 PATCH_FIELDS = {"cftc_cds_index_trades_cftc_obb": {"spread_bp"}, "uscongress_search_congress_gov_obb": {"bill_id"},
-                "deribit_market_ticker_deribit_obb": {"funding_apr"}}
+                "deribit_market_ticker_deribit_obb": {"funding_apr"}, "derivatives_futures_curve_yfinance_obb": {"implied_rate"}}
 _TMX_SCREENER_PCT = ("gross_margin", "ebitda_margin", "ebit_margin", "return_on_assets", "return_on_equity", "return_on_capital",
                      "dividend_growth_3y", "dividend_growth_5y", "revenue_growth_3y", "revenue_growth_5y", "income_growth_3y", "income_growth_5y")
 UNITS = {
@@ -245,7 +245,8 @@ UNITS = {
     # FMP (Damodaran) equity risk premia in percent (review A6, live 2026-11-18): Zimbabwe total 15.89 = mature-market
     # premium 4.23 + country premium 11.66
     "economy_risk_premium_fmp_obb": {"total_equity_risk_premium": "percent", "country_risk_premium": "percent"},
-    "cftc_cds_index_trades_cftc_obb": {"spread_bp": "number"},                         # run_backend.cds_spread_bp: 0.006112 (notation 3) = 61.12
+    "cftc_cds_index_trades_cftc_obb": {"spread_bp": "number"},
+    "derivatives_futures_curve_yfinance_obb": {"implied_rate": "percent"},              # Fed funds (ZQ) 100 - 95.865 = 4.135 (run_backend.futures_curve_points)                         # run_backend.cds_spread_bp: 0.006112 (notation 3) = 61.12
     # yield 8.31 / OAS 3.43 (percent) or total-return index 1,868.8, by index_type: shown as delivered; the rows carry a
     # `unit` column from index_type (run_backend.install_fred_bond_index_unit)
     "fixedincome_bond_indices_fred_obb": {"high_yield": "raw"},
@@ -261,6 +262,7 @@ UNITS = {
 # Headers that depend on the source of one widget (UNIT_HEADERS is per route, shared by every provider of it)
 WIDGET_HEADERS = {
     "etf_info_yfinance_obb": {"return_ytd": "YTD total return (to last month-end)"},
+    "derivatives_futures_curve_yfinance_obb": {"implied_rate": "Implied rate (100 - price)"},
     # Deribit quotes BTC/ETH options in the coin; openbb_deribit carries prices to USD at the index level of the quote
     "derivatives_options_chains_deribit_obb": {"bid": "Bid (USD)", "ask": "Ask (USD)", "mark": "Mark (USD)", "last_trade_price": "Last (USD)",
                                                "underlying_price": "Underlying (USD)", "dte": "DTE (calendar)"},
