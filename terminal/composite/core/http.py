@@ -18,7 +18,9 @@ V4 = f"http://127.0.0.1:{os.environ.get('TERMINAL_V4_PORT') or 6901}/api/v1"
 
 
 class CompositeError(Exception):
-    pass
+    def __init__(self, msg, *, transient=False):
+        super().__init__(msg)
+        self.transient = bool(transient)
 
 
 def http_json(url, timeout=45):
@@ -35,11 +37,12 @@ def http_json(url, timeout=45):
             detail = json.loads(e.read()).get("detail")
         except Exception:
             detail = None
-        raise C.CompositeError(str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}") from None
+        raise C.CompositeError(str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}",
+                               transient=e.code in (429, 502, 503, 504)) from None
     except urllib.error.URLError as e:
-        raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).") from None
+        raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", transient=True) from None
     except (TimeoutError, OSError) as e:                 # read timeouts are not URLErrors
-        raise C.CompositeError(f"{C._which(url)} did not answer in time ({type(e).__name__}).") from None
+        raise C.CompositeError(f"{C._which(url)} did not answer in time ({type(e).__name__}).", transient=True) from None
 
 
 def _which(url):

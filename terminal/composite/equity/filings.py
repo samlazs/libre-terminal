@@ -37,6 +37,9 @@ FACTS = {
     "ppe": ("Property, plant & equipment (net)", ["PropertyPlantAndEquipmentNet"], True),
 }
 
+VALID_FORMS = ("10-Q", "10-K", "20-F", "40-F", "DEF 14A")
+ANNUAL_FORMS = ("10-K", "20-F", "40-F", "DEF 14A")
+
 FACT_OPTIONS = [{"label": v[0], "value": k} for k, v in FACTS.items()]
 
 
@@ -58,8 +61,13 @@ def _facts(symbols, fact):
             for r in rows or []:
                 if r.get("value") is None or not r.get("period_ending") or r.get("symbol") not in symbols:
                     continue
+                base_form = str(r.get("form") or "").split("/")[0]
+                if base_form and base_form not in VALID_FORMS:
+                    continue
                 span = "instant" if instant else r.get("span")
                 if span not in ("quarter", "annual", "instant"):
+                    continue
+                if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
                     continue
                 d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
                 d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(r["value"])))
@@ -76,7 +84,7 @@ def _facts(symbols, fact):
         if not out:
             raise C.CompositeError(f"SEC filings have no '{label}' figures for: {', '.join(symbols)}")
         return out
-    return C.cached_disk(C.disk_name("facts2_" + fact + "_", "_".join(sorted(symbols))), 12 * 3600, run)
+    return C.cached_disk(C.disk_name("facts4_" + fact + "_", "_".join(sorted(symbols))), 12 * 3600, run)
 
 
 # HANDOFF P3-5: peer ratios. Derived figures combine two reported ones matched on the period end; a ratio is None when
@@ -175,7 +183,10 @@ def compare(group="hyperscalers", symbols=None, fact="capex", period="quarter", 
             continue
         for e, v in pts:
             table.setdefault(e, {"period_ending": e})[s] = None if v is None else round(v, 2 if pct else 3)
-        name = f"{s}  {shown[-1]:,.1f}%" if pct else f"{s}  ${shown[-1]:,.1f}bn"
+        if pts[-1][1] is None:
+            name = f"{s}  n/m (last {shown[-1]:,.1f}%)" if pct else f"{s}  n/m (last ${shown[-1]:,.1f}bn)"
+        else:
+            name = f"{s}  {shown[-1]:,.1f}%" if pct else f"{s}  ${shown[-1]:,.1f}bn"
         if period in ("quarter", "ttm"):         # a missing quarter is a break in the line, never a slope across it
             gapped = pts[:1]
             for q in pts[1:]:

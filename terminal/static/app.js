@@ -2144,7 +2144,7 @@
     var box = el("div", { class: "modal help-box" }, [
       el("div", { class: "help-head" }, [el("b", null, (T.product || "Libre Terminal") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
       el("div", { class: "help-body" }, [
-        sec("Keyboard", [["Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
+        sec("Keyboard", [["/ or Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
           ["[  ]", "Previous / next tab"], ["Esc", "Close a maximized card, menu or dialog"], ["?", "This guide"]]),
         sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; an SEC CIK (0000320193) or an equity CUSIP (037833100) for its listing; a topic (cpi, sofr, options) for that card; a bond CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
           ["Pickers", "Symbol, Country and Bank boxes at the top drive linked cards. Clicking a ticker, country, CUSIP, CRD, RSSD or bill id in a table fills them too."]]),
@@ -2153,10 +2153,11 @@
           ["Dataset", "Library cards (EIA, BLS, USDA, regional Feds, FFIEC) hold a family of datasets and remember your pick."],
           ["Columns", "Lists open with key columns. ⋯ › Columns shows or hides the rest; Default columns resets."],
           ["⤓ Export", "Copy a table for Excel, download CSV, or save a chart as PNG (exports include source and date)."],
-          ["⋯ menu", "Plot a table, flip rows and columns (compact tables up to 60 rows), show settings, or remove the card. Drag header to move, corner to resize."]]),
+          ["⋯ menu", "Plot a table, flip rows and columns (compact tables up to 60 rows), show settings, or remove the card. Drag header to move, double-click header (or ⤢) to maximize, drag corner to resize."]]),
         sec("Desks & comparisons", [["Watchlist & Comps", "Markets Summary › Overview watchlists (click a name to chart); Company › Overview peer comps with peer median."],
+          ["Valuation & Risk", "Company › Growth & Ratios (Valuation bands over 3/5/10Y across P/E, EV/EBITDA, EV/Sales, P/S, P/B, plus DuPont ROE & ROIC) and Company › Price & Peers (risk vs peers)."],
           ["Compare chart", "Markets Summary › Chart and Company › Price & Peers: overlay tickers or FRED: series as % change, ratio or spread, with moving averages."],
-          ["Credit & Rates", "Credit › Bond Lookup (TRACE by issuer, ticker or CUSIP), Credit › Spreads (CFTC index CDS & OAS), Rates & Curves › Policy & Inflation (OIS-implied policy paths)."],
+          ["Credit & Rates", "Credit › Bond Lookup (TRACE by issuer, ticker or CUSIP), Credit › Spreads (CFTC index CDS & OAS), Rates & Curves › Policy Expectations (OIS-implied policy paths)."],
           ["News & Banking", "News › Markets situation room (newest-first monitor & official releases); Money & Banking (credit quality, FDIC failures, FFIEC Bank Lookup); Indices › Valuation (S&P 500 multiples)."]]),
         sec("API keys & services", [["Keyless & free keys", "Runs keyless by default on the main V5 data service. Optional free FRED, BLS, EIA and Congress.gov keys unlock extra cards (Setup-Keys.cmd or local/api_keys.env, then restart)."],
           ["Data status", "Data Explorers › Data status lists configured keys, card counts, sign-up links, runtime fixes, and any source down upstream."]]),
@@ -2188,6 +2189,7 @@
       else if (e.key === "Escape") { var mx = document.querySelector(".w.max"); if (mx && !document.querySelector(".modal-bg")) { mx.classList.remove("max"); S.grid.layout(false); } }
       else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && !document.querySelector(".modal-bg")) {
         if (e.key === "?") { e.preventDefault(); openHelp(); }
+        else if (e.key === "/") { e.preventDefault(); var g = $("goto"); if (g) { g.focus(); g.select(); } }
         else if ((e.key === "[" || e.key === "]") && S.cur && S.cur.tabs.length > 1) {      // previous / next tab
           var ts = S.cur.tabs, i = ts.map(function (t) { return t.id; }).indexOf(S.tabId);
           openTab(ts[(i + (e.key === "]" ? 1 : -1) + ts.length) % ts.length].id);

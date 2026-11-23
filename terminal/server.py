@@ -13,6 +13,7 @@ Usage: python terminal/server.py [--port 6950] [--host 127.0.0.1]
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -324,8 +325,27 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
 
     # ---- helpers -------------------------------------------------------
+    _COMPRESS_TYPES = ("text/", "application/json", "application/javascript", "image/svg+xml")
+
+    def _wants_gzip(self, ctype: str, size: int) -> bool:
+        return (size >= 1024 and any(ctype.startswith(p) for p in self._COMPRESS_TYPES)
+                and "gzip" in (self.headers.get("Accept-Encoding") or "").lower())
+
+    @staticmethod
+    def _etag_gz(etag: str) -> str:
+        return etag[:-1] + '-gz"' if etag.endswith('"') else etag + "-gz"
+
     def _send(self, code: int, body: bytes, ctype: str, cache: str = "no-cache", headers: dict | None = None):
         try:
+            h = dict(headers or {})
+            compressible = any(ctype.startswith(p) for p in self._COMPRESS_TYPES)
+            if compressible and "Vary" not in h:
+                h["Vary"] = "Accept-Encoding"
+            if code == 200 and self._wants_gzip(ctype, len(body)) and "Content-Encoding" not in h:
+                body = gzip.compress(body, compresslevel=5)
+                h["Content-Encoding"] = "gzip"
+                if "ETag" in h and not h["ETag"].endswith('-gz"'):
+                    h["ETag"] = self._etag_gz(h["ETag"])
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -333,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "SAMEORIGIN")
             self.send_header("Referrer-Policy", "no-referrer")
-            for k, v in (headers or {}).items():
+            for k, v in h.items():
                 self.send_header(k, v)
             self.end_headers()
             if self.command != "HEAD" and code != 304:
@@ -362,20 +382,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def _cached_json(self, raw: bytes, etag: str, headers: dict | None = None):
         """200 with an ETag, or 304 when the page already has this version (no-cache: the browser always asks)."""
-        h = dict(headers or {}, ETag=etag)
-        if etag in [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]:
-            return self._send(304, b"", "application/json; charset=utf-8", headers=h)
-        return self._send(200, raw, "application/json; charset=utf-8", headers=h)
+        ctype = "application/json; charset=utf-8"
+        eff_etag = self._etag_gz(etag) if self._wants_gzip(ctype, len(raw)) else etag
+        h = dict(headers or {}, ETag=eff_etag)
+        if eff_etag in [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]:
+            return self._send(304, b"", ctype, headers=h)
+        return self._send(200, raw, ctype, headers=h)
 
     def _file(self, path: Path, cache: str = "no-cache", headers: dict | None = None):
         try:
+            st = path.stat()
+            etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+            ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
+                ctype += "; charset=utf-8"
+            eff_etag = self._etag_gz(etag) if self._wants_gzip(ctype, st.st_size) else etag
+            h = dict(headers or {}, ETag=eff_etag)
+            if eff_etag in [t.strip() for t in (self.headers.get("If-None-Match") or "").split(",")]:
+                return self._send(304, b"", ctype, cache, h)
             data = path.read_bytes()
         except OSError:
             return self._json(404, {"detail": "not found"})
-        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):
-            ctype += "; charset=utf-8"
-        self._send(200, data, ctype, cache, headers)
+        self._send(200, data, ctype, cache, h)
 
     def _host_ok(self) -> bool:
         """Only requests addressed to this computer by name are answered (blocks DNS-rebinding pages)."""

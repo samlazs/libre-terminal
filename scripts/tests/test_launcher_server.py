@@ -347,15 +347,17 @@ check(st_cfg == 200 and cfg_json.get("product") == "Libre Terminal", "/api/confi
 lic_raw = (ROOT / "LICENSE").read_bytes()
 lic_txt = lic_raw.decode("utf-8")
 check(not lic_raw.startswith(b"\xef\xbb\xbf") and b"\r" not in lic_raw, "LICENSE is UTF-8 without BOM and pure LF")
-check("Libre Terminal" in lic_txt and "GNU AFFERO GENERAL PUBLIC LICENSE" in lic_txt
+check(lic_txt.lstrip().startswith("GNU AFFERO GENERAL PUBLIC LICENSE")
       and "Version 3, 19 November 2007" in lic_txt and "END OF TERMS AND CONDITIONS" in lic_txt,
-      "LICENSE holds Libre Terminal notice and verbatim GNU AGPL v3.0 text")
+      "LICENSE holds verbatim GNU AGPL v3.0 text for SPDX detection")
 check("RELEASE " + "BLOCKER" not in lic_txt and "Open " + "Terminal" not in lic_txt, "LICENSE has no placeholder or old name")
 
 not_raw = (ROOT / "NOTICE").read_bytes()
 not_txt = not_raw.decode("utf-8")
 check(not not_raw.startswith(b"\xef\xbb\xbf") and b"\r" not in not_raw, "NOTICE is UTF-8 without BOM and pure LF")
-check("Libre Terminal" in not_txt and "Open " + "Terminal" not in not_txt, "NOTICE uses Libre Terminal and has no old name")
+check("Libre Terminal" in not_txt and "SPDX-License-Identifier: AGPL-3.0-or-later" in not_txt
+      and "Open " + "Terminal" not in not_txt,
+      "NOTICE uses Libre Terminal with SPDX identifier and has no old name")
 
 
 def _test_warm_and_install():
@@ -469,6 +471,26 @@ def _test_warm_and_install():
 
 
 _test_warm_and_install()
+
+# ---- v0.6.0 compression & static asset ETag / 304
+import gzip as _gz  # noqa: E402
+st_u, hs_u, b_u = full("GET", "/static/app.js")
+check(st_u == 200 and hs_u.get("ETag") and not hs_u.get("Content-Encoding") and b"function openHelp" in b_u,
+      "static file serves uncompressed with ETag when Accept-Encoding has no gzip")
+st_g, hs_g, b_g = full("GET", "/static/app.js", {"Accept-Encoding": "gzip, deflate"})
+check(st_g == 200 and hs_g.get("Content-Encoding") == "gzip" and "Accept-Encoding" in (hs_g.get("Vary") or "")
+      and hs_g.get("ETag") and hs_g["ETag"] != hs_u["ETag"] and hs_g["ETag"].endswith('-gz"')
+      and len(b_g) < len(b_u) and _gz.decompress(b_g) == b_u,
+      "static file gzip-compresses cleanly with a distinct -gz ETag when Accept-Encoding includes gzip")
+st_304, hs_304, b_304 = full("GET", "/static/app.js", {"If-None-Match": hs_u["ETag"]})
+check(st_304 == 304 and b_304 == b"" and hs_304.get("ETag") == hs_u["ETag"],
+      "unchanged static file returns 304 Not Modified with matching ETag")
+st_304g, hs_304g, b_304g = full("GET", "/static/app.js", {"Accept-Encoding": "gzip", "If-None-Match": hs_g["ETag"]})
+check(st_304g == 304 and b_304g == b"" and hs_304g.get("ETag") == hs_g["ETag"],
+      "unchanged gzipped static file returns 304 Not Modified with matching -gz ETag")
+st_mix, hs_mix, b_mix = full("GET", "/static/app.js", {"Accept-Encoding": "gzip", "If-None-Match": hs_u["ETag"]})
+check(st_mix == 200 and hs_mix.get("Content-Encoding") == "gzip" and hs_mix.get("ETag") == hs_g["ETag"],
+      "uncompressed ETag sent with Accept-Encoding: gzip returns 200 gzipped instead of mismatched 304")
 
 httpd.shutdown()
 

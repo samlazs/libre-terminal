@@ -118,7 +118,7 @@ input[type=date] { color-scheme: dark; }
 .ghost { position: absolute; border: 1px dashed var(--accent); border-radius: var(--radius); background: rgba(57,135,229,.08); pointer-events: none; z-index: 40; }
 .w-head { display: flex; align-items: center; gap: 4px; padding: 5px 6px 5px 10px; cursor: grab; user-select: none; flex: none; min-height: 30px; }
 .w.max .w-head { cursor: default; }
-.w-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.w-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
 .w-sub { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; margin-left: 4px; }
 .w-tools { display: flex; align-items: center; gap: 0; flex: none; }
 .w-filter { width: 110px; padding: 2px 6px !important; font-size: 12px; }
@@ -140,6 +140,8 @@ input[type=date] { color-scheme: dark; }
 .w-more { color: var(--accent); cursor: pointer; font-size: 11px; }
 .w-body { flex: 1; min-height: 0; position: relative; overflow: hidden; border-top: 1px solid var(--hair); display: flex; flex-direction: column; }
 .w-foot { flex: none; padding: 2px 10px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--hair); display: flex; gap: 10px; font-variant-numeric: tabular-nums; }
+.w-foot .foot-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.w-foot > span:last-child { flex-shrink: 0; }
 .w-foot:empty { display: none; }
 .w-resize { position: absolute; right: 0; bottom: 0; width: 14px; height: 14px; cursor: nwse-resize; z-index: 5; }
 .w-resize::after { content: ""; position: absolute; right: 3px; bottom: 3px; width: 6px; height: 6px; border-right: 2px solid var(--axis); border-bottom: 2px solid var(--axis); }
@@ -314,7 +316,7 @@ iframe.dark-doc { filter: invert(0.9) hue-rotate(180deg); }
 .w-strip:empty { display: none; }
 .w-strip .ptabs button { padding: 1px 7px; font-size: 11px; }
 .w-strip .sep { width: 1px; height: 14px; background: var(--hair); }
-.w-foot .src-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.w-foot .src-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
 
 /* ---------- package 3: column picker, quick guide, narrow windows ---------- */
 .col-pick .col-opt { display: flex; align-items: center; gap: 8px; cursor: pointer; }

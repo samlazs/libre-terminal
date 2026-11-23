@@ -1037,6 +1037,48 @@
         "? Help modal documents Search/CUSIP/FRED:, Bond Lookup, CDS, Policy, situation room, Money & Banking, S&P 500, V5, Refresh, and Flip limit");
       var closeHelp = document.querySelector(".help-box .icon-btn");
       if (closeHelp) closeHelp.click();
+
+      // v0.6.0 UX checks: Stage 3 requestTimeout 60s, / focuses goto, double-click header maximizes, chart footer note helper
+      ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 60000
+        && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 60000
+        && T.requestTimeout("/x/gex_strike?symbol=SPY") === 60000, "Stage 3 composite routes get 60s requestTimeout");
+      ok(T.chartFooterNote({ warning: "Test warning", convention: "5Y window" }) === "⚠ Test warning · 5Y window"
+        && T.chartFooterNote({ convention: "5Y window" }) === "5Y window"
+        && T.chartFooterNote({ convention: "5Y window", layout: { annotations: [{ text: "5Y window" }] } }) === ""
+        && T.chartFooterNote({ warning: "Test warning", convention: "5Y window", layout: { annotations: [{ text: "5Y window" }] } }) === "⚠ Test warning"
+        && T.chartFooterNote({}) === "", "chartFooterNote formats warning + convention without duplicating in-chart annotations");
+
+      var gotoEl = document.getElementById("goto");
+      if (gotoEl) {
+        gotoEl.blur();
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true, cancelable: true }));
+        ok(document.activeElement === gotoEl, "/ shortcut focuses #goto search bar");
+        gotoEl.blur();
+      }
+
+      var chartDef = {
+        widgetId: "x_test_chart_foot", name: "Test chart", endpoint: "/x/test_chart_foot",
+        type: "chart", params: [], source: ["SEC"], raw: true, refetch: 0
+      };
+      var chartItem = { uid: "tc1", backend: "x", widgetId: "x_test_chart_foot", x: 0, y: 0, w: 6, h: 6, params: {} };
+      var relaid = 0;
+      var chartCard = T.widget({
+        item: chartItem, def: chartDef, backend: { id: "x", url: "http://127.0.0.1:6950" }, scroller: stage4,
+        groupOf: function () { return null; }, groupsOf: function () { return []; }, overrides: function () { return {}; },
+        setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; }, alternatives: function () { return []; },
+        hasFreeOnTab: function () { return true; }, onChange: function () {}, onRemove: function () {}, relayout: function () { relaid++; }
+      });
+      stage4.appendChild(chartCard.node);
+      var hd = chartCard.node.querySelector(".w-head");
+      ok(!chartCard.node.classList.contains("max"), "card not maximized initially");
+      hd.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      ok(chartCard.node.classList.contains("max") && relaid === 1, "double-clicking .w-head maximizes card");
+      hd.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      ok(!chartCard.node.classList.contains("max") && relaid === 2, "double-clicking .w-head restores card");
+      var subEl = chartCard.node.querySelector(".w-sub");
+      subEl.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      ok(!chartCard.node.classList.contains("max") && relaid === 2, "double-clicking .w-sub source label does not maximize card");
+      chartCard.destroy();
     } finally {
       stage4.remove();
     }

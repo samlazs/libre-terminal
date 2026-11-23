@@ -494,7 +494,7 @@ def _stage3():
             _p("ytm", "Yield (%)", None, "Yield to maturity in percent; overrides the price.")],
            "Credit", ["FINRA"], w=16, h=16, refetch=900000),
         _w("x_debt_maturity_wall", "Debt maturity wall", "Long-term debt principal due in each of the next five fiscal years and after, from the issuer's latest "
-           "10-K (SEC XBRL). U.S. filers only. The source menu links to its 10-K and 424B prospectus filings on EDGAR.",
+           "10-K (SEC XBRL), including debt schedule and principal maturities. U.S. filers only. The source menu links to its 10-K and 424B prospectus filings on EDGAR.",
            "chart", "/x/debt_maturity_wall", [_p("company", "Company", "AAPL", "U.S. ticker of the issuer.")],
            "Credit", ["SEC"], w=16, h=16, raw=True, refetch=3600000),
         _w("x_etf_overlap", "ETF overlap (N-PORT)", "Two funds' latest SEC N-PORT portfolios side by side: weight overlap (sum of the smaller weight of each common holding), "
@@ -505,25 +505,26 @@ def _stage3():
                  _col("weight_a", "Fund 1 weight", tip="Weight in the first fund, percent of net assets (N-PORT).", decimalPlaces=2, suffix="%"),
                  _col("weight_b", "Fund 2 weight", tip="Weight in the second fund, percent of net assets (N-PORT).", decimalPlaces=2, suffix="%"),
                  _col("overlap", "Overlap", tip="The smaller of the two weights: what both funds hold in common, percent.", decimalPlaces=2, suffix="%")]),
-        _w("x_gex_strike", "Gamma exposure by strike", "Net dealer gamma exposure per strike ($ millions per 1% move), assuming dealers are long the calls and short the "
+        _w("x_gex_strike", "Gamma exposure by strike", "Net dealer gamma exposure (GEX) per strike ($ millions per 1% move) and options positioning, assuming dealers are long the calls and short the "
            "puts open; Black-Scholes gamma from Yahoo implied volatility. Spot and Max Pain marked. Nearest monthly expiry, or every expiry within 60 days.",
            "chart", "/x/gex_strike", SYM[:1] + [_p("expiry", "Expiries", "monthly", "Nearest monthly (third Friday) or all expiries within 60 days.", typ="tabs", options=optionsx.EXPIRY_OPTIONS)],
            "Options", YAHOO, w=22, h=16, raw=True, refetch=900000, strip=[VIEW_STRIP | {"param": "expiry"}]),
-        _w("x_vol_cone", "Volatility cone", "Realised volatility over 10 to 126 trading days: today's value against the range of the last year (min, quartiles, max), "
-           "with the at-the-money implied volatility of each expiry on top.", "chart", "/x/vol_cone", SYM[:1],
+        _w("x_vol_cone", "Volatility cone", "Realised volatility (RV) cone over 10 to 126 trading days: today's value against the range of the last year (min, quartiles, max), "
+           "with the at-the-money implied volatility (IV) term structure of each expiry on top.", "chart", "/x/vol_cone", SYM[:1],
            "Options", YAHOO, w=18, h=16, raw=True, refetch=900000),
         _w("x_fx_rate_diff", "Spot vs 2-year rate differential", "A currency pair against the 2-year government yield differential (base minus quote, bp): "
            "U.S. H.15 par yields, other legs from the central banks' daily curves (euro: Germany). About one year of daily data; the note gives the "
            "60-day correlation of daily changes.", "chart", "/x/fx_rate_diff",
            [_p("pair", "Pair", "EURUSD", "Currency pair.", options=risk.PAIR_OPTIONS)],
            "Rates", ["Yahoo Finance", "Bundesbank", "FRED"], w=22, h=16, raw=True, refetch=3600000, dynamicSource=True),
-        _w("x_valuation_bands", "Valuation bands", "P/E (TTM), EV/EBITDA (TTM) or P/B on daily closes over five years, with the median and the 10th-90th "
-           "percentile band of that window and today's percentile. U.S. filers: SEC figures, each counted from its filing date (or the form's "
-           "deadline if earlier), so no figure is used before it was known. Others: Yahoo annual statements, each year from 90 days after its end.",
-           "chart", "/x/valuation_bands", SYM + [_p("measure", "Multiple", "pe", "Which multiple (banks: P/E and P/B only).", typ="tabs", options=valuation.OPTIONS)],
-           "Valuation", ["SEC", "Yahoo Finance"], w=24, h=16, raw=True, refetch=3600000, dynamicSource=True, strip=[VIEW_STRIP | {"param": "measure"}]),
-        _w("x_roic_dupont", "ROE (DuPont) and ROIC", "Per fiscal year: ROE split into net margin x asset turnover x equity multiplier, and return on invested "
-           "capital = operating income x (1 - tax rate) / (debt + equity - cash), tax rate clipped to 0-35%. Banks: DuPont only.",
+        _w("x_valuation_bands", "Valuation bands", "P/E (TTM), EV/EBITDA (TTM), EV/Sales (TTM), P/S (TTM) or P/B on daily closes over 3, 5 or 10 years, with the median and 10th-90th "
+           "percentile band and today's percentile (historical multiples & ADR/share-class scaling). U.S. filers: SEC figures, each counted from its filing date (or deadline if earlier). "
+           "Others: Yahoo annual statements, each year from 90 days after its end.",
+           "chart", "/x/valuation_bands", SYM + [_p("measure", "Multiple", "pe", "Which multiple (banks: P/E, P/S and P/B only).", typ="tabs", options=valuation.OPTIONS),
+                                                 _p("years", "Window", "5", "Look-back window in years.", typ="tabs", options=valuation.WINDOW_OPTIONS)],
+           "Valuation", ["SEC", "Yahoo Finance"], w=24, h=16, raw=True, refetch=3600000, dynamicSource=True, strip=[VIEW_STRIP | {"param": "measure"}, VIEW_STRIP | {"param": "years"}]),
+        _w("x_roic_dupont", "ROE (DuPont) and ROIC", "Per fiscal year: ROE DuPont decomposition (net margin x asset turnover x equity multiplier) and return on invested "
+           "capital (ROIC) = operating income x (1 - tax rate) / (debt + equity - cash), tax rate clipped to 0-35%. Banks: DuPont only.",
            "table", "/x/roic_dupont", SYM, "Valuation", ["SEC", "Yahoo Finance"], w=16, h=16, refetch=3600000, dynamicSource=True,
            cols=[_col("fiscal_year_end", "Fiscal year end", "text", pinned="left"),
                  _col("net_margin", "Net margin", tip="Net income / revenue, percent.", decimalPlaces=1, suffix="%"),

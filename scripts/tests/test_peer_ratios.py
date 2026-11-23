@@ -8,9 +8,11 @@ import composite as c
 B = 1e9
 FIX = {   # fact -> {symbol: {"quarter": [[end, value]], ...}}
     "capex": {"AAA": {"quarter": [["2024-03-31", 2 * B], ["2024-06-30", 3 * B], ["2025-03-31", 4 * B]]},
-              "BBB": {"quarter": [["2024-03-31", 1 * B], ["2024-06-30", 1 * B]]}},
+              "BBB": {"quarter": [["2024-03-31", 1 * B], ["2024-06-30", 1 * B]]},
+              "CCC": {"quarter": [["2024-03-31", 2 * B], ["2025-03-31", 2 * B]]}},
     "revenue": {"AAA": {"quarter": [["2024-03-31", 10 * B], ["2024-06-30", 12 * B], ["2025-03-31", 16 * B]]},
-                "BBB": {"quarter": [["2024-03-31", -5 * B]]}},
+                "BBB": {"quarter": [["2024-03-31", -5 * B]]},
+                "CCC": {"quarter": [["2024-03-31", 10 * B]]}},
     "operating_cash_flow": {"AAA": {"quarter": [["2024-03-31", 5 * B], ["2024-06-30", 2 * B], ["2025-03-31", 0.0]]}},
     "sbc": {"AAA": {"quarter": [["2024-03-31", 1 * B], ["2024-06-30", 1 * B], ["2025-03-31", 1 * B]]}},
     "debt": {"AAA": {"instant": [["2024-03-31", 50 * B]]}},
@@ -67,6 +69,8 @@ try:
     check("stock-based compensation" in src and "operating cash flow" in src, "sources name both figures of a ratio")
     check("revenue" in c.static_sources("compare", {"fact": "capex", "measure": "pct_revenue"})[0]["detail"], "sources add revenue for % of revenue")
     check({"fcf", "capex_revenue", "sbc_ocf"} <= {o["value"] for o in c.FACT_OPTIONS}, "derived figures offered in the picker")
+    nm = c.compare(symbols="CCC", fact="capex", measure="pct_revenue", period="quarter", since="2019")
+    check(nm["data"][0]["name"] == "CCC  n/m (last 20.0%)", "trailing None shows n/m (last ...): " + nm["data"][0]["name"])
 finally:
     c._facts = saved
 

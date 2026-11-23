@@ -39,7 +39,7 @@ scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
-terminal/server.py           UI server: static files, /api/config, /api/warm, /api/dashboards, /api/state, /x/*
+terminal/server.py           UI server: static files (ETag/304, gzip), /api/config, /api/warm, /api/dashboards, /api/state, /x/*
 terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...) and two-phase cache warmer (warm.py)
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
@@ -48,9 +48,9 @@ terminal/bond_math.py        bond yield, duration, convexity, DV01, G-spread and
 terminal/cds.py              CFTC swap-repository CDS index levels and history (/x/cds_indices, /x/cds_history)
 terminal/policy_path.py      CFTC OIS-implied policy paths anchored on BIS policy rates (/x/policy_path, /x/policy_path_table)
 terminal/cryptovol.py        Deribit DVOL against 30-day realised volatility (/x/crypto_vol)
-terminal/links.py            company jump buttons across filings, options, bonds and news (/x/company_links)
+terminal/links.py            company jump buttons across filings, options, bonds, sector-gated FFIEC bank check and news (/x/company_links)
 terminal/multpl.py           S&P 500 valuation multiples and fundamentals from multpl.com (/x/sp500_multiples)
-terminal/valuation.py        5-year valuation bands from point-in-time SEC or Yahoo figures, ROIC and DuPont (/x/valuation_bands, /x/roic_dupont)
+terminal/valuation.py        3/5/10-year valuation bands (P/E, EV/EBITDA, EV/Sales, P/S, P/B) from point-in-time SEC (with D&A/share fallbacks) or ADR/FX-scaled Yahoo figures, ROIC and DuPont (/x/valuation_bands, /x/roic_dupont)
 terminal/risk.py             cross-asset correlation, risk statistics and the FX 2-year rate differential (/x/correlation, /x/risk_stats, /x/fx_rate_diff)
 terminal/etfs.py             ETF holdings overlap from SEC N-PORT filings (/x/etf_overlap)
 terminal/optionsx.py         gamma exposure by strike with Max Pain, and the realised-volatility cone against implied (/x/gex_strike, /x/vol_cone)
@@ -129,7 +129,7 @@ Only adding, removing, moving or resizing cards, changing their settings or titl
 built-in tab as edited (orange dot); flips, chart/table switches and the settings bar are view preferences (`cardview`).
 A state.json that cannot be parsed is never overwritten: the server moves it aside as `state.corrupt-<time>.json` and
 restores the newest valid daily copy (the page says so), or answers 503 and the page shows the defaults without saving.
-Writes go through a temporary file and an atomic replace. `/api/state` and `/api/dashboards` answer with an ETag (304).
+Writes go through a temporary file and an atomic replace. `/api/state`, `/api/dashboards`, and static/vendor files answer with an ETag (`304`), and eligible HTTP 200 text/JSON responses are gzip-compressed when the client sends `Accept-Encoding: gzip`.
 In-page cleanups must change `T.S.state` and then save; otherwise a pending save overwrites them.
 
 ## Routing by ticker
@@ -209,7 +209,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_redact.py`, `test_backend_wrapper.py` | key redaction, stream guard, log redaction, Host/Origin guard |
 | `test_launcher_server.py` | restart policy, stop scope, V5-only default / `--with-v4` / `--skip-v4` CLI, UI server Host/Origin/state/config rules, v4 override validation, corrupt state recovery, ETags, CSP, keys applied on start, cache pruning |
 | `test_health.py`, `test_workflow.py` | relative NY dates, card/choice URL builder, error classifier, secret redaction, mock OECD-429 health run; publishable manifest, snapshots, snapshot diffs, EOL/BOM/hygiene checks, parallel test filter |
-| `test_frontend.py` | runs `frontend_checks.js` (274 browser checks) in headless Edge (or Chrome) against a temporary UI server; skipped with a notice when no such browser is installed |
+| `test_frontend.py` | runs `frontend_checks.js` (280 browser checks) in headless Edge (or Chrome) against a temporary UI server; skipped with a notice when no such browser is installed |
 
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,

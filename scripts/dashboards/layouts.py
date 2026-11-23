@@ -174,8 +174,8 @@ DASHBOARDS = [
                                  [X("comps", 40, 18)], [W("equity/fundamental/metrics", 20, 14), W("equity/price/quote", 20, 14)],
                                  [W("equity/profile", 20, 14, title="Company profile"), W("x:risk_stats", 20, 14, wid="x_peer_risk")]],
           auto=["yfinance/asset_info/view", "equity/price/historical", "equity/compare/peers", "equity/compare/groups", "equity/price/nbbo"]),
-        # Stage 3 8d: where the multiple sits in its own 5-year history, and what drives the return on equity
-        T("Growth & Ratios", rows=[[X("valuation_bands", 24, 16, title="Valuation bands (5 years)"), X("roic_dupont", 16, 16)]],
+        # Stage 3 8d: where the multiple sits in its own 3/5/10-year history, and what drives the return on equity
+        T("Growth & Ratios", rows=[[X("valuation_bands", 24, 16, title="Valuation bands"), X("roic_dupont", 16, 16)]],
           auto=["equity/fundamental/income_growth", "equity/fundamental/balance_growth", "equity/fundamental/cash_growth", "equity/fundamental/ratios",
                                     "equity/historical_market_cap", "equity/fundamental/trailing_dividend_yield", "equity/price/performance"]),
         T("Ownership & Insiders", auto=["yfinance/ownership/major", "yfinance/ownership/institutional", "yfinance/ownership/mutual_fund", "equity/ownership/insider_trading",

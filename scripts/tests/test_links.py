@@ -9,7 +9,8 @@ import composite as c
 import links as L
 
 SEC = {"AAPL": "APPLE INC", "F": "FORD MOTOR CO"}
-YAHOO = {"SHEL.L": "Shell plc", "RY.TO": "Royal Bank of Canada", "BRK.B": "Berkshire Hathaway Inc.", "SAP.DE": "SAP SE"}
+YAHOO = {"AAPL": ("Apple Inc.", "Technology"), "SHEL.L": ("Shell plc", "Energy"), "RY.TO": ("Royal Bank of Canada", "Financial Services"),
+         "BRK.B": ("Berkshire Hathaway Inc.", "Financial Services"), "SAP.DE": ("SAP SE", "Technology")}
 FINRA = ["APPLE INC", "SHELL INTL FIN B V", "BERKSHIRE HATHAWAY INC", "FORD MTR CO DEL"]
 calls = []
 
@@ -19,8 +20,10 @@ def fake_api(base, path, **p):
     if path == "equity/search":
         return [{"symbol": p["query"], "name": SEC[p["query"]]}] if p["query"] in SEC else [{"symbol": "AAPL.X", "name": "OTHER"}]
     if path == "equity/profile":
-        return [{"symbol": p["symbol"], "name": YAHOO[p["symbol"]]}] if p["symbol"] in YAHOO else []
+        return [{"symbol": p["symbol"], "name": YAHOO[p["symbol"]][0], "sector": YAHOO[p["symbol"]][1]}] if p["symbol"] in YAHOO else []
     if path == "federal_reserve/ffiec/institutions":     # bank holding companies by ticker
+        if p.get("ticker") == "BRK.B":
+            raise c.CompositeError("Could not resolve ticker 'BRK.B' to a parent holding company.")
         return [{"rssd_id": 1039502, "is_bank_holding_company": True}] if p.get("ticker") in ("JPM", "RY") else []
     if path == "fixedincome/corporate/bond_prices":
         return [{"issuer_name": n, "coupon_rate": 4.0, "maturity_date": "2030-01-01", "last_trade_date": "2026-11-18"} for n in FINRA if p["issuer_name"] in n]
@@ -44,7 +47,8 @@ try:
     check(a["options"]["dash"] == "d:options" and a["options"]["value"] == "AAPL" and a["filings"]["dash"] == "d:filings", "AAPL: options and SEC filings by ticker")
     check(a["bonds"] == {"key": "bonds", "label": "Bonds", "dash": "d:credit", "tab": "bond-lookup-trace", "group": "Issuer", "value": "AAPL"}, f"AAPL bonds by ticker: {a['bonds']}")
     check(a["news"]["dash"] == "d:news" and a["news"]["group"] == "Symbol", "news by ticker")
-    check(not any(p == "equity/profile" for p, _ in calls), "an SEC filer needs no Yahoo name")
+    check(L.links(symbol="aapl")["name"] == "APPLE INC", "an SEC filer keeps its SEC name even when Yahoo profile supplies sector")
+    check(("federal_reserve/ffiec/institutions", "AAPL") not in calls, "non-financial sector skips FFIEC lookup")
 
     s = keys("SHEL.L")
     check(list(s) == ["bonds", "news"], f"SHEL.L: no U.S. options, no SEC filer under this ticker: {list(s)}")
@@ -97,6 +101,7 @@ try:
     k = ("bank_value", "JPM")
     c._cache[k] = (c._cache[k][0] - 400, c._cache[k][1])
     check(L._bank_value("JPM", "JPM") == ("JPM", False), "after 5 minutes the bank is looked up again")
+    check(L._bank_value("BRK.B", "BRK.B", sector="Financial Services") == (None, False), "unknown-ticker 400 is treated as clean negative, not outage")
 finally:
     c.api = saved
     c._cache.clear()

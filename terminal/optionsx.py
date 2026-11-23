@@ -123,9 +123,11 @@ def gex(symbol="SPY", expiry="monthly", today=None, **_):
     if mp is not None:
         lay["shapes"].append({"type": "line", "x0": mp, "x1": mp, "yref": "paper", "y0": 0, "y1": 1, "line": {"color": C.PALETTE[3], "width": 1.5, "dash": "dash"}})
     which = f"expiry {exps[0]}" if len(exps) == 1 else f"{len(exps)} expiries {exps[0]} to {exps[-1]}"
-    lay["annotations"] = [C._note(f"{sym} spot {spot:,.2f} (dotted) · " + (f"Max Pain {mp:,.2f} for {exps[0]} (dashed)" if mp is not None else f"Max Pain n/a for {exps[0]} (no open interest)") + f" · {which} · dealers assumed long calls, short puts · "
-                                  "Black-Scholes gamma from Yahoo IV")]
-    return {"data": traces, "layout": lay, "sources": [YAHOO], "summary": {"spot": spot, "max_pain": mp, "net_gex_mn": round(total, 1), "expiries": exps}}
+    conv = f"{sym} spot {spot:,.2f} (dotted) · " + (f"Max Pain {mp:,.2f} for {exps[0]} (dashed)" if mp is not None else f"Max Pain n/a for {exps[0]} (no open interest)") + f" · {which} · dealers assumed long calls, short puts · Black-Scholes gamma from Yahoo IV"
+    lay["annotations"] = [C._note(conv)]
+    results = [{"strike": k, "gex_mn": v, "spot": spot, "max_pain": mp} for k, v in zip(xs, ys)]
+    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv,
+            "summary": {"spot": spot, "max_pain": mp, "net_gex_mn": round(total, 1), "expiries": exps}}
 
 
 def rolling_vol(closes, window):
@@ -199,8 +201,11 @@ def vol_cone(symbol="SPY", today=None, **_):
     lay = C._layout(True)
     lay["yaxis"]["ticksuffix"] = "%"
     lay["xaxis"]["title"] = {"text": "window / time to expiry, trading days", "font": {"size": 10}}
-    lay["annotations"] = [C._note(f"{sym} · realised = close-to-close, annualised x sqrt(252); range of daily rolling values over the last year · complete sessions to {closes[-1][0]}{note_iv}")]
-    return {"data": traces, "layout": lay, "sources": [YAHOO]}
+    conv = f"{sym} · realised = close-to-close, annualised x sqrt(252); range of daily rolling values over the last year · complete sessions to {closes[-1][0]}{note_iv}"
+    lay["annotations"] = [C._note(conv)]
+    results = [{"window_days": w, "min": round(c[w][0], 2), "p25": round(c[w][1], 2), "median": round(c[w][2], 2),
+                "p75": round(c[w][3], 2), "max": round(c[w][4], 2), "today_realised": round(c[w][5], 2)} for w in xs]
+    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv}
 
 
 def static_sources(name, p):

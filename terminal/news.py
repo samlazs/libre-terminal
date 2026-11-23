@@ -673,8 +673,9 @@ def collect(subj, feed_ids, queries=True):
             jobs[_pool.submit(fetch, gnews_url(q, lang, gl), 900, True)] = "gnews"
     prim = _pool.submit(subj.primary) if subj.primary else None
     out, used = [], set()
+    deadline = time.monotonic() + 30.0
     try:
-        for fut in _cf.as_completed(jobs, timeout=40):
+        for fut in _cf.as_completed(jobs, timeout=max(0.1, deadline - time.monotonic())):
             fid = jobs[fut]
             try:
                 items = fut.result()
@@ -695,7 +696,7 @@ def collect(subj, feed_ids, queries=True):
         pass
     if prim is not None:
         try:
-            for it in prim.result(timeout=40):
+            for it in prim.result(timeout=max(0.1, deadline - time.monotonic())):
                 out.append(it)
                 used.add(it.get("feed"))
         except Exception:  # noqa: BLE001

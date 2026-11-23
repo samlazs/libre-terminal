@@ -55,18 +55,24 @@ check(v.dupont_rows(fa)[0]["tax_rate"] == 0.0, "pre-tax loss: tax rate 0")
 saved = v.sec_figures, v._profile, c.history
 try:
     v._profile = lambda sym: {"industry": "Consumer Electronics", "currency": "USD"}
-    v.sec_figures = lambda sym: {"shares": [("2020-12-31", 1.0, D(2021, 1, 1))], "net_income": [("2020-12-31", 1.0, D(2021, 1, 1))]}
+    v.sec_figures = lambda sym, items=None: {"shares": [("2025-09-30", 1.0, D(2025, 11, 1))], "net_income": [("2025-09-30", 1.0, D(2025, 11, 1))]}
     c.history = lambda syms, start: {"TST": [(f"2026-01-{i:02d}", float(i)) for i in range(1, 11)]}
     out = v.bands(symbol="tst", measure="pe", today=D(2026, 1, 11))
     s = out["summary"]
     check(s["current"] == 10.0 and s["median"] == 5.5 and abs(s["p10"] - 1.9) < 1e-9 and s["percentile"] == 100.0, "P/E 1..10: median 5.5, p10 1.9, today at the 100th percentile: " + str(s))
     check(out["data"][-1]["name"].startswith("P/E (TTM)  10.0x (100th percentile)") and [x["name"] for x in out["sources"]] == ["SEC", "Yahoo Finance"], "legend and sources")
+    check(out["results"][0]["date"] == "2026-01-10" and out["results"][0]["multiple"] == 10.0 and "convention" in out, "bands include newest-first results table & convention")
     v._profile = lambda sym: {"industry": "Banks - Diversified", "currency": "USD"}
     try:
         v.bands(symbol="tst", measure="ev_ebitda", today=D(2026, 1, 11))
         check(False, "bank EV/EBITDA must be refused")
     except c.CompositeError as e:
         check("no meaning for a bank" in str(e), "bank: EV/EBITDA refused with the reason")
+    try:
+        v.bands(symbol="tst", measure="ev_sales", today=D(2026, 1, 11))
+        check(False, "bank EV/Sales must be refused")
+    except c.CompositeError as e:
+        check("no meaning for a bank" in str(e), "bank: EV/Sales refused with the reason")
 finally:
     v.sec_figures, v._profile, c.history = saved
 
@@ -76,5 +82,153 @@ check("valuation_bands" in c.ROUTES and "roic_dupont" in c.ROUTES and c.static_s
 check([v.ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 100)] == ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "100th"], "ordinal suffixes")
 _zero = v.AsOf([("0001-01-01", 0.0, dt.date.min)])
 check(abs(v.multiples(closes, sh, dict(f, debt=_zero), "ev_ebitda")[1][1] - 9.8) < 1e-12, "EV/EBITDA with no debt: (500 - 10) / 50 = 9.8x")
+
+# ---- v0.6.0 valuation hardening: staleness, sentinel, form filter, D&A & shares fallback, ADR scaling, spikes, n/m warning
+stale_a = v.AsOf([("2024-01-01", 5.0, D(2024, 2, 1))])
+check(stale_a.at(D(2024, 12, 31)) is not None and stale_a.at(D(2025, 9, 1)) is None, "AsOf expires figures >520 days old")
+check(_zero.at(D(2026, 1, 1)) is not None, "no_debt sentinel (date.min) never expires")
+
+check(v.available("2025-12-31", "2026-04-24", "DEF 14A", "quarter") == D(2026, 3, 31), "DEF 14A uses 90-day 10-K deadline")
+f_rev = dict(f, revenue=v.AsOf([("2026-03-31", 200.0, D(2026, 5, 1))]))
+check(abs(v.multiples(closes, sh, f_rev, "ps")[1][1] - 2.5) < 1e-12, "P/S 500/200 = 2.5x")
+check(abs(v.multiples(closes, sh, f_rev, "ev_sales")[1][1] - 2.6) < 1e-12, "EV/Sales (500+30-10)/200 = 2.6x")
+check(abs(v.multiples(closes, sh, dict(f_rev, debt=_zero), "ev_sales")[1][1] - 2.45) < 1e-12, "no_debt sentinel treats debt as 0: (500-10)/200 = 2.45x")
+check(v.multiples(closes, sh, dict(f_rev, debt=v.AsOf([])), "ev_sales")[1][1] is None
+      and v.multiples(closes, sh, dict(f, debt=v.AsOf([])), "ev_ebitda")[1][1] is None,
+      "missing/expired debt returns None instead of silently counting debt as 0")
+f_nodebt = dict(fa, pretax={"2025-12-31": 25.0}, debt={})
+r_nd = v.dupont_rows(f_nodebt)[0]
+check(r_nd["invested_capital"] == 70.0 and abs(r_nd["roic"] - 19.5 / 70.0 * 100) < 0.01, "debt-free company treated as 0 debt in ROIC invested capital")
+f_partial_debt = dict(fa, pretax={"2025-12-31": 25.0}, debt={"2024-12-31": 50.0})
+r_pd = v.dupont_rows(f_partial_debt)[0]
+check(r_pd["invested_capital"] is None and r_pd["roic"] is None, "missing debt for one year in a company with debt leaves ROIC blank")
+
+# _sec_rows form filter & AMZN 10-Q span="annual" exclusion + transient error re-raise + D&A & share fallbacks
+saved_api, saved_splits = c.api, v._splits
+try:
+    c._cache.clear()
+    v._splits = lambda sym: []
+
+    def sec_mock(base, path, **p):
+        fact = p.get("fact")
+        if fact == "NetIncomeLoss":
+            return [
+                {"span": "annual", "period_ending": "2025-09-30", "period_beginning": "2024-10-01", "value": 999.0, "reported_date": "2025-11-01", "form": "10-Q", "unit": "USD"},
+                {"span": "quarter", "period_ending": "2025-09-30", "period_beginning": "2025-07-01", "value": 10.0, "reported_date": "2025-11-01", "form": "10-Q", "unit": "USD"},
+                {"span": "quarter", "period_ending": "2025-09-30", "period_beginning": "2025-07-01", "value": 777.0, "reported_date": "2025-10-20", "form": "8-K", "unit": "USD"},
+                {"span": "quarter", "period_ending": "2025-12-31", "period_beginning": "2025-10-01", "value": 15.0, "reported_date": "2026-04-20", "form": "DEF 14A", "unit": "USD"},
+            ]
+        if fact == "OperatingIncomeLoss":
+            return [
+                {"span": "quarter", "period_ending": f"2025-{m:02d}-28", "period_beginning": f"2025-{m - 2:02d}-01", "value": 25.0, "reported_date": f"2025-{m:02d}-28", "form": "10-Q", "unit": "USD"}
+                for m in (3, 6, 9, 12)
+            ]
+        if fact in v.TAGS["da"]:
+            return []
+        if fact == "Depreciation":
+            return [{"span": "quarter", "period_ending": f"2025-{m:02d}-28", "period_beginning": f"2025-{m - 2:02d}-01", "value": 3.0, "reported_date": f"2025-{m:02d}-28", "form": "10-Q", "unit": "USD"} for m in (3, 6, 9, 12)]
+        if fact == "AmortizationOfIntangibleAssets":
+            return [{"span": "quarter", "period_ending": f"2025-{m:02d}-28", "period_beginning": f"2025-{m - 2:02d}-01", "value": 2.0, "reported_date": f"2025-{m:02d}-28", "form": "10-Q", "unit": "USD"} for m in (3, 6, 9, 12)]
+        if fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+            return [{"span": "quarter", "period_ending": "2024-03-31", "period_beginning": "2024-01-01", "value": 10.0, "reported_date": "2024-05-01", "form": "10-Q", "unit": "shares"}]
+        if fact == "WeightedAverageNumberOfSharesOutstandingBasic":
+            return [{"span": "quarter", "period_ending": "2024-12-31", "period_beginning": "2024-10-01", "value": 12.0, "reported_date": "2025-02-01", "form": "10-Q", "unit": "shares"}]
+        if fact == "CommonStockSharesOutstanding":
+            return [{"span": "instant", "period_ending": "2025-12-28", "value": 13.0, "reported_date": "2026-02-01", "form": "10-Q", "unit": "shares"}]
+        return []
+
+    c.api = sec_mock
+    ni_rows = v._sec_rows("SECMOD", v.TAGS["net_income"])
+    check(len(ni_rows) == 2 and ni_rows[0]["value"] == 10.0 and ni_rows[1]["form"] == "DEF 14A", "8-K and 10-Q annual span filtered out; DEF 14A kept")
+    sf = v.sec_figures("SECMOD", items=["operating_income", "da", "shares"])
+    check(sf["da"][0][1] == 20.0, "D&A fallback sums TTM Depreciation + AmortizationOfIntangibleAssets: " + str(sf["da"]))
+    check([p[1] for p in sf["shares"]] == [10.0, 12.0, 13.0], "shares fallback merges Basic and instant CommonStockSharesOutstanding: " + str(sf["shares"]))
+
+    # transient errors re-raise instead of caching empty; non-transient errors with digits like 504 do not
+    for i, (msg, kw) in enumerate((("OpenBB V5 backend did not answer in time (TimeoutError)", {}),
+                                   ("OpenBB V5 backend timed out", {}),
+                                   ("upstream error", {"transient": True}))):
+        def err_api(base, path, _m=msg, _kw=kw, **p):
+            raise c.CompositeError(_m, **_kw)
+        c.api = err_api
+        try:
+            v._sec_rows(f"TIMED{i}", ["NetIncomeLoss"])
+            check(False, "transient error must re-raise: " + msg)
+        except c.CompositeError as e:
+            check(msg in str(e), "transient error propagates out of _sec_rows: " + msg)
+
+    def cik_504_api(base, path, **p):
+        raise c.CompositeError("No data for CIK 0001504123")
+    c.api = cik_504_api
+    try:
+        v._sec_rows("CIK504", ["NetIncomeLoss"])
+        check(False, "CIK error still raises after trying all tags")
+    except c.CompositeError as e:
+        check("CIK 0001504123" in str(e), "CIK error propagates cleanly")
+    def fact_504_api(base, path, **p):
+        if p.get("fact") == "FirstTag":
+            raise c.CompositeError("No fact 504123 found")
+        return [{"span": "quarter", "period_ending": "2025-09-30", "period_beginning": "2025-07-01", "value": 42.0, "reported_date": "2025-11-01", "form": "10-Q", "unit": "USD"}]
+    c.api = fact_504_api
+    got_504 = v._sec_rows("FACT504", ["FirstTag", "SecondTag"])
+    check(len(got_504) == 1 and got_504[0]["value"] == 42.0, "bare 504 in a permanent error message does not abort remaining tags")
+finally:
+    c.api, v._splits = saved_api, saved_splits
+    c._cache.clear()
+
+# ADR / minor-unit scaling & n/m warning + spike clipping
+check(abs(v._adr_scale({"shares": [("2025-12-31", 25.0, D(2026, 3, 1))]}, {"market_cap": 100.0}, "USD", 20.0) - 0.2) < 1e-6, "5:1 ADR share scaling factor = 0.2")
+check(v._adr_scale({"shares": [("2025-12-31", 100.0, D(2026, 3, 1))]}, {"market_cap": 2000.0}, "GBp", 2000.0) == 1.0, "UK GBp quote price converted to GBP major before comparing market cap")
+check(v._adr_scale({"shares": [("2025-12-31", 100.0, D(2026, 3, 1))]}, {"market_cap": 1150.0}, "USD", 10.0) == 1.0
+      and v._adr_scale({"shares": [("2025-12-31", 100.0, D(2026, 3, 1))]}, {"market_cap": 850.0}, "USD", 10.0) == 1.0,
+      "normal 15% share issuance or buyback is not rescaled as an ADR mismatch")
+
+saved = v.sec_figures, v._profile, c.history
+try:
+    v._profile = lambda sym: {"industry": "Interactive Home Entertainment", "currency": "USD"}
+    v.sec_figures = lambda sym, items=None: {
+        "shares": [("2022-09-30", 1.0, D(2022, 11, 1)), ("2026-09-30", 1.0, D(2026, 11, 1))],
+        "net_income": [("2022-09-30", 1.0, D(2022, 11, 1)), ("2026-09-30", -2.0, D(2026, 11, 1))],
+        "operating_income": [("2026-09-30", 0.01, D(2026, 11, 1))],
+        "da": [("2026-09-30", 0.0, D(2026, 11, 1))],
+        "cash": [("2026-09-30", 0.0, D(2026, 11, 1))],
+        "ebitda": [],
+    }
+    c.history = lambda syms, start: {"BADCO": [("2022-11-11", 50.0), ("2026-11-18", 200.0)]}
+    nm_out = v.bands(symbol="badco", measure="pe", years="10", today=D(2026, 11, 20))
+    check(nm_out["summary"]["current"] is None and nm_out["summary"]["last_valid"] == 50.0 and nm_out["summary"]["last_valid_date"] == "2022-11-11",
+          "n/m summary preserves last_valid & date: " + str(nm_out["summary"]))
+    check("n/m now (last 50.0x on 2022-11-11)" in nm_out["data"][-1]["name"] and "EV / Sales, P / S or P / B" in nm_out.get("warning", ""),
+          "n/m legend & actionable warning: " + str(nm_out.get("warning")))
+
+    # spike clipping (> MAX_MULT)
+    v.sec_figures = lambda sym, items=None: {
+        "shares": [("2026-09-30", 1.0, D(2026, 10, 1))],
+        "net_income": [("2026-09-30", 0.01, D(2026, 10, 1))],
+    }
+    c.history = lambda syms, start: {"SPK": [("2026-10-05", 0.2), ("2026-10-06", 5.0)]}   # 20x kept, 500x clipped >250x
+    sp_out = v.bands(symbol="spk", measure="pe", today=D(2026, 10, 10))
+    check(sp_out["results"][0]["multiple"] is None and sp_out["results"][1]["multiple"] == 20.0 and "clipped" in sp_out["convention"],
+          "extreme near-zero-denominator spike clipped above 250x")
+    # stale SEC shares (>520d) with fresh net_income triggers Yahoo fallback (BRK-B regression)
+    saved_yp = v._yahoo_pack
+    try:
+        v.sec_figures = lambda sym, items=None: {
+            "shares": [("2015-09-30", 1.0, D(2015, 11, 1))],
+            "net_income": [("2025-09-30", 10.0, D(2025, 11, 1))],
+        }
+        v._yahoo_pack = lambda sym, px_ccy, prof=None, last_px=None: (
+            {"shares": [("2025-12-31", 2.0, D(2026, 3, 31))], "net_income": [("2025-12-31", 5.0, D(2026, 3, 31))]},
+            "Yahoo annual statements",
+            [v.YAHOO_FIN_SRC, v.YAHOO_SRC],
+        )
+        c.history = lambda syms, start: {"BRK-B": [("2026-04-01", 50.0), ("2026-04-02", 55.0)]}
+        yb_out = v.bands(symbol="brk-b", measure="pe", today=D(2026, 4, 10))
+        check(yb_out["summary"]["current"] == 22.0 and yb_out["sources"][0]["name"] == "Yahoo Finance",
+              "stale SEC shares falls back to Yahoo instead of 502: " + str(yb_out["summary"]))
+    finally:
+        v._yahoo_pack = saved_yp
+finally:
+    v.sec_figures, v._profile, c.history = saved
 
 done("test_valuation")

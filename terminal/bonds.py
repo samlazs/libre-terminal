@@ -232,7 +232,7 @@ def curve(company="AAPL", issuer="", cusip="", all_types="no", include_old="no",
     lay["yaxis"]["title"] = {"text": "last-sale yield", "font": {"size": 10}}      # yield to worst on callables: the card's description and table say so
     note = "x: maturity · click a point for its history" + (" · " + _hidden_text(hidden) if _hidden_text(hidden) else "")
     lay["annotations"] = [C._note(note)]
-    return {"data": traces, "layout": lay, "sources": [SOURCE_FINRA, SOURCE_SEC], "delayed": DELAYED}
+    return {"data": traces, "layout": lay, "sources": [SOURCE_FINRA, SOURCE_SEC], "delayed": DELAYED, "results": pts, "convention": note}
 
 
 # ---------------------------------------------------------------- bond pricer (Stage 3 item 4)
@@ -345,9 +345,11 @@ def maturity_wall(company="AAPL", **_):
     lay["yaxis"]["tickprefix"] = "$"
     lay["yaxis"]["ticksuffix"] = "bn"
     total = sum(v for v in ys if v is not None)
-    lay["annotations"] = [C._note(f"{sym} long-term debt principal by year due, 10-K for the fiscal year ended {end} (filed {filed}) · "
-                                  f"${total:,.1f}bn in all · a blank bar = not tagged · filings: source menu")]
-    return {"data": [trace], "layout": lay, "sources": _wall_sources(sym, cik)}
+    conv = (f"{sym} long-term debt principal by year due, 10-K for the fiscal year ended {end} (filed {filed}) · "
+            f"${total:,.1f}bn in all · a blank bar = not tagged · filings: source menu")
+    lay["annotations"] = [C._note(conv)]
+    results = [{"bucket": b, "principal_bn": v} for b, v in zip(xs, ys)]
+    return {"data": [trace], "layout": lay, "sources": _wall_sources(sym, cik), "results": results, "convention": conv}
 
 
 def static_sources(name, p):

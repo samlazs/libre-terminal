@@ -136,6 +136,12 @@
     });
     if (typeof lj.delayed === "string" && lj.delayed) foot.appendChild(el("span", { class: "delay-note", title: lj.delayed }, "delayed"));
   };
+  T.chartFooterNote = function (d) {
+    var hasAnnot = !!(d && d.layout && Array.isArray(d.layout.annotations) && d.layout.annotations.length);
+    var conv = (!hasAnnot && d && typeof d.convention === "string") ? d.convention : "";
+    var warn = (d && typeof d.warning === "string") ? d.warning : "";
+    return (warn ? "⚠ " + warn + (conv ? " · " : "") : "") + conv;
+  };
 
   // At most a few requests at a time per backend: bursts make upstream sources (Yahoo especially) return nothing.
   var slots = {}, MAX_PARALLEL = 5;
@@ -167,7 +173,7 @@
     var u = String(url || "");
     if (isFiles
       || /\/api\/v1\/(?:cboe\/options\/|derivatives\/options\/chains)\b/.test(u)
-      || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release)\b/.test(u)
+      || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release|valuation_bands|roic_dupont|gex_strike|vol_cone|debt_maturity_wall|etf_overlap|correlation|risk_stats|fx_rate_diff)\b/.test(u)
       || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
       || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 60000;
     if (/\/x\/(board|watchlist|perf_bars|performance|style_box|chart|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
@@ -508,6 +514,11 @@
     sub.addEventListener("click", function (e) { e.stopPropagation(); openSources(); });
     var tools = el("div", { class: "w-tools" });
     var head = el("div", { class: "w-head" }, [title, sub, tools]);
+    function toggleMax() { node.classList.toggle("max"); ctx.relayout(); }
+    head.addEventListener("dblclick", function (e) {
+      if (e.target && e.target.closest && e.target.closest("button,input,select,a,.dd,.w-sub")) return;
+      toggleMax();
+    });
     var strip = el("div", { class: "w-strip" });
     var pbar = el("div", { class: "w-params" });
     var body = el("div", { class: "w-body" });
@@ -818,7 +829,7 @@
       var line = chartShown ? T.sourceLine(sources()) : "";
       if (line) foot.appendChild(el("span", { class: "src-line", title: line }, line));      // part of the card, never clipped; PNG exports carry it too
       T.renderTrust(foot, lastJson);
-      if (extra) foot.appendChild(el("span", null, extra));
+      if (extra) foot.appendChild(el("span", { class: "foot-note", title: extra }, extra));
       foot.appendChild(el("span", { style: { marginLeft: "auto" } }, "updated " + T.mtlNow()));
     }
 
@@ -904,10 +915,9 @@
       if (def.params.some(function (p) { return p.show !== false && p.paramName && !ctx.groupOf(item, p.paramName) && stripParams().indexOf(p.paramName) < 0; })) {
         more.push({ label: item.compact ? "Show settings" : "Hide settings", onClick: function () { pref("compact", !item.compact); drawParams(); drawTools(); } });
       }
-      function maximize() { node.classList.toggle("max"); ctx.relayout(); }
       tools.appendChild(tool("↻", "Reload", function () { refresh(true); }));
-      if (narrowNow) more.push({ label: "Maximize (Esc to restore)", onClick: maximize });
-      else tools.appendChild(tool("⤢", "Maximize / restore (Esc)", maximize));
+      if (narrowNow) more.push({ label: "Maximize (Esc to restore)", onClick: toggleMax });
+      else tools.appendChild(tool("⤢", "Maximize / restore (double-click header, Esc)", toggleMax));
       more.push("sep", { label: "Remove from dashboard", danger: true, onClick: function () { ctx.onRemove(); } });
       var moreBtn = tool("⋯", "More: columns, flip, plot, settings, remove", function () { T.menu(moreBtn, more); });
       tools.appendChild(moreBtn);
@@ -1084,7 +1094,7 @@
             var pt = ev && ev.points && ev.points[0], v = pt && pt.customdata;
             if (v != null && v !== "") ctx.broadcast(item, clickParam, Array.isArray(v) ? v[0] : v);
           });
-          stamp("");
+          stamp(T.chartFooterNote(d));
         } else if (def.type === "chart") {
           renderTable(d.results);
         } else if (def.type === "markdown") {

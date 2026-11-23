@@ -38,26 +38,31 @@ def listing(symbol):
     return "us", s
 
 
-def _yahoo_name(sym):
+def _yahoo_profile(sym):
     def run():
         try:
             rows = C.api(C.V5, "equity/profile", provider="yfinance", symbol=sym) or []
         except C.CompositeError:
-            return None
-        return next((r.get("name") or r.get("long_name") for r in rows if r.get("name") or r.get("long_name")), None)
-    return C.cached(("yahoo_name", sym), 86400, run)
+            return {}
+        r = rows[0] if rows else {}
+        return {"name": r.get("name") or r.get("long_name") or "", "sector": r.get("sector") or "", "industry": r.get("industry_category") or ""}
+    return C.cached(("yahoo_profile", sym), 86400, run)
 
 
-def _bank_value(sym, base):
+def _bank_value(sym, base, sector=None):
     """(ticker the FFIEC directory knows the bank holding company by (JPM; RY for RY.TO) or None, whether a lookup failed).
-    A failed lookup is kept 5 minutes only: an FFIEC outage must not hide the Bank link for a day."""
+    Skips FFIEC when Yahoo's sector is known and non-financial; unknown-ticker 400s cache 24h while outages cache 5 minutes."""
+    if sector and "financial" not in str(sector).lower():
+        return None, False
+
     def run():
         failed = False
-        for t in dict.fromkeys([sym, base]):
+        for t in dict.fromkeys([base, sym] if "." in sym else [sym]):
             try:
                 inst = C.api(C.V5, "federal_reserve/ffiec/institutions", ticker=t) or []
-            except C.CompositeError:
-                failed = True
+            except C.CompositeError as e:
+                if "could not resolve ticker" not in str(e).lower():
+                    failed = True
                 continue
             if any(r.get("rssd_id") for r in inst):
                 return {"value": t, "_partial": False}
@@ -86,7 +91,8 @@ def links(symbol="AAPL", **_):
     def run():
         where, base = listing(sym)
         sec_name = bonds._sec_name(sym) if where == "us" else None
-        name = sec_name or _yahoo_name(sym)
+        yprof = _yahoo_profile(sym) if (not sec_name or where in ("us", "ca")) else {}
+        name = sec_name or yprof.get("name") or None
         out, partial = [], False
         if where == "us":
             out.append({"key": "options", "label": "Options", "dash": "d:options", "tab": "chain", "group": "Symbol", "value": sym})
@@ -98,7 +104,7 @@ def links(symbol="AAPL", **_):
         if bond:
             out.append({"key": "bonds", "label": "Bonds", "dash": "d:credit", "tab": "bond-lookup-trace", "group": "Issuer", "value": bond})
         if where in ("us", "ca"):                  # the FFIEC directory lists bank holding companies only
-            bank, failed = _bank_value(sym, base)
+            bank, failed = _bank_value(sym, base, yprof.get("sector"))
             partial = partial or failed
             if bank:
                 out.append({"key": "bank", "label": "Bank", "dash": "d:banking", "tab": "bank-lookup", "group": "Bank", "value": bank})

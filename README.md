@@ -2,7 +2,7 @@
 
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
 
-It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
+It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/openbq-org/OpenBB).
 
 Most of the terminal works immediately with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add deeper U.S. economic, energy, labor, and legislative series.
 
@@ -31,7 +31,7 @@ Everything runs locally on your machine. Nothing leaves your computer except the
 
 ### Equities, comps, and SEC filings
 
-Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to pull up price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview sits an editable comparable companies table with market cap and enterprise value converted to USD, multiples, margins, growth, leverage, and peer medians. Statements switch between reported values, common size (percent of revenue or of total assets), and year-over-year change. Growth & Ratios plots five years of P/E, EV/EBITDA, or P/B against their own median and 10th-90th percentile band, built from figures as they were known on each day (SEC filings for U.S. companies, Yahoo Finance elsewhere), beside ROIC and a DuPont breakdown of ROE. For U.S. banks, the snapshot adds FDIC asset-quality figures and skips multiples that have no meaning for a bank. Separate tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons (such as capital expenditure or debt across major cloud providers).
+Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to pull up price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview sits an editable comparable companies table with market cap and enterprise value converted to USD, multiples, margins, growth, leverage, and peer medians. Statements switch between reported values, common size (percent of revenue or of total assets), and year-over-year change. Growth & Ratios plots 3, 5, or 10 years of P/E, EV/EBITDA, EV/Sales, P/S, or P/B against their own median and 10th-90th percentile band, built from figures as they were known on each day (SEC filings for U.S. companies, Yahoo Finance with automatic currency and ADR/share-class scaling elsewhere), beside ROIC and a DuPont breakdown of ROE. For U.S. banks, the snapshot adds FDIC asset-quality figures and skips multiples that have no meaning for a bank. Separate tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons (such as capital expenditure or debt across major cloud providers).
 
 ![Company overview for Apple](docs/company-overview.jpg)
 
@@ -147,14 +147,14 @@ The News dashboard separates curated market headlines (folding duplicate wire st
 
 ## Working in the terminal
 
-- **Search from anywhere (`Ctrl+G`):** Type a ticker, company name, SEC CIK, CUSIP, or dataset (`toyota`, `rheinmetall`, `SHEL.L`, `CIK 320193`, `037833100`, `cpi`, `sofr`, `wasde`). Stocks open in Company, ETFs in ETFs & Funds, and indices, currencies, futures, or coins in the main chart.
+- **Search from anywhere (`/` or `Ctrl+G`):** Type a ticker, company name, SEC CIK, CUSIP, or dataset (`toyota`, `rheinmetall`, `SHEL.L`, `CIK 320193`, `037833100`, `cpi`, `sofr`, `wasde`). Stocks open in Company, ETFs in ETFs & Funds, and indices, currencies, futures, or coins in the main chart.
 - **Watchlists:** Keep your own lists of tickers with last price, daily change, five return horizons, 3-month sparklines, and 52-week ranges in each security's trading currency.
 - **Compare chart:** Plot up to eight securities or FRED series (`FRED:DGS10`) on one axis as price, percent change, ratio, spread, or drawdown, with candlesticks, volume, 50- and 200-day moving averages, log scale, and NBER recession shading.
 - **Editable comps:** Comparable companies tables auto-select peers and compute medians, and you can add or remove tickers per company with your list saved locally.
 - **Source attribution on every card:** Each card names its source in the header (`Source: SEC`). Click it to switch to another provider for the same data or open the original source page. Cards that depend on a ticker route automatically to the exchange or provider that covers it (U.S. options via Yahoo/Nasdaq/Cboe, Canadian options via TMX, crypto options via Deribit; U.S. ETF holdings via Nasdaq, Canadian via TMX).
 - **Chart and table controls:** Change date ranges (`1M` to `Max`), switch transforms (`Level`, `YoY %`, `Indexed`, `Seasonal` against the 5-year range), or show and hide table columns without editing your saved layout. Export any table to CSV (with its source line) or save any chart as PNG.
 - **Custom dashboards:** Build your own tabs or dashboards with `+`, rearrange cards freely, and restore any built-in dashboard to its original layout through **⋯ > Reset to default layout**.
-- **Shortcuts and status:** Press `?` to view keyboard shortcuts (`[` and `]` move between tabs). Open **Data Explorers > Data status** to see which sources are down upstream and which API keys are configured.
+- **Shortcuts and status:** Press `?` to view keyboard shortcuts (`/` focuses search, `[` and `]` move between tabs, double-clicking a card header maximizes it). Open **Data Explorers > Data status** to see which sources are down upstream and which API keys are configured.
 
 ## Official sovereign yield curves
 
