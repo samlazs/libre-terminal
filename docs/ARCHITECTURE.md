@@ -43,12 +43,17 @@ terminal/server.py           UI server: static files, /api/config, /api/warm, /a
 terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...) and two-phase cache warmer (warm.py)
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
-terminal/bonds.py            FINRA TRACE corporate bond lookup and yield-by-maturity curve (/x/bond_lookup, /x/bond_curve)
+terminal/bonds.py            FINRA TRACE corporate bond lookup and yield-by-maturity curve (/x/bond_lookup, /x/bond_curve), bond pricer and debt maturity wall (/x/bond_pricer, /x/debt_maturity_wall)
+terminal/bond_math.py        bond yield, duration, convexity, DV01, G-spread and ISIN-from-CUSIP math for the TRACE views
 terminal/cds.py              CFTC swap-repository CDS index levels and history (/x/cds_indices, /x/cds_history)
 terminal/policy_path.py      CFTC OIS-implied policy paths anchored on BIS policy rates (/x/policy_path, /x/policy_path_table)
 terminal/cryptovol.py        Deribit DVOL against 30-day realised volatility (/x/crypto_vol)
 terminal/links.py            company jump buttons across filings, options, bonds and news (/x/company_links)
 terminal/multpl.py           S&P 500 valuation multiples and fundamentals from multpl.com (/x/sp500_multiples)
+terminal/valuation.py        5-year valuation bands from point-in-time SEC or Yahoo figures, ROIC and DuPont (/x/valuation_bands, /x/roic_dupont)
+terminal/risk.py             cross-asset correlation, risk statistics and the FX 2-year rate differential (/x/correlation, /x/risk_stats, /x/fx_rate_diff)
+terminal/etfs.py             ETF holdings overlap from SEC N-PORT filings (/x/etf_overlap)
+terminal/optionsx.py         gamma exposure by strike with Max Pain, and the realised-volatility cone against implied (/x/gex_strike, /x/vol_cone)
 terminal/fred_public.py      keyless FRED public CSV series fetcher and cache helper
 terminal/xwidgets.py         widget definitions of those views
 terminal/columns.py          table column layer: headers, formats, default column sets per endpoint
@@ -68,7 +73,7 @@ ruff.toml                    static bug-check configuration for terminal/ and sc
 `scripts/dashboards/` holds the plain structure and override data (`overrides.py`, `layouts.py`) while
 `scripts/build_dashboards.py` is the compact generator engine (re-exporting all public data/DSL symbols) that writes
 `local/dashboards.json` on every start (`launcher.py dashboards` rebuilds it; `--report` prints the layout).
-Current default V5-only build: 28 dashboards, 118 tabs, 766 cards, 29 concept families; 929 of 929 data functions placed, none by fallback (with `--with-v4`: 28 dashboards, 119 tabs, 809 cards, 42 concepts, 990 functions).
+Current default V5-only build: 28 dashboards, 120 tabs, 786 cards, 30 concept families; every data function placed, none by fallback (`--with-v4` adds about 43 legacy cards and one tab).
 
 Conventions:
 
@@ -200,6 +205,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_medium.py`, `test_low.py`, `test_p4.py` | FRED cache slicing, weekly YoY, STEO forecast split, BIS daily policy, non-trading-day bases, SWR per-symbol history cache, cache eviction |
 | `test_generator.py` | routing by ticker; full build replayed from the catalogs the last live build recorded in `local/cache/catalog-*.json`: coverage, unique and stable ids, renamed tabs, V5-only default build without V4 |
 | `test_cboe_fallback.py` | Black-76 by hand, parity forward, blank-not-zero, substitute loader and chart builders |
+| `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Point-in-time multiples and percentile bands, ROIC/DuPont, return frequency, beta, drawdown and rate differentials, bond yield/duration/DV01/G-spread and maturity wall, N-PORT overlap matching, GEX, Max Pain, monthly expiry choice and the volatility cone |
 | `test_redact.py`, `test_backend_wrapper.py` | key redaction, stream guard, log redaction, Host/Origin guard |
 | `test_launcher_server.py` | restart policy, stop scope, V5-only default / `--with-v4` / `--skip-v4` CLI, UI server Host/Origin/state/config rules, v4 override validation, corrupt state recovery, ETags, CSP, keys applied on start, cache pruning |
 | `test_health.py`, `test_workflow.py` | relative NY dates, card/choice URL builder, error classifier, secret redaction, mock OECD-429 health run; publishable manifest, snapshots, snapshot diffs, EOL/BOM/hygiene checks, parallel test filter |
@@ -230,15 +236,16 @@ A supervisor that gives up writes `local/run/<name>.stopped.json`; `/api/service
 ## Planned refactor
 
 `terminal/composite/` (split from the 5,095-line `terminal/composite.py` alongside `news.py`, `banks.py`, `bonds.py`,
-`cds.py`, `policy_path.py`, `cryptovol.py`, `links.py`, `multpl.py`, and `fred_public.py`) is the terminal's composite
+`cds.py`, `policy_path.py`, `cryptovol.py`, `links.py`, `multpl.py`, `fred_public.py`, and the later `valuation.py`, `risk.py`,
+`bond_math.py`, `etfs.py`, `optionsx.py`) is the terminal's composite
 views package, keeping the exact import name `composite` with zero behaviour change. `terminal/composite/__init__.py`
-re-exports `dispatch`, `warm`, `CompositeError`, `ROUTES` (all 42 routes), the 9 option lists `xwidgets.py` imports by
+re-exports `dispatch`, `warm`, `CompositeError`, `ROUTES` (all 54 routes), the 9 option lists `xwidgets.py` imports by
 reference, `time`, and all 320 module-level symbols. Submodules import `composite as C` and look up cross-module calls
 and patchable globals through `C.<name>` at runtime so offline tests can monkey-patch `composite` attributes directly.
 
 ```
 terminal/composite/
-  __init__.py          re-exports; dispatch, static_sources, sibling wrappers, consolidated ROUTES (42 routes)
+  __init__.py          re-exports; dispatch, static_sources, sibling wrappers, consolidated ROUTES (54 routes)
   core/   http.py      backend URLs (one port reader), http_json, api, _download, SSL context, source helpers
           cache.py     cached, cached_disk, backoff, _curve_store, context-propagating pool, stale notes
           dates.py     horizons, range windows, period and quarter helpers
