@@ -43,6 +43,7 @@ STATIC = ROOT / "terminal" / "static"
 CHECKS = (ROOT / "scripts" / "tests" / "frontend_checks.js").read_text(encoding="utf-8")
 CAPTURE = """
 (function () {
+  window.addEventListener("error", function (e) { window.__fcError = window.__fcError || ("uncaught " + e.message + " (" + String(e.filename || "").split("/").pop() + ":" + e.lineno + ")"); });
   var log = console.log;
   console.log = function (m) { if (/^frontend checks: \\d+ passed$/.test(String(m))) window.__fc = String(m); return log.apply(console, arguments); };
 })();

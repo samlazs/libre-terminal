@@ -22,6 +22,11 @@ QUALITY = [("NCLNLSR", "Noncurrent loans", "loans 90+ days past due or nonaccrua
            ("ROA", "Return on assets", "net income, % of average assets, annualized year to date")]
 
 
+# fetched beside the charted ratios for the company snapshot (Stage 3 8a-ext): net interest margin, percent, annualized YTD
+EXTRA = [("NIMY", "Net interest margin", "net interest income, % of average earning assets, annualized year to date")]
+FIELDS = [k for k, _, _ in QUALITY + EXTRA]
+
+
 def _fdic(path, **params):
     url = FDIC + path + "?" + urllib.parse.urlencode(params)
     j = json.loads(C._download(url, timeout=40, ua=C.BROWSER_UA))
@@ -80,13 +85,13 @@ def lead_bank(holding_rssd):
 
 def quality_series(raw):
     """FDIC quarterly financial rows -> {field: [[iso date, value], ...]} oldest first (REPDTE is YYYYMMDD)."""
-    out = {k: [] for k, _, _ in QUALITY}
+    out = {k: [] for k in FIELDS}
     for r in sorted(raw, key=lambda r: str(r.get("REPDTE"))):
         d = str(r.get("REPDTE") or "")
         if len(d) != 8:
             continue
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}"
-        for k, _, _ in QUALITY:
+        for k in FIELDS:
             v = r.get(k)
             if isinstance(v, (int, float)):
                 out[k].append([iso, round(float(v), 3)])
@@ -126,19 +131,44 @@ def bank_rssd(symbol="JPM", **_):
     return dict(got, sources=[FFIEC_SRC])
 
 
-def bank_quality(symbol="JPM", **_):
-    """Credit quality and capital of the bank behind a U.S.-listed bank holding company ticker, quarterly (FDIC)."""
-    sym = str(symbol or "JPM").strip().upper().split(",")[0]
-
+def quality_data(sym):
+    """{holding, bank, cert, series} for a holding-company ticker, kept 12 hours on disk."""
     def run():
         hc = holding_company(sym)
         bank = lead_bank(hc["rssd_id"])
         if not bank:
             raise C.CompositeError(f"{hc.get('legal_name') or sym} has no FDIC-insured bank (FDIC BankFind).")
-        raw = _fdic("financials", filters=f"CERT:{bank['CERT']}", fields="REPDTE," + ",".join(k for k, _, _ in QUALITY),
+        raw = _fdic("financials", filters=f"CERT:{bank['CERT']}", fields="REPDTE," + ",".join(FIELDS),
                     sort_by="REPDTE", sort_order="DESC", limit=60)
         return {"holding": hc.get("legal_name") or sym, "bank": bank.get("NAME"), "cert": bank.get("CERT"), "series": quality_series(raw)}
-    got = C.cached_disk("bank_quality_" + sym.replace("/", "_"), 12 * 3600, run)
+    return C.cached_disk("bank_quality2_" + sym.replace("/", "_"), 12 * 3600, run)
+
+
+SNAPSHOT_ROWS = [("NIMY", "NIM"), ("RBC1AAJ", "Tier 1 leverage"), ("NTLNLSR", "Net charge-off rate")]
+
+
+def snapshot_rows(symbol):
+    """Lead-bank figures for the company snapshot: {"title", "bank", "rows": [(label, "1.23%")]}, all from the latest FDIC
+    quarter (a ratio not reported for that quarter is a dash, never an older quarter's figure); None when FDIC has nothing."""
+    got = quality_data(str(symbol or "").strip().upper())
+    series = got.get("series") or {}
+    lasts = [pts[-1][0] for k, _ in SNAPSHOT_ROWS for pts in [series.get(k) or []] if pts]
+    if not lasts:
+        return None
+    q = max(lasts)
+    rows = []
+    for k, label in SNAPSHOT_ROWS:
+        pts = series.get(k) or []
+        rows.append((label, f"{pts[-1][1]:.2f}%" if pts and pts[-1][0] == q else "–"))
+    title = f"Bank (lead bank, FDIC, Q{(int(q[5:7]) - 1) // 3 + 1} {q[:4]})"
+    return {"title": title, "bank": got.get("bank"), "cert": got.get("cert"), "rows": rows}
+
+
+def bank_quality(symbol="JPM", **_):
+    """Credit quality and capital of the bank behind a U.S.-listed bank holding company ticker, quarterly (FDIC)."""
+    sym = str(symbol or "JPM").strip().upper().split(",")[0]
+
+    got = quality_data(sym)
     traces = []
     for i, (k, label, what) in enumerate(QUALITY):
         pts = got["series"].get(k) or []

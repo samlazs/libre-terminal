@@ -164,10 +164,21 @@
     T.popover(anchor, box, { width: 230 });
   };
 
+  // open modals, newest last: Escape closes only the one on top (a dialog over the watchlist editor used to close both)
+  var modals = [];
   T.modal = function (node, onClose) {
     var bg = el("div", { class: "modal-bg" }, node);
-    function close() { bg.remove(); document.removeEventListener("keydown", key, true); if (onClose) onClose(); }
-    function key(e) { if (e.key === "Escape" && !openPop) { e.stopPropagation(); close(); } }
+    modals.push(bg);
+    function close() {
+      bg.remove(); document.removeEventListener("keydown", key, true);
+      var i = modals.indexOf(bg); if (i >= 0) modals.splice(i, 1);
+      if (onClose) onClose();
+    }
+    function key(e) {
+      if (e.key !== "Escape" || openPop || e.defaultPrevented || modals[modals.length - 1] !== bg) return;
+      if (e.target && e.target.closest && e.target.closest("[data-own-esc]")) return;     // a field that cancels itself on Escape
+      e.stopPropagation(); e.preventDefault(); close();
+    }
     bg.addEventListener("mousedown", function (e) { if (e.target === bg) close(); });
     document.addEventListener("keydown", key, true);
     document.getElementById("modal-root").appendChild(bg);

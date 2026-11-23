@@ -107,6 +107,13 @@
   var loud = T.table(document.createElement("div"), { data: [{ a: 1, stale: "2026-10-20", note: "x" }, { a: 2 }], colDefs: sdefs, curated: true });
   ok(quiet.shownFields().indexOf("stale") < 0 && loud.shownFields().indexOf("stale") >= 0, "showIfAny: shown only when a row has a value");
   ok(loud.shownFields().indexOf("note") < 0, "a plain hidden column stays hidden");
+  // Stage 3 T1-2: a calendar with nothing from today on keeps its past rows but says the source has not moved on
+  var calDefs = [{ field: "auction_date", cellDataType: "date" }, { field: "security_term", cellDataType: "text" }], lastSeen = null, upSeen = null;
+  T.table(document.createElement("div"), { data: [{ auction_date: "2020-10-22", security_term: "4-Week" }, { auction_date: "2020-10-29", security_term: "7-Year" }],
+    colDefs: calDefs, calendar: true, onNoUpcoming: function (d) { lastSeen = d; } });
+  T.table(document.createElement("div"), { data: [{ auction_date: "2020-10-22", security_term: "4-Week" }, { auction_date: "2999-01-01", security_term: "7-Year" }],
+    colDefs: calDefs, calendar: true, onNoUpcoming: function (d) { upSeen = d; } });
+  ok(lastSeen === "2020-10-29" && upSeen === null, "calendar with no upcoming row reports the latest listed date; one with an upcoming row does not");
   // review A3: TMX statements start with a "Reported Currency: CAD" row; the year column is still amounts, in one scale
   var stDiv = document.createElement("div");
   T.table(stDiv, { data: [{ Item: "Reported Currency", "2024-12-31": "CAD" }, { Item: "Net Income", "2024-12-31": 375000000 },
@@ -240,7 +247,7 @@
   var csv = stv.toCSV(",").split("\r\n");
   ok(stv.statement && csv[0] === "mn (reporting currency),FY2026,FY2025", "statement header: unit once, periods across");
   ok(csv[1].indexOf("Operating revenue,478000000000,400000000000") === 0, "first line, newest period first, raw values in exports");
-  ok(host.querySelectorAll(".stmt-bar .chip").length === 2 && host.querySelector(".stmt-bar .chip.on").textContent === "Annual", "Annual / Quarterly switch");
+  ok(host.querySelectorAll(".stmt-bar > .chip").length === 2 && host.querySelector(".stmt-bar .chip.on").textContent === "Annual", "Annual / Quarterly switch");
   ok(!stv.canTranspose, "a statement is not flipped");
   var many = []; for (var qq = 0; qq < 30; qq++) many.push({ period_ending: (2000 + qq) + "-12-31", fiscal_year: 2000 + qq, net_income: qq });
   var mhost = document.createElement("div"), mtv = T.statement(mhost, { data: many, kind: "income", provider: "sec", period: "annual" });
@@ -249,6 +256,28 @@
   ok(mtv.periods.length === 30 && mtv.toCSV(",").split("\r\n")[0].split(",").length === 31, "All periods on request, same table object");
   [].filter.call(mhost.querySelectorAll(".chip"), function (c) { return /Latest/.test(c.textContent); })[0].click();
   ok(mtv.periods.length === 10, "and back to the latest");
+  // Stage 3 8c: common size and YoY (hand-computed: 30/200 = 15%; revenue 200/160 = +25%; base -10 or current -10 = n/m)
+  var cs = [{ period_ending: "2026-12-31", total_revenue: 200, net_income: 30, diluted_earnings_per_share: 2 },
+            { period_ending: "2025-12-31", total_revenue: 160, net_income: -10, diluted_earnings_per_share: -1 },
+            { period_ending: "2024-12-31", total_revenue: 100, net_income: 20, diluted_earnings_per_share: 1.5 }];
+  function lineOf(tv, re) { return tv.baseRows.filter(function (r) { return re.test(r.line || ""); })[0] || {}; }
+  var shown = null, chost = document.createElement("div");
+  var ctv = T.statement(chost, { data: cs, kind: "income", provider: "yfinance", period: "annual", show: "common", onShow: function (v) { shown = v; } });
+  ok(ctv.show === "common" && Math.abs(lineOf(ctv, /^Net income$/).p0 - 15) < 1e-9 && Math.abs(lineOf(ctv, /^Total revenue$/).p0 - 100) < 1e-9, "common size: net income 30 of revenue 200 = 15%");
+  ok(lineOf(ctv, /earnings per share/i).p0 == null && ctv.toCSV(",").split(String.fromCharCode(13, 10))[0].indexOf("% of revenue") === 0, "per-share lines blank in common size; header names the base");
+  var ytv = T.statement(document.createElement("div"), { data: cs, kind: "income", provider: "yfinance", period: "annual", show: "yoy" });
+  var rv = lineOf(ytv, /^Total revenue$/), ni = lineOf(ytv, /^Net income$/);
+  ok(Math.abs(rv.p0 - 25) < 1e-9 && Math.abs(rv.p1 - 60) < 1e-9 && rv.p2 == null, "YoY revenue +25%, +60%, oldest blank");
+  ok(ni.p0 === "n/m" && ni.p1 === "n/m", "YoY n/m when the base is negative or the sign flips");
+  [].filter.call(chost.querySelectorAll(".chip"), function (c) { return /YoY/.test(c.textContent); })[0].click();
+  ok(shown === "yoy", "view chip reports the choice to the card");
+  var btv = T.statement(document.createElement("div"), { data: [{ period_ending: "2026-12-31", cash_and_cash_equivalents: 5 }], kind: "balance", provider: "yfinance", period: "annual", show: "common" });
+  ok(btv.show === "values", "no total assets: common size falls back to values (chip disabled)");
+  ok(T.statementBase("income", { net_interest_income: 60, total_noninterest_income: 40 }) === 100 && T.statementBase("income", { net_interest_income: 60 }) == null,
+    "bank base: net interest + non-interest income only when both exist");
+  ok(T.statementBase("cash", { total_revenue: 100, operating_cash_flow: 20 }) == null, "cash flow: no common-size base");
+  ok(T.statementYearAgo(T.statementPeriods([{ period_ending: "2026-09-30" }, { period_ending: "2026-06-30" }, { period_ending: "2025-09-27" }], "quarter"), { period_ending: "2026-09-30" }).period_ending === "2025-09-27",
+    "quarterly YoY: four quarters back by date, not the previous column");
 
   // ---- tables: declared key columns only -> the data columns are shown; ids without separators; narrow boards
   var wide = [], dk = {}; for (var q = 0; q < 5; q++) { var rr = { period_ending: "2026-0" + (q + 1) + "-01", fiscal_period: "Q" + q, fiscal_year: 2026 }; for (var z = 0; z < 12; z++) rr["item_" + z] = q * z + 1; wide.push(rr); }
@@ -608,6 +637,9 @@
   ok(tYield.shownNow().join(",") === "name,price,chg,chg_pct,ytd", "tier 3 yield board keeps bp chg");
   var tColsOverride = T.table(document.createElement("div"), { data: brdFull, colDefs: bDefs, curated: true, narrow: 3, cols: ["name", "price", "m3"] });
   ok(tColsOverride.shownNow().join(",") === "name,price,m3", "explicit cols override ignores width tier");
+  var tQuote = T.table(document.createElement("div"), { data: [{ symbol: "AAPL", name: "Apple", price: 1, currency: "USD", ytd: 2 }, { symbol: "SHEL.L", name: "Shell", price: 2, currency: "GBp", ytd: 3 }],
+    colDefs: [{ field: "symbol" }, { field: "name" }, { field: "price" }, { field: "currency" }, { field: "ytd" }], narrow: 3 });
+  ok(tQuote.shownNow().indexOf("currency") >= 0, "tier 3 leaves a non-board table's currency column");
 
   // ---- UX fixes: TradingView FRED guard, FX/Auction newest-first sort, Nordics Market -> Company click-through
   var tvFred = T.frameUnsupported({ endpoint: "/api/v1/yfinance/tv_widget/view" }, { symbol: "FRED:DGS10" });

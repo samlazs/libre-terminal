@@ -265,15 +265,21 @@ def widgets():
            "Rates", ["BIS"], w=20, h=18, raw=True, refetch=3600000, strip=[RANGE_STRIP]),
         _w("x_policy_path", "Policy Path (OIS)", "Policy rate priced by meeting-dated overnight index swaps for six central banks (CFTC swap-repository prints): "
            "one bank today against one week and one month ago, or several banks side by side, with the BIS policy rate as the anchor.", "chart", "/x/policy_path",
-           [_p("currency", "Central banks", "USD", "One currency: today vs 1W and 1M ago. Several: today's paths side by side.", options=policy_path.OPTIONS, multiSelect=True)],
+           [_p("currency", "Central bank", "USD", "One central bank: today vs 1W and 1M ago. Pick several to compare today's paths side by side.", options=policy_path.OPTIONS, multiSelect=True)],
            "Rates", ["CFTC", "BIS"], w=24, h=18, raw=True, refetch=1800000),
-        _w("x_policy_path_table", "Policy Path by Meeting", "OIS-implied overnight rate for each period between policy meetings, with the change over one week and one month "
-           "and the gap to the current policy rate.", "table", "/x/policy_path_table",
+        _w("x_policy_path_table", "Policy Path by Meeting", "OIS-implied overnight rate for each period between policy meetings, the step priced at each meeting "
+           "(and as a share of a 25 bp move), the change over one week and one month, and the gap to the current policy rate.", "table", "/x/policy_path_table",
            [_p("currency", "Central bank", "USD", "Currency of the overnight index swaps.", options=policy_path.OPTIONS)],
            "Rates", ["CFTC", "BIS"], w=16, h=18, refetch=1800000,
-           cols=[_col("start", "Period start", "text", "Start of the period between two policy meetings (forward start of the swap). First row: the current policy rate.", pinned="left"),
-                 _col("end", "Period end", "text", "Maturity of the forward-starting swap: the next meeting's effective date for most banks; U.S. SOFR nodes are forward starts of a month or more and can overlap."),
+           cols=[_col("meeting", "Meeting", "text", "Month of the policy meeting whose decision the period prices. First rows: the current policy rate (with the Fed's "
+                      "target range) and the current period up to the first meeting at the latest overnight fixing (SOFR, ESTR, SONIA; not shown where none is published keylessly).", pinned="left"),
+                 _col("start", "Period start", "text", "Start of the period between two policy meetings (forward start of the swap); the first period starts today."),
+                 _col("end", "Period end", "text", "End of the period: the next meeting. One period per meeting: bespoke forward periods overlapping them are left out."),
                  _col("rate", "Implied rate", tip="Expected average overnight rate (SOFR, ESTR, SONIA, TONA, CORRA or AONIA) over the period, in percent.", decimalPlaces=3, suffix="%"),
+                 _bp("step", "Step", "Implied rate minus the previous period's, in basis points: the move priced at this meeting. The first meeting is measured from the "
+                     "overnight fixing (blank where there is none, as the gap to the policy rate would include the index's basis)."),
+                 _col("priced", "Priced move", tip="The step as a percent of a 25 bp move: +100 = one full 25 bp hike priced, -50 = half a cut, -150 = one cut and half of a second.",
+                      formatterFn="int", suffix="%", renderFn="greenRed"),
                  _bp("chg_1w", "Chg 1W", "Change in the implied rate for the same period against the path one week ago, in basis points."),
                  _bp("chg_1m", "Chg 1M", "Change in the implied rate for the same period against the path one month ago, in basis points."),
                  _bp("vs_policy", "vs policy rate", "Implied rate minus the current policy rate (BIS), in basis points. Includes the usual gap between the overnight index and the policy rate, so a few basis points are not a priced move."),
@@ -314,7 +320,7 @@ def widgets():
            "Crypto", ["Deribit", "Yahoo Finance"], w=20, h=18, raw=True, refetch=1800000, strip=[RANGE_STRIP]),
         _w("x_bond_lookup", "Corporate Bonds (TRACE)", "A company's bonds with the last reported sale from FINRA TRACE: coupon, maturity, rating, price and last-sale yield. "
            "Type a ticker, a company name, a FINRA issuer name or a CUSIP.", "table", "/x/bond_lookup", BOND_PARAMS,
-           "Credit", ["FINRA", "SEC"], w=24, h=18, refetch=900000,
+           "Credit", ["FINRA", "SEC", "FRED"], w=24, h=18, refetch=900000,
            cols=[_col("issuer", "Issuer (FINRA)", "text", "Issuer name as FINRA records it (abbreviated).", pinned="left"),
                  _col("coupon", "Coupon", tip="Annual coupon rate, percent.", decimalPlaces=3, suffix="%"),
                  _col("maturity", "Maturity", "text"),
@@ -324,8 +330,21 @@ def widgets():
                  _col("last_trade", "Last trade", "text", "Date of the last reported sale (TRACE)."),
                  _col("callable", "Callable", "text", "Callable, with the next call date where FINRA states it."),
                  _col("grade", "Grade", "text", "TRACE grade: investment grade or high yield."),
-                 _col("cusip", "CUSIP", "text"),
-                 _col("special", "MTN / conv. / perp.", "text", "Medium-term note programme, convertible or perpetual (hidden unless shown with the toggle).")]),
+                 _col("cusip", "CUSIP", "text", "Click to load this bond's trade history below.", renderFn="cellOnClick", renderFnParams={"groupByParamName": "cusip"}),
+                 _col("special", "MTN / conv. / perp.", "text", "Medium-term note programme, convertible or perpetual (hidden unless shown with the toggle)."),
+                 _col("ytm", "Yield (ours)", tip="Our yield to maturity from the last-sale price: semiannual, 30/360, settled on the last trade date. Callables to maturity (call ignored). Percent.", decimalPlaces=3, suffix="%"),
+                 _col("g_spread", "G-spread (bp)", tip="Our yield minus the Fed's par Treasury curve (H.15 constant maturities) of the last trade date, interpolated at the remaining maturity. Basis points.", decimalPlaces=0),
+                 _col("benchmark", "Benchmark", "text", "Nearest on-the-run Treasury tenor to the remaining maturity."),
+                 _col("mod_duration", "Mod. duration", tip="Modified duration at our yield (years); to maturity.", decimalPlaces=2),
+                 _col("convexity", "Convexity", tip="Convexity at our yield; to maturity.", decimalPlaces=1),
+                 _col("dv01", "DV01", tip="Price change for a 1 bp yield move, per 100 par (dirty price).", decimalPlaces=4),
+                 _col("price_chg", "Price chg", tip="Change in the last-sale price against the previous sale (FINRA), points per 100 par.", decimalPlaces=3),
+                 _col("coupon_type", "Coupon type", "text", "FINRA coupon type (Fixed Plain Vanilla, Floating ...); yield math for fixed rate only."),
+                 _col("is_144a", "144A", "text", "Rule 144A private placement (institutional buyers only)."),
+                 _col("risk_basis", "Risk basis", "text", "How the yield, duration and convexity are computed.", hide=True),
+                 _col("isin", "ISIN", "text", "US ISIN derived from the CUSIP (check digit computed).", hide=True),
+                 _col("moodys_date", "Moody's date", "text", "Date of the Moody's rating.", hide=True),
+                 _col("sp_date", "S&P date", "text", "Date of the S&P rating.", hide=True)]),
         _w("x_bond_curve", "Issuer Yield Curve (TRACE)", "FINRA last-sale yield (yield-to-worst on callables) against maturity for a company's bonds, one colour per issuer name. TRACE last-sale data, not live quotes.",
            "chart", "/x/bond_curve", BOND_PARAMS, "Credit", ["FINRA", "SEC"], w=16, h=18, raw=True, refetch=900000),
         _w("x_macro", "Data Chart", "A curated chart: credit, rates, growth, housing, oil and gas fundamentals (EIA), refining margins, geopolitical risk, shipping chokepoints and more. Pick a chart, or type FRED series IDs. Inventories can be shown against their 5-year range.",
@@ -435,4 +454,84 @@ def widgets():
         _w("x_data_status", "Data status", "Which data sources are broken upstream right now, which API keys are set and how many cards use each, and the known limits of free data.",
            "markdown", "/x/data_status", [], "Reference", ["Terminal"], w=40, h=20, refetch=3600000),
     ]
+    out.extend(_stage3())
     return {w["widgetId"]: w for w in out}
+
+
+SYM = [_p("symbol", "Symbol", "AAPL", "Ticker (Yahoo Finance spelling; U.S. filers use SEC figures).")]
+
+
+def _stage3():
+    """Stage 3 views (valuation, risk, FX differential, bonds, ETFs, options analytics)."""
+    import optionsx
+    import risk
+    import valuation
+    rng = _p("range", "Window", "1Y", "Look-back window.", typ="tabs", options=[{"label": k, "value": k} for k in risk.RANGES])
+    frq = _p("freq", "Frequency", "auto", "Auto: daily when every symbol closes in the same market, else Friday closes (mixed time zones, FX, crypto).", options=risk.FREQ_OPTIONS)
+    risk_cols = [_col("symbol", "Symbol", "text", pinned="left", **OPEN_SYMBOL),
+                 _col("vol", "Volatility", tip="Annualised standard deviation of returns at the stated frequency, percent.", decimalPlaces=1, suffix="%"),
+                 _col("sharpe", "Sharpe", tip="Mean excess return over the average 3-month T-bill, annualised, divided by annualised volatility.", decimalPlaces=2),
+                 _col("max_dd", "Max drawdown", tip="Largest fall from a running high in the window, daily closes, percent.", decimalPlaces=1, suffix="%"),
+                 _col("beta", "Beta", tip="Covariance with the benchmark / variance of the benchmark, same returns.", decimalPlaces=2),
+                 _col("ret_1y", "Return", tip="Price change over the window (distributions not included), percent.", decimalPlaces=1, suffix="%"),
+                 _col("periods", "Periods", tip="Return periods used (common dates).", formatterFn="int", hide=True)]
+    return [
+        _w("x_correlation", "Cross-asset correlation", "Correlation of returns between the symbols over the window: daily on common dates when all close in one market, "
+           "else Friday closes (mixed time zones, FX, crypto), as the note says.", "chart", "/x/correlation",
+           [_p("symbols", "Symbols", risk.DEFAULT, "Yahoo Finance tickers, comma separated (up to 20)."), frq],
+           "Risk", YAHOO, w=20, h=18, raw=True, refetch=3600000, strip=[RANGE_STRIP]),
+        _w("x_risk_stats", "Risk statistics", "Annualised volatility, Sharpe ratio (vs the average 3-month T-bill), max drawdown, beta and return over the window.",
+           "table", "/x/risk_stats", [_p("symbols", "Symbols", risk.DEFAULT, "Yahoo Finance tickers, comma separated."), _p("benchmark", "Benchmark", "SPY", "For beta."), rng, frq],
+           "Risk", ["Yahoo Finance", "FRED"], w=20, h=18, refetch=3600000, cols=risk_cols),
+        _w("x_peer_risk", "Risk vs peers", "The company and its peers (the comps list, or the peers you set there): annualised volatility, Sharpe ratio, "
+           "max drawdown, beta vs the S&P 500 and return over the window.", "table", "/x/risk_stats",
+           SYM + [{"paramName": "peers", "value": None, "show": False}, _p("benchmark", "Benchmark", "SPY", "For beta."), rng],
+           "Risk", ["Yahoo Finance", "FRED"], w=20, h=14, refetch=3600000, cols=risk_cols, symbolList="peers"),
+        _w("x_bond_pricer", "Bond pricer", "Price to yield (or yield to price) for the bond clicked above, settled today: accrued interest, yield to maturity, "
+           "modified duration, convexity, DV01 and the price after -100, -50, +50 and +100 bp. Semiannual, 30/360, per 100 par; fixed-rate bonds; callables to maturity.",
+           "markdown", "/x/bond_pricer",
+           [_p("cusip", "CUSIP", None, "The bond (a click on a CUSIP above sets it)."), _p("price", "Clean price", None, "Price per 100 par; blank = last TRACE sale."),
+            _p("ytm", "Yield (%)", None, "Yield to maturity in percent; overrides the price.")],
+           "Credit", ["FINRA"], w=16, h=16, refetch=900000),
+        _w("x_debt_maturity_wall", "Debt maturity wall", "Long-term debt principal due in each of the next five fiscal years and after, from the issuer's latest "
+           "10-K (SEC XBRL). U.S. filers only. The source menu links to its 10-K and 424B prospectus filings on EDGAR.",
+           "chart", "/x/debt_maturity_wall", [_p("company", "Company", "AAPL", "U.S. ticker of the issuer.")],
+           "Credit", ["SEC"], w=16, h=16, raw=True, refetch=3600000),
+        _w("x_etf_overlap", "ETF overlap (N-PORT)", "Two funds' latest SEC N-PORT portfolios side by side: weight overlap (sum of the smaller weight of each common holding), "
+           "the count in common, and the common holdings with both weights. Matched by CUSIP, ISIN, then name. N-PORT is quarterly and public about 60 days after the quarter.",
+           "table", "/x/etf_overlap", [_p("symbol", "Fund 1", "SPY", "First fund (a registered fund that files N-PORT)."), _p("symbol2", "Fund 2", "QQQ", "Second fund.")],
+           "Funds", ["SEC"], w=20, h=18, refetch=3600000,
+           cols=[_col("name", "Holding", "text", pinned="left"),
+                 _col("weight_a", "Fund 1 weight", tip="Weight in the first fund, percent of net assets (N-PORT).", decimalPlaces=2, suffix="%"),
+                 _col("weight_b", "Fund 2 weight", tip="Weight in the second fund, percent of net assets (N-PORT).", decimalPlaces=2, suffix="%"),
+                 _col("overlap", "Overlap", tip="The smaller of the two weights: what both funds hold in common, percent.", decimalPlaces=2, suffix="%")]),
+        _w("x_gex_strike", "Gamma exposure by strike", "Net dealer gamma exposure per strike ($ millions per 1% move), assuming dealers are long the calls and short the "
+           "puts open; Black-Scholes gamma from Yahoo implied volatility. Spot and Max Pain marked. Nearest monthly expiry, or every expiry within 60 days.",
+           "chart", "/x/gex_strike", SYM[:1] + [_p("expiry", "Expiries", "monthly", "Nearest monthly (third Friday) or all expiries within 60 days.", typ="tabs", options=optionsx.EXPIRY_OPTIONS)],
+           "Options", YAHOO, w=22, h=16, raw=True, refetch=900000, strip=[VIEW_STRIP | {"param": "expiry"}]),
+        _w("x_vol_cone", "Volatility cone", "Realised volatility over 10 to 126 trading days: today's value against the range of the last year (min, quartiles, max), "
+           "with the at-the-money implied volatility of each expiry on top.", "chart", "/x/vol_cone", SYM[:1],
+           "Options", YAHOO, w=18, h=16, raw=True, refetch=900000),
+        _w("x_fx_rate_diff", "Spot vs 2-year rate differential", "A currency pair against the 2-year government yield differential (base minus quote, bp): "
+           "U.S. H.15 par yields, other legs from the central banks' daily curves (euro: Germany). About one year of daily data; the note gives the "
+           "60-day correlation of daily changes.", "chart", "/x/fx_rate_diff",
+           [_p("pair", "Pair", "EURUSD", "Currency pair.", options=risk.PAIR_OPTIONS)],
+           "Rates", ["Yahoo Finance", "Bundesbank", "FRED"], w=22, h=16, raw=True, refetch=3600000, dynamicSource=True),
+        _w("x_valuation_bands", "Valuation bands", "P/E (TTM), EV/EBITDA (TTM) or P/B on daily closes over five years, with the median and the 10th-90th "
+           "percentile band of that window and today's percentile. U.S. filers: SEC figures, each counted from its filing date (or the form's "
+           "deadline if earlier), so no figure is used before it was known. Others: Yahoo annual statements, each year from 90 days after its end.",
+           "chart", "/x/valuation_bands", SYM + [_p("measure", "Multiple", "pe", "Which multiple (banks: P/E and P/B only).", typ="tabs", options=valuation.OPTIONS)],
+           "Valuation", ["SEC", "Yahoo Finance"], w=24, h=16, raw=True, refetch=3600000, dynamicSource=True, strip=[VIEW_STRIP | {"param": "measure"}]),
+        _w("x_roic_dupont", "ROE (DuPont) and ROIC", "Per fiscal year: ROE split into net margin x asset turnover x equity multiplier, and return on invested "
+           "capital = operating income x (1 - tax rate) / (debt + equity - cash), tax rate clipped to 0-35%. Banks: DuPont only.",
+           "table", "/x/roic_dupont", SYM, "Valuation", ["SEC", "Yahoo Finance"], w=16, h=16, refetch=3600000, dynamicSource=True,
+           cols=[_col("fiscal_year_end", "Fiscal year end", "text", pinned="left"),
+                 _col("net_margin", "Net margin", tip="Net income / revenue, percent.", decimalPlaces=1, suffix="%"),
+                 _col("asset_turnover", "Asset turnover", tip="Revenue / year-end total assets, times.", decimalPlaces=2, suffix="x"),
+                 _col("equity_multiplier", "Equity multiplier", tip="Year-end total assets / equity, times.", decimalPlaces=2, suffix="x"),
+                 _col("roe", "ROE", tip="Net income / year-end equity = the three columns before multiplied, percent.", decimalPlaces=1, suffix="%"),
+                 _col("tax_rate", "Tax rate", tip="Income tax expense / pre-tax income, clipped to 0-35% (0 when pre-tax income is negative), percent.", decimalPlaces=1, suffix="%"),
+                 _col("nopat", "NOPAT (mn)", tip="Operating income x (1 - tax rate), millions of the reporting currency (named under the table).", decimalPlaces=0),
+                 _col("invested_capital", "Invested capital (mn)", tip="Debt + equity - cash at the year end, millions of the reporting currency.", decimalPlaces=0),
+                 _col("roic", "ROIC", tip="NOPAT / invested capital, percent; blank when invested capital is zero or negative, and for banks.", decimalPlaces=1, suffix="%")]),
+    ]

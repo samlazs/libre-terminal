@@ -191,13 +191,26 @@
       dd.classList.add("le-dd");
       pickBox.appendChild(el("label", { class: "muted small" }, "List"));
       pickBox.appendChild(dd);
+      // a new list is named in place, in this window (no second dialog on top of it)
       pickBox.appendChild(el("button", { class: "btn", type: "button", onclick: function () {
-        ask("Name of the new watchlist", "Watchlist " + (T.lists.all().length + 1), "Create").then(function (n) {
-          if (!n) return;
+        pickBox.textContent = "";
+        var nameIn = el("input", { type: "text", class: "le-new", "data-own-esc": "1", value: "Watchlist " + (T.lists.all().length + 1), "aria-label": "Name of the new watchlist" });
+        function create() {
+          var n = nameIn.value.trim();
+          if (!n) return nameIn.focus();
           var id = "l" + Date.now().toString(36);
           own().push({ id: id, name: n, symbols: [] });
           cur = id; commit(); paintBar(); ed.paint(); ed.input.focus();
+        }
+        nameIn.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); create(); }
+          else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); paintBar(); }      // cancels the name, not the window
         });
+        pickBox.appendChild(el("label", { class: "muted small" }, "New list"));
+        pickBox.appendChild(nameIn);
+        pickBox.appendChild(el("button", { class: "btn primary", type: "button", onclick: create }, "Create"));
+        pickBox.appendChild(el("button", { class: "btn", type: "button", onclick: function () { paintBar(); } }, "Cancel"));
+        nameIn.focus(); nameIn.select();
       } }, "New list"));
       pickBox.appendChild(el("button", { class: "btn", type: "button", onclick: function () {
         ask("Rename watchlist", list().name, "Rename").then(function (n) {

@@ -249,6 +249,38 @@
     });
   };
 
+  // Stage 3 8c: common-size and year-over-year views of a statement (client side, any source)
+  var REV = ["total_revenue", "revenue", "revenues", "total_revenues", "operating_revenue", "net_revenue"];
+  function fin(v) { return typeof v === "number" && isFinite(v) ? v : null; }
+  /** Common-size base of one period: total assets (balance sheet), else revenue (income statement); a bank without a
+   *  revenue line: net interest income + non-interest income when both are reported; else null. A cash flow statement
+   *  carries no revenue line, so it has no common-size view. */
+  T.statementBase = function (kind, row) {
+    if (!row || kind === "cash") return null;
+    if (kind === "balance") return fin(row.total_assets);
+    for (var i = 0; i < REV.length; i++) if (fin(row[REV[i]]) != null) return fin(row[REV[i]]);
+    var nii = fin(row.net_interest_income), non = fin(row.total_noninterest_income) != null ? fin(row.total_noninterest_income) : fin(row.non_interest_income);
+    return nii != null && non != null ? nii + non : null;
+  };
+  /** The same period one year earlier (period end 335 to 395 days before), from all periods the source sent; else null. */
+  T.statementYearAgo = function (periods, row) {
+    var t = Date.parse(String(row && row.period_ending || "").slice(0, 10));
+    if (!isFinite(t)) return null;
+    for (var i = 0; i < periods.length; i++) {
+      var d = (t - Date.parse(String(periods[i].row.period_ending).slice(0, 10))) / 864e5;
+      if (d >= 335 && d <= 395) return periods[i].row;
+    }
+    return null;
+  };
+  /** Year-over-year change in percent; "n/m" when the base is zero or negative or the sign flips; null when a figure is missing. */
+  T.statementChange = function (cur, base) {
+    cur = fin(cur); base = fin(base);
+    if (cur == null || base == null) return null;
+    if (base <= 0 || cur < 0) return "n/m";
+    return (cur / base - 1) * 100;
+  };
+  var PCT = { scale: 0, scaleUnit: "", formatterFn: "percent", decimalPlaces: 1, paren: false };
+
   /** One money unit for the whole statement, chosen from its largest figure. */
   T.statementUnit = function (maxAbs) {
     if (maxAbs >= 1e9) return { scale: 1e6, dp: 0, label: "mn" };
@@ -278,6 +310,13 @@
         else if (l.kind === "shares") maxShares = Math.max(maxShares, Math.abs(v));
       });
     });
+    var show = opts.show === "common" || opts.show === "yoy" ? opts.show : "values";
+    var bases = periods.map(function (p) { return T.statementBase(opts.kind, p.row); });
+    var canCommon = bases.some(function (b) { return b != null && b > 0; });
+    var everyP = T.statementPeriods(rows, opts.period, opts.provider);       // a year-ago period may be past the ones shown
+    var prior = periods.map(function (p) { return T.statementYearAgo(everyP, p.row); });
+    var canYoy = prior.some(Boolean);
+    if ((show === "common" && !canCommon) || (show === "yoy" && !canYoy)) show = "values";
     var unit = T.statementUnit(maxMoney), sunit = maxShares >= 1e6 ? { scale: 1e6, dp: maxShares >= 1e9 ? 0 : 1, label: "mn" } : { scale: 1, dp: 0, label: "" };
     var ccy = (rows.filter(function (r) { return r.reported_currency || r.currency; })[0] || {});
     ccy = String(ccy.reported_currency || ccy.currency || "").toUpperCase();
@@ -290,6 +329,16 @@
       periods.forEach(function (p, j) {
         var v = p.row[l.field];
         r["p" + j] = typeof v === "number" && isFinite(v) ? v : null;
+        if (show === "common") {                     // money lines only: per-share, share counts and rates have no common size
+          r["p" + j] = l.kind === "money" && r["p" + j] != null && bases[j] > 0 ? r["p" + j] / bases[j] * 100 : null;
+          r._fmt["p" + j] = PCT;
+          return;
+        }
+        if (show === "yoy") {
+          r["p" + j] = l.kind === "rate" || !prior[j] ? null : T.statementChange(r["p" + j], prior[j][l.field]);
+          r._fmt["p" + j] = PCT;
+          return;
+        }
         if (l.kind === "eps") r._fmt["p" + j] = { scale: 0, decimalPlaces: 2 };
         else if (l.kind === "shares") r._fmt["p" + j] = { scale: sunit.scale === 1 ? 0 : sunit.scale, scaleUnit: "", decimalPlaces: sunit.dp };
         // a rate's unit is the source's, never guessed from the value (a 130% tax rate is 1.3 as a fraction); unknown: as delivered
@@ -297,7 +346,9 @@
       });
       data.push(r);
     });
-    var unitText = (ccy ? ccy + " " : "") + (unit.label || "units") + (ccy ? "" : " (reporting currency)");
+    var baseName = opts.kind === "balance" ? "% of total assets" : "% of revenue";
+    var unitText = show === "common" ? baseName : show === "yoy" ? "YoY %"
+      : (ccy ? ccy + " " : "") + (unit.label || "units") + (ccy ? "" : " (reporting currency)");
     var cols = [{ field: "line", headerName: unitText, pinned: "left", cellDataType: "text" }].concat(periods.map(function (p, j) {
       return { field: "p" + j, headerName: p.label, headerTooltip: p.tip, cellDataType: "number", paren: true,
         scale: unit.scale === 1 ? 0 : unit.scale, scaleUnit: "", decimalPlaces: unit.dp };
@@ -312,6 +363,21 @@
       bar.appendChild(el("button", { type: "button", class: "chip" + (v === cur ? " on" : ""), title: pair[1] + " figures",
         onclick: function () { if (v !== cur && opts.onPeriod) opts.onPeriod(v); } }, pair[1]));
     });
+    // Values / common size / YoY: a view choice kept per card (viewsel), never a layout edit
+    var views = [["values", "Values", "Figures as reported", true],
+      ["common", baseName, canCommon ? "Each line as a percent of " + (opts.kind === "balance" ? "total assets" : "revenue") + " of the same period"
+        : "No " + (opts.kind === "balance" ? "total assets" : "revenue (or net interest + non-interest income)") + " line in this source", canCommon],
+      ["yoy", "YoY %", canYoy ? "Change against the same period one year earlier; n/m when the base is zero or negative or the sign flips"
+        : "No period one year earlier in what the source sent", canYoy]];
+    if (opts.kind === "cash") views = views.filter(function (o) { return o[0] !== "common"; });
+    var vbar = el("span", { class: "stmt-views" });
+    views.forEach(function (o) {
+      var b = el("button", { type: "button", class: "chip" + (o[0] === show ? " on" : ""), title: o[2],
+        onclick: function () { if (o[0] !== show && o[3] && opts.onShow) opts.onShow(o[0]); } }, o[1]);
+      if (!o[3]) b.disabled = true;
+      vbar.appendChild(b);
+    });
+    bar.appendChild(vbar);
     var tv = null;
     if (periods.length < allPeriods || opts.all) {
       bar.appendChild(el("button", { type: "button", class: "chip" + (opts.all ? " on" : ""), title: opts.all ? "Show the latest periods only" : "Show every period the source sent",
@@ -324,7 +390,7 @@
     var kindName = { income: "Income statement", balance: "Balance sheet", cash: "Cash flow" }[opts.kind] || "Statement";
     var what = /^quarter/.test(cur) ? "quarterly" : /^ttm/i.test(cur) ? "trailing twelve months" : "annual";
     bar.appendChild(el("span", { class: "stmt-note" }, kindName + ", " + what + ", newest first · " + unitText +
-      (lines.some(function (l) { return l.kind === "eps"; }) ? " · per-share figures in " + (ccy || "currency units") : "") + " · negatives in (brackets)"));
+      (show !== "values" ? "" : (lines.some(function (l) { return l.kind === "eps"; }) ? " · per-share figures in " + (ccy || "currency units") : "") + " · negatives in (brackets)")));
     host.appendChild(bar);
     tv = T.table(host, {
       data: data, colDefs: cols, curated: true, noSort: true, noTranspose: true, dense: true,
@@ -334,6 +400,7 @@
     tv.lines = lines;
     tv.periods = periods;
     tv.unit = unit;
+    tv.show = show;
     tv.baseRows = periods.length && lines.length ? tv.baseRows : [];
     return tv;
   };

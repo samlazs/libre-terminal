@@ -206,6 +206,7 @@ UNITS = {
     "equity_calendar_earnings_tmx_obb": {"eps_surprise": "number"},                     # dollars: actual 0.52 - consensus 0.27 = 0.25
     "equity_fundamental_historical_eps_alpha_vantage_obb": {"surprise": "number"},      # "Actual - Estimated" at the source (needs a key: not probed)
     "equity_fundamental_metrics_yfinance_obb": {"payout_ratio": "fraction"},            # AAPL 0.118, SAP.DE 0.362
+    "yfinance_funds_allocation_yfinance_obb": {"weight": "fraction"},                  # QQQ Consumer Cyclical 0.1104 (Stage 3 13a)
     "equity_fundamental_ratios_fmp_obb": {"price_to_earnings_growth_ratio_ttm": "number", "forward_price_to_earnings_growth_ratio_ttm": "number",
                                           "dividend_payout_ratio_ttm": "fraction"},     # PEG is a ratio; FMP payout ratio AAPL 0.119
     "equity_fundamental_trailing_dividend_yield_tiingo_obb": {"trailing_dividend_yield": "raw"},   # needs a Tiingo key: not probed

@@ -54,7 +54,7 @@ PARAM_FIXES = {
     "usda/livestock_and_meat_international_trade_data": {"table": "beef_veal", "direction": "exports", "frequency": "annual"},
     # bounded date ranges: FiscalData times out on its full history
     "ustreasury/auction_results": {"start_date": "@days:-120"},
-    "ustreasury/weekly_bill_offerings": {"start_date": "@days:-90"},
+    "ustreasury/weekly_bill_offerings": {"start_date": "@days:-365"},
     # swap data repositories publish nothing on weekends: ask for the last business day
     "cftc/swap_summary": {"date": "@bday:-1"},
     "cftc/swap_valuation": {"date": "@bday:-1"},
@@ -175,14 +175,25 @@ NO_OPTIONS = dict(none="No listed-options source covers {sym}.", hint="The optio
 CONCEPTS = {f"options.{k}": dict(label=v, members=[(OPT_EP[s].format(k), None, OPT[s][0], dict(OPT[s][1], **OPT_EXTRA.get((k, s), {}))) for s in ("cboe", "tmx", "deribit")], **NO_OPTIONS)
             for k, v in OPT_LABELS.items()}
 CONCEPTS.update({
+    # the chain card routes by listing too: SU.TO -> TMX (Montreal Exchange), BTC-USD -> Deribit
+    "options.chains": dict(label="Option chain", none="No listed-options source covers {sym}.", members=[
+        ("derivatives/options/chains", "yfinance", "Yahoo Finance", {"mk": ["us"]}),
+        ("derivatives/options/chains", "tmx", "TMX (Montreal Exchange)", {"mk": ["ca"], "sym": "tmx"}),
+        ("derivatives/options/chains", "deribit", "Deribit", {"mk": ["crypto"], "sym": "crypto_base"}),
+        ("derivatives/options/chains", "cboe", "Cboe (Yahoo quotes while Cboe refuses its feed)", {"mk": ["us"], "alt": True})]),
     "options.covered_calls": dict(label="Covered calls", none="Covered-call screens cover Canadian listings only (TMX); {sym} is not one.",
                                   members=[("tmx/derivatives/options/covered_calls", None, "TMX (Montreal Exchange)", {"mk": ["ca"], "sym": "tmx"})]),
     "fund.holdings": dict(label="Fund holdings", none="No keyless source has holdings for {sym}.", members=[
         ("etf/holdings", "nasdaq", "Nasdaq (full list)", {"mk": ["us"]}), ("etf/holdings", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}),
+        # when Nasdaq's holdings feed fails: the fund's own SEC filing (full list, quarterly, filed up to 60 days after the quarter)
+        ("etf/nport_disclosure", "sec", "SEC N-PORT (quarterly filing, up to 60 days old)", {"mk": ["us"]}),
         ("yfinance/funds/holdings", "yfinance", "Yahoo Finance (top holdings)", {"mk": ["us", "ca", "other", "nordic"]})]),
     "etf.sectors": dict(label="ETF sector weights", none="No keyless source has sector weights for {sym}.",
                         hint="FMP has them for U.S. ETFs on a paid plan", members=[
-        ("etf/sectors", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}), ("etf/sectors", "fmp", "FMP (paid plan)", {"mk": ["us", "other"], "paid": True})]),
+        ("etf/sectors", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}),
+        # Stage 3 13a: Yahoo's fund sector breakdown (keyless) ahead of FMP for U.S. and other listings; after TMX for .TO
+        ("yfinance/funds/allocation", None, "Yahoo Finance (sector breakdown)", {"mk": ["us", "other", "ca"], "p": {"breakdown": "sector"}}),
+        ("etf/sectors", "fmp", "FMP (paid plan)", {"mk": ["us", "other"], "paid": True})]),
     "etf.countries": dict(label="ETF country weights", none="No keyless source has country weights for {sym}.",
                           hint="FMP has them for U.S. ETFs on a paid plan", members=[
         ("etf/countries", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}), ("etf/countries", "fmp", "FMP (paid plan)", {"mk": ["us", "other"], "paid": True})]),
@@ -223,7 +234,8 @@ CONCEPTS.update({
         ("equity/profile", "yfinance", "Yahoo Finance", {"mk": ["other", "us", "ca", "nordic"], "alt": True})]),
     "movers.gainers": dict(label="Top gainers", members=[
         ("equity/discovery/gainers", "yfinance", "Yahoo Finance (U.S.)", {}), ("nasdaq/markets/movers", "nasdaq", "Nasdaq (most advanced)", {"p": {"category": "most_advanced"}}),
-        ("tmx/markets/movers", "tmx", "TMX (Toronto, among the 100 most active)", {"p": {"category": "gainers", "exchange": "tsx"}})]),
+        ("tmx/markets/movers", "tmx", "TMX (Toronto, among the 100 most active)", {"p": {"category": "gainers", "exchange": "tsx"}}),
+        ("equity/discovery/gainers", "tmx", "TMX (Toronto gainers, standard route)", {})]),
     "movers.losers": dict(label="Top losers", members=[
         ("equity/discovery/losers", "yfinance", "Yahoo Finance (U.S.)", {}), ("nasdaq/markets/movers", "nasdaq", "Nasdaq (most declined)", {"p": {"category": "most_declined"}}),
         ("tmx/markets/movers", "tmx", "TMX (Toronto, among the 100 most active)", {"p": {"category": "losers", "exchange": "tsx"}})]),
@@ -255,7 +267,9 @@ for _st, _st_lab, _swid, _tmx_ep, _yf_ep in (
     CONCEPTS["company." + _st] = dict(label=_st_lab, members=[
         ("sec/standardized_statement", None, "SEC (EDGAR XBRL)", {"mk": ["us"], "p": {"statement_type": _st}, "wid": _swid}),
         (_tmx_ep, None, "TMX (Canada)", {"mk": ["ca"], "sym": "tmx", "dp": ["statement_type", "transform", "transpose"], "alt": True}),
-        (_yf_ep, "yfinance", "Yahoo Finance", {"mk": ["other", "nordic", "us", "ca"], "dp": ["statement_type", "transform", "transpose"], "alt": True}),
+        # the Financials tab's own cards (Yahoo, or SEC company facts when picked) are entry points too, so SHEL.L routes off SEC
+        (_yf_ep, "sec", "SEC (company facts)", {"mk": ["us"], "dp": ["statement_type", "transform", "transpose"]}),
+        (_yf_ep, "yfinance", "Yahoo Finance", {"mk": ["other", "nordic", "us", "ca"], "dp": ["statement_type", "transform", "transpose"]}),
         ("nasdaq/nordic/fundamentals", "nasdaq", "Nasdaq Nordic (fact sheet)", {"mk": ["nordic"], "sym": "nordic", "dp": ["statement_type", "period", "transform", "transpose", "limit"], "alt": True})])
 for _fn in ("cik_map", "symbol_map", "sic_search", "institutions_search", "filing_headers", "htm_file", "schema_files", "rss_litigation"):
     CONCEPTS["sec." + _fn] = dict(label="SEC " + _fn.replace("_", " "), members=[

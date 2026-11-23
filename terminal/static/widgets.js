@@ -562,7 +562,7 @@
       if (def.symbolList && T.lists) T.lists.inject(def, item, out);      // watchlist symbols / the user's peers, kept in saved state
       var ov = ctx.overrides ? ctx.overrides(item) : {};                 // chart strip and source picks (remembered per card)
       Object.keys(ov).forEach(function (k) {
-        if (empty(ov[k])) return;
+        if (empty(ov[k]) || k.charAt(0) === "_") return;               // "_name": a view choice drawn in the page, never sent
         // a remembered pick from another source of this card ("quarter" vs "quarterly"): use this source's spelling
         var pd = def.params.filter(function (x) { return x.paramName === k; })[0], opts = pd && Array.isArray(pd.options) && pd.options.length ? pd.options.map(function (o) { return o && typeof o === "object" ? String(o.value) : String(o); }) : null;
         var v = String(ov[k]);
@@ -949,15 +949,18 @@
         var pp = def.params.filter(function (x) { return x.paramName === "period"; })[0];
         tv = T.statement(body, {
           data: data, colDefs: pick(def, "data.table.columnsDefs"), kind: sk, provider: provName() || T.providerKey(def),
-          period: eff().period, periodOptions: pp && pp.options,
+          period: eff().period, periodOptions: pp && pp.options, show: (ctx.overrides ? ctx.overrides(item) : {})._stmtview,
           onPeriod: function (v) { if (ctx.setView) ctx.setView(item, "period", v); else { item.params.period = v; ctx.onChange(); refresh(true); } },
+          onShow: function (v) { if (ctx.setView) ctx.setView(item, "_stmtview", v === "values" ? null : v); },
           onCount: function (t) { stamp(t); }
         });
         if (!tv.baseRows.length) { message("info", noData()); tv = null; }
         return;
       }
+      var noUpcoming = "";
       tv = T.table(body, {
         narrow: slimTier,
+        onNoUpcoming: function (last) { noUpcoming = "No upcoming date in the source: the latest it lists is " + last + " (not updated since)"; },
         data: data, colDefs: pick(def, "data.table.columnsDefs"), dense: ctx.backend.id === "x", sort: item.sort, since: item.since,
         spec: T.colSpec ? T.colSpec(def.widgetId) : null, itemCols: item.cols, cols: ctx.colsel ? ctx.colsel(item) : null,
         curated: ctx.backend.id === "x", calendar: /calendar|upcoming/i.test(def.widgetId || ""),
@@ -965,7 +968,7 @@
         onCount: function (t) {
           var conv = lastJson && typeof lastJson.convention === "string" ? lastJson.convention : "";   // e.g. total return vs price change
           // a board that came back mostly empty says so (review C4), rather than a table of dashes
-          var warn = lastJson && typeof lastJson.warning === "string" ? lastJson.warning : "";
+          var warn = (lastJson && typeof lastJson.warning === "string" ? lastJson.warning : "") || noUpcoming;
           stamp((warn ? "⚠ " + warn + " · " : "") + t + capNote() + (conv ? " · " + conv : ""));
         }
       });
@@ -1074,6 +1077,13 @@
           plotNode = el("div", { class: "plot" });
           body.appendChild(plotNode);
           T.plotFigure(plotNode, fig);
+          // a figure whose points carry an id (layout.meta.clickParam, ids in customdata): a click sets that group,
+          // as a table cell does (Issuer Yield Curve: a point loads the bond's trade history)
+          var clickParam = fig && fig.layout && fig.layout.meta && fig.layout.meta.clickParam;
+          if (clickParam && plotNode.on) plotNode.on("plotly_click", function (ev) {
+            var pt = ev && ev.points && ev.points[0], v = pt && pt.customdata;
+            if (v != null && v !== "") ctx.broadcast(item, clickParam, Array.isArray(v) ? v[0] : v);
+          });
           stamp("");
         } else if (def.type === "chart") {
           renderTable(d.results);
@@ -1113,6 +1123,9 @@
         drawTools(); foot.textContent = "";
         return message("info", item._nocover.text, item._nocover.hint);
       }
+      // a group that waits for a pick from another card (Bond, set by clicking a CUSIP): say how to pick, fetch nothing
+      var waiting = (ctx.groupsOf ? ctx.groupsOf(item) : []).filter(function (g) { return g.prompt && empty(g.value); })[0];
+      if (waiting) { drawTools(); foot.textContent = ""; return message("info", waiting.prompt); }
       delete item._keyBlocked;
       if (item.needsKey) {                        // the dashboard builder knows this key is not set: say so without a doomed request
         item._keyBlocked = true;
@@ -1289,7 +1302,9 @@
     }
     function measure() {
       var r = node.getBoundingClientRect(), s = ctx.scroller.getBoundingClientRect();
-      visible = node.classList.contains("max") || (r.width > 0 && r.bottom > s.top - 300 && r.top < s.bottom + 300);
+      // terminal views (/x/) answer from the server's warmed cache, so they load a screen ahead; data services, 300 px ahead
+      var ahead = ctx.backend && ctx.backend.id === "x" ? 900 : 300;
+      visible = node.classList.contains("max") || (r.width > 0 && r.bottom > s.top - ahead && r.top < s.bottom + ahead);
     }
     // A forced reload of a card that is off screen waits until it is near the viewport, and then still bypasses the
     // memory and browser caches for this card only (other cards keep their cached answers).
@@ -1347,7 +1362,7 @@
     }
 
     drawParams(); drawTools(); paintTitle(); paintSource();
-    message("load", "Waiting…");
+    message("load", "Loads when scrolled into view…");
 
     return {
       node: node, head: head, resize: rz, item: item, def: def,

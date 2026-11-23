@@ -24,6 +24,17 @@ def _norm_name(n):
     return " ".join(n.split())[:24]
 
 
+BANK_NA = "n/m for banks"
+# for a bank, interest is revenue and debt is raw material: gross margin, EBITDA and EV multiples carry no meaning
+BANK_BLANK = ("ev_usd", "ev_ebitda", "ev_sales", "nd_ebitda", "gross_margin", "ebitda_margin")
+
+
+def is_bank(industry):
+    """A deposit-taking bank by Yahoo's industry ('Banks - Diversified', 'Banks—Regional'); not exchanges, payment
+    companies, insurers or asset managers, whose EV and margins mean what they say."""
+    return bool(re.match(r"\s*banks?\b", str(industry or ""), re.I))
+
+
 def _profiles(symbols):
     """{symbol: {name, sector, industry, market_cap, currency, type}} from Yahoo profiles, kept 7 days."""
     symbols = sorted(set(symbols))
@@ -220,6 +231,10 @@ def comps(symbol="AAPL", peers=None, **_):
         if not attempt and len(met) < len(syms):
             time.sleep(1.5)                   # Yahoo's client sometimes drops symbols when several requests run at once
     meta = C._meta(syms)
+    try:
+        prof = C._profiles(syms)
+    except C.CompositeError:
+        prof = {}
     fx = C._usd_rates({(meta.get(s) or {}).get("currency") for s in syms} | {(met.get(s) or {}).get("currency") for s in syms} - {None})
 
     def pos(v):
@@ -245,6 +260,9 @@ def comps(symbol="AAPL", peers=None, **_):
             "beta": m.get("beta"), "ret_1y": m.get("price_return_1y"), "_hl": s == sym,
             "note": e["note"],
         })
+        if is_bank((prof.get(s) or {}).get("industry")):
+            rows[-1].update({f: None for f in BANK_BLANK})
+            rows[-1]["note"] = "; ".join(x for x in (e["note"], "bank: EV, EBITDA and gross margin " + BANK_NA) if x)
     med = {"name": "Peer median", "symbol": "", "_pin": True}
     for f in COMP_FIELDS:
         vals = sorted(r[f] for r in rows[1:] if isinstance(r.get(f), (int, float)))

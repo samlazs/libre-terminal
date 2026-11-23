@@ -586,7 +586,7 @@ def build(report=False):
         groups = []
         for g in dash["groups"]:
             g2 = {"name": g["name"], "paramName": g["paramName"], "value": g["value"]}
-            g2.update({k: g[k] for k in ("optionsEndpoint", "optionsParams", "resetWith", "syncFrom", "syncUrl") if k in g})
+            g2.update({k: g[k] for k in ("optionsEndpoint", "optionsParams", "resetWith", "syncFrom", "syncUrl", "prompt") if k in g})
             if g.get("options") == "countries":
                 import composite
                 g2["options"] = composite.COUNTRY_OPTIONS

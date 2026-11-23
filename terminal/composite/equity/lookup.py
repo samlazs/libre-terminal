@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import threading
 import time
 
 import composite as C
@@ -25,6 +26,24 @@ def _syms(value, cap=40):
     return out[:cap]
 
 
+def cik_of(q):
+    """The 10-digit SEC CIK typed as such: ten digits (0000320193) or 'CIK' with up to ten digits. Shorter bare numbers
+    are tickers on some exchanges (7203 for Toyota), so they are not taken as a CIK."""
+    m = re.fullmatch(r"(?i)\s*(cik\s*:?\s*)?(\d{1,10})\s*", str(q or ""))
+    if not m or (not m.group(1) and len(m.group(2)) != 10):
+        return None
+    return m.group(2).zfill(10)
+
+
+def _cik_symbol(cik):
+    """Ticker for an SEC CIK (SEC company tickers list via sec/symbol_map), kept a day; None when unknown."""
+    def run():
+        r = C.api(C.V5, "sec/symbol_map", query=cik)
+        r = r[0] if isinstance(r, list) and r else r
+        return str((r or {}).get("symbol") or "").upper() or None
+    return C.cached(("cik_symbol", cik), 86400, run)
+
+
 def search(query="", **_):
     """Securities matching a ticker or a company name (Yahoo Finance: U.S. and international listings, ETFs, indices, FX, futures, crypto)."""
     q = str(query or "").strip()[:60]
@@ -32,7 +51,14 @@ def search(query="", **_):
         return {"results": []}
 
     def run():
-        rows = C.api(C.V5, "yfinance/search", query=q) or []
+        query, via = q, ""
+        cik = cik_of(q)
+        if cik:                                    # an SEC CIK (0000320193, CIK 320193): its ticker, then that ticker's listings
+            sym = C._safe(lambda: _cik_symbol(cik))
+            if not sym:
+                return []
+            query, via = sym, f" (SEC CIK {cik})"
+        rows = C.api(C.V5, "yfinance/search", query=query) or []
         out, seen = [], set()
         for r in rows:
             s = str(r.get("symbol") or "").upper()
@@ -40,7 +66,9 @@ def search(query="", **_):
             if not s or s in seen or t not in TYPE_NAMES:
                 continue
             seen.add(s)
-            out.append({"symbol": s, "name": re.sub(r"\s+", " ", str(r.get("name") or "")).strip(), "exchange": r.get("exchange") or "", "type": t, "type_label": TYPE_NAMES[t]})
+            out.append({"symbol": s, "name": re.sub(r"\s+", " ", str(r.get("name") or "")).strip() + (via if s == query.upper() else ""), "exchange": r.get("exchange") or "", "type": t, "type_label": TYPE_NAMES[t]})
+        if via:                                    # the CIK's own ticker first
+            out.sort(key=lambda x: x["symbol"] != query.upper())
         return out[:12]
     return {"results": C.cached(("search", q.lower()), 900, run)}
 
@@ -123,6 +151,24 @@ def _first(path, sym, **kw):
     return (rows[0] if isinstance(rows, list) and rows else rows if isinstance(rows, dict) else {}) or {}
 
 
+FDIC_WAIT = 15
+
+
+def _fdic_rows(sym):
+    """(rows or None, missing): the lead bank's FDIC ratios, waited for FDIC_WAIT seconds; missing = not answered in time
+    (the snapshot is then not kept 15 minutes, so the next load can carry them)."""
+    import banks as _banks                          # imported late: banks.py imports composite
+    ex = C.cf.ThreadPoolExecutor(max_workers=1)
+    fut = ex.submit(_banks.snapshot_rows, sym)
+    ex.shutdown(wait=False)
+    try:
+        return fut.result(timeout=FDIC_WAIT), False
+    except C.cf.TimeoutError:
+        return None, True
+    except Exception:                               # noqa: BLE001  (not in the FFIEC directory, FDIC down: no bank rows)
+        return None, False
+
+
 def snapshot(symbol="AAPL", **_):
     """One-screen company description (Bloomberg DES): what it does, key valuation, profitability, street view, next earnings."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
@@ -156,6 +202,7 @@ def snapshot(symbol="AAPL", **_):
         except C.CompositeError:
             e_ = C._ev_parts(dict(m, currency=None), ccy, {})
         m = dict(m, enterprise_value=e_["ev_q"], enterprise_to_ebitda=e_["ev_ebitda"], enterprise_to_revenue=e_["ev_sales"], price_to_book=e_["pb"])
+        bank = C.is_bank(p.get("industry_category"))
         lo, hi = q.get("year_low"), q.get("year_high")
         e_date, e_end = C._date_span(cal.get("earnings_date"))
         past = bool(e_date) and (e_end or e_date) < dt.date.today().isoformat()
@@ -179,9 +226,18 @@ def snapshot(symbol="AAPL", **_):
             ("Price / book", C._num(m.get("price_to_book"), "{:,.1f}", "x"), "Beta", C._num(m.get("beta") or p.get("beta"))),
             ("Dividend yield", C._num(dy, "{:,.2f}", "%") if isinstance(dy, (int, float)) else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
         ]
+        fdic, fdic_missing = None, False
+        if bank:                                           # a bank: EV, EBITDA, gross margin and debt/equity carry no meaning
+            na = {"Gross margin", "Enterprise value", "EV / EBITDA", "EV / Sales", "Debt / equity"}
+            rows = [(a, C.BANK_NA if a in na else b, c, C.BANK_NA if c in na else d) for a, b, c, d in rows]
+            if str(p.get("hq_country") or "") == "United States" and "." not in sym:   # U.S. bank holding companies only (Stage 3 8a-ext)
+                fdic, fdic_missing = _fdic_rows(sym)
         md = [head, " · ".join(bits), "", desc, "",
               "| Price & valuation | | Profitability & growth | |", "|---|---:|---|---:|"]
         md += [f"| {a} | {b} | {c} | {d} |" for a, b, c, d in rows]
+        if fdic:
+            md += ["", f"| {fdic['title']} | |", "|---|---:|"] + [f"| {a} | {b} |" for a, b in fdic["rows"]]
+            md += [f"| Bank | {fdic['bank']} (FDIC cert {fdic['cert']}) |"]
         md += ["", "| Street & calendar | |", "|---|---|",
                f"| Next earnings | {e_txt} |",
                f"| EPS estimate{e_for} (avg, low – high) | {C._num(cal.get('earnings_average'))} ({C._num(cal.get('earnings_low'))} – {C._num(cal.get('earnings_high'))}) |" if cal.get("earnings_average") is not None else "| EPS estimate | – |",
@@ -190,8 +246,17 @@ def snapshot(symbol="AAPL", **_):
                f"| Price target (mean, low – high) | {C._num(tgt)}{(' ' + t_ccy) if t_ccy and tgt is not None else ''}{upside} ({C._num(st.get('target_low'))} – {C._num(st.get('target_high'))}) |",
                f"| Ex-dividend date | {str(cal.get('ex_dividend_date') or '–')[:10]} |"]
         out = {"content": "\n".join(md)}
-        if not (p and m and q):
+        if not (p and m and q) or fdic_missing:
             out["_partial"] = True          # Yahoo dropped a part (throttling): not kept for 15 minutes (P0-6)
         return out
     out = C.cached_complete(("snapshot", sym), 900, run)
+    # the Estimates tab's three views share one Yahoo burst (_est_raw, 7 requests): start it once the snapshot is in,
+    # in the background, so a switch to Estimates finds it warm instead of queueing behind the Overview's own requests
+    if PREFETCH_ESTIMATES and (sym not in _EST_STARTED or time.time() - _EST_STARTED[sym] > 600):
+        _EST_STARTED[sym] = time.time()
+        threading.Thread(target=C._safe, args=(C._est_raw, sym), daemon=True).start()
     return {k: v for k, v in out.items() if k != "_partial"}
+
+
+_EST_STARTED: dict = {}
+PREFETCH_ESTIMATES = True          # offline tests turn it off (no background Yahoo requests)

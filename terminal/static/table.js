@@ -408,7 +408,16 @@
     var NARROW_2 = /^(m3|symbol|currency|quote|range52|w1|m1)$/;
     var NARROW_3 = /^(m3|symbol|currency|quote|range52|w1|m1|spark|y1)$/;
     var chgRedundant = baseRows.every(function (r) { return r._section || r.chg == null || (typeof r.chg_pct === "number" && !(r._fmt && r._fmt.chg && r._fmt.chg.suffix)); });
+    // a narrow board without a sparkline (three cards across at 1280 px with the sidebar open, about 300 px) sheds the
+    // secondary columns instead of clipping YTD at the right edge; the column picker still has them. Only boards (a
+    // w1 / m1 / range52 column): a quote, comps or fund table keeps its currency column at any width.
+    var NARROW_PLAIN = /^(currency|w1|m1|m3|range52)$/;
+    var isBoard = visCols.some(function (c) { return /^(w1|m1|range52)$/.test(c.field); });
     function shownCols() {
+      if (tier >= 3 && isBoard && !(opts.cols && opts.cols.length) && !visCols.some(function (c) { return c.def.renderFn === "sparkline"; })) {
+        var keep = visCols.filter(function (c) { return !NARROW_PLAIN.test(c.field); });
+        return keep.length >= 3 ? keep : visCols;
+      }
       if (!tier || (opts.cols && opts.cols.length) || !visCols.some(function (c) { return c.def.renderFn === "sparkline"; })) return visCols;
       var drop = tier >= 3 ? NARROW_3 : tier === 2 ? NARROW_2 : NARROW_1;
       var kept = visCols.filter(function (c) {
@@ -425,6 +434,11 @@
       var today = T.marketDate ? T.marketDate() : new Date().toISOString().slice(0, 10);   // calendars list U.S. dates: New York's today
       var upcoming = baseRows.filter(function (r) { return String(r[sc.field] || "").slice(0, 10) >= today; });
       if (upcoming.length) { baseRows = upcoming; dataCount = baseRows.filter(function (r) { return !r._section && !r._pin; }).length; }
+      else if (baseRows.length && opts.onNoUpcoming) {
+        // nothing from today on: the past rows stay, but the card says the source has not moved on (never silently)
+        var last = baseRows.map(function (r) { return String(r[sc.field] || "").slice(0, 10); }).filter(Boolean).sort().pop();
+        if (last) opts.onNoUpcoming(last);
+      }
     }
     var initSort = baseCols.filter(function (c) { return c.sort; })[0];
     if (initSort) { state.sortField = initSort.field; state.sortDir = initSort.sort === "desc" ? -1 : 1; }

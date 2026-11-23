@@ -51,7 +51,10 @@ for k in bd.OPT_LABELS:
     check(route(cid, "SAP.DE") is None, f"{cid}: SAP.DE -> no listed-options source (the card says so)")
 check(route("fund.holdings", "SPY").startswith("Nasdaq") and route("fund.holdings", "XIU.TO") == "TMX", "ETF holdings: SPY -> Nasdaq, XIU.TO -> TMX")
 check(route("fund.holdings", "VWRL.L").startswith("Yahoo"), "ETF holdings elsewhere -> Yahoo top holdings")
-check(route("etf.sectors", "SPY") is None and route("etf.sectors", "XIU.TO") == "TMX", "automatic routing never lands on a paid plan")
+check(route("etf.sectors", "SPY").startswith("Yahoo") and route("etf.sectors", "XIU.TO") == "TMX" and route("etf.sectors", "VWRL.L").startswith("Yahoo"),
+      "ETF sectors: Yahoo (keyless) for U.S. and other listings, TMX first for .TO (Stage 3 13a)")
+check(all(route(c_, s_) is None or not route(c_, s_).startswith("FMP") for c_ in ("etf.sectors",) for s_ in ("SPY", "VWRL.L", "XIU.TO")),
+      "automatic routing never lands on a paid plan")
 check(route("shorts.interest", "AAPL") is not None, "short interest for a U.S. ticker")
 check(route("company.filings", "AAPL") == "SEC (EDGAR)", "company.filings: AAPL -> SEC (EDGAR)")
 check(route("company.filings", "ASML") == "SEC (EDGAR)", "company.filings: US ADR ASML -> SEC (EDGAR)")
@@ -179,6 +182,17 @@ else:
     ix = bd.Index(defs)
     check(ix.pick("sec/standardized_statement", wid="sec_income_statement_facts_sec_obb") == ("v5", "sec_income_statement_facts_sec_obb"), "Index.pick exact wid match")
     check(ix.pick("sec/standardized_statement", wid="nonexistent_widget") is None, "Index.pick returns None on unknown wid (no fallback)")
+    # Stage 3 T1-1/T1-2: U.S. movers from Nasdaq (V5 has no Yahoo losers / most active); Bond Lookup cards linked by Issuer and Bond
+    mov = next(t for d in dashes if d["id"] == "d:eq-screen" for t in d["tabs"] if t["id"] == "movers")
+    cats = [it["params"].get("category") for it in mov["items"] if it["widgetId"] == "nasdaq_markets_movers_nasdaq_obb"][:3]
+    check(cats == ["most_advanced", "most_declined", "most_active_share_volume"], f"Movers: Nasdaq gainers, losers, most active: {cats}")
+    cr = next(d for d in dashes if d["id"] == "d:credit")
+    bl = next(t for t in cr["tabs"] if t["id"] == "bond-lookup-trace")
+    g = {it["widgetId"]: it.get("groups") for it in bl["items"]}
+    check(g["x_bond_lookup"] == ["Issuer"] and g["x_bond_curve"] == ["Issuer"] and g["finra_fixedincome_bond_historical_finra_obb"] == ["Bond"],
+          f"Bond Lookup: table and curve share Issuer, history follows Bond: {g}")
+    bond = next(x for x in cr["groups"] if x["name"] == "Bond")
+    check(bond["paramName"] == "cusip" and bond.get("resetWith") == "Issuer" and "Click a CUSIP" in bond.get("prompt", ""), "Bond group: reset by Issuer, prompt until a bond is clicked")
     co_fil = next(t for d in dashes if d["id"] == "d:eq-company" for t in d["tabs"] if t["id"] == "filings-sec-data")
     co_wids = [it["widgetId"] for it in co_fil["items"]]
     for req_wid in ("sec_company_filings_sec_obb", "sec_filing_headers_sec_obb", "sec_filing_viewer_sec_obb",
@@ -193,7 +207,13 @@ else:
     check(stmt_wids["company.income"][:2] == ["sec_income_statement_facts_sec_obb", "tmx_equity_fundamental_income_view_obb"], "company.income resolves SEC income + TMX income_view")
     check(stmt_wids["company.balance"][:2] == ["sec_balance_sheet_facts_sec_obb", "tmx_equity_fundamental_balance_view_obb"], "company.balance resolves SEC balance + TMX balance_view")
     check(stmt_wids["company.cash"][:2] == ["sec_cash_flow_facts_sec_obb", "tmx_equity_fundamental_cash_view_obb"], "company.cash resolves SEC cash + TMX cash_view")
-    check(all(m["alt"] for c in ("company.income", "company.balance", "company.cash") for m in out["concepts"][c]["members"][1:]), "non-SEC statement targets are marked alt so Financials tab keeps Yahoo")
+    check(all(bool(m.get("alt")) == (not m["w"].startswith("equity_fundamental_")) for c in ("company.income", "company.balance", "company.cash") for m in out["concepts"][c]["members"][1:]),
+          "TMX / Nordic statement targets are alt; the Financials tab's own cards (Yahoo, SEC company facts) are entry points, so SHEL.L routes off SEC")
+    yf = [m for m in out["concepts"]["company.income"]["members"] if m["w"] == "equity_fundamental_income_yfinance_obb"]
+    check(yf and "other" in yf[0]["mk"] and "us" in yf[0]["mk"], "Yahoo statements cover U.S. and other listings (a U.S. ticker keeps Yahoo on Financials)")
+    ch = out["concepts"].get("options.chains") or {}
+    check([(m["w"], m.get("mk")) for m in ch.get("members", [])][:3] == [("derivatives_options_chains_yfinance_obb", ["us"]), ("derivatives_options_chains_tmx_obb", ["ca"]),
+          ("derivatives_options_chains_deribit_obb", ["crypto"])], "option chains route by listing: Yahoo (U.S.), TMX (SU.TO), Deribit (BTC-USD)")
     check([m["w"] for m in out["concepts"]["company.filing_viewer"]["members"]] == ["sec_filing_viewer_sec_obb", "tmx_equity_filings_viewer_obb"], "company.filing_viewer resolves SEC + TMX viewers")
     sec_lib = next((it for it in co_fil["items"] if it.get("title") == "SEC Filing Sections"), None)
     check(sec_lib is not None and [c["w"] for c in sec_lib["choices"]] == [

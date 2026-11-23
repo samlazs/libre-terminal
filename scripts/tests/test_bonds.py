@@ -6,6 +6,7 @@ from _common import check, done
 
 import composite as c
 import bonds as b
+b._par_curve = lambda: {}          # offline: no FRED request for the G-spread curve
 
 TODAY = dt.date(2026, 11, 19)
 
@@ -57,7 +58,7 @@ try:
     check((r["issuer"], r["maturity"], r["rating"], r["price"], r["yield"], r["last_trade"], r["callable"], r["grade"]) ==
           ("FORD MTR CO DEL", "2032-08-19", "Ba1 / BBB-", 101.2, 5.85, "2026-11-18", "yes, from 2032-05-19", "H"), f"row: {r}")
     check(rows[1]["yield"] is None and rows[1]["rating"] is None and rows[1]["callable"] == "no", "999999.99 placeholder -> blank yield")
-    check(t["delayed"] == "TRACE last-sale data, not live quotes" and [s["name"] for s in t["sources"]] == ["FINRA", "SEC"], "footer and sources")
+    check(t["delayed"] == "TRACE last-sale data, not live quotes" and [s["name"] for s in t["sources"]] == ["FINRA", "SEC", "FRED"], "footer and sources (FRED par curve for the G-spread)")
     check(("fixedincome/corporate/bond_prices", (("issuer_name", "FORD MTR CO"), ("provider", "finra"))) in calls, "first try: FINRA abbreviation of the SEC name")
 
     allr = b.lookup(company="F", all_types="yes", include_old="yes", today=TODAY)["results"]
@@ -71,7 +72,7 @@ try:
 
     ch = b.curve(company="F", today=TODAY)
     check([tr["name"] for tr in ch["data"]] == ["FORD MTR CO DEL (1)"] and ch["data"][0]["y"] == [5.85], "curve: blank yields not plotted")
-    check(ch["layout"]["annotations"][0]["text"] == "x: maturity · hidden: 2 MTN / convertible / perpetual, 1 not traded in 45 days", "curve note counts hidden bonds")
+    check(ch["layout"]["annotations"][0]["text"] == "x: maturity · click a point for its history · hidden: 2 MTN / convertible / perpetual, 1 not traded in 45 days", "curve note counts hidden bonds")
 
     try:
         b.lookup(company="345370CR9", today=TODAY)

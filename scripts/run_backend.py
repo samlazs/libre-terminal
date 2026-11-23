@@ -3339,6 +3339,31 @@ def install_imf_arcgis_fix(applied: list):
         pwh._arcgis_query = _paginate
     applied.append("IMF PortWatch checks ArcGIS error payloads (no silent page truncation)")
 
+    # Top Container Ports: rows carry only PortWatch's id (PORT1065); show the port's name with it (Busan (PORT1065)), from the ports list
+    try:
+        from openbb_imf.models.container_metrics import ImfContainerMetricsFetcher as _CM
+    except ImportError:
+        return
+    _cm_extract = _CM.aextract_data
+
+    async def _cm_named(query, credentials=None, **kwargs):
+        rows = await _cm_extract(query, credentials, **kwargs)
+        try:
+            # the ports list spells ids in lower case (port1065), the metrics in upper case (PORT1065)
+            names = {str(p.get("portid")).upper(): p.get("portname") for p in await pwh.list_ports() if p.get("portid")}
+        except Exception:                     # names are a label only: the numbers stand without them
+            return rows
+        rows = [dict(r) for r in rows]        # the source rows are cached: label copies, never the shared dicts
+        for r in rows:
+            n = names.get(str(r.get("portid") or "").upper())
+            if n and r.get("portid"):
+                r["portid"] = f"{n} ({r['portid']})"
+        return rows
+
+    _CM.aextract_data = staticmethod(_cm_named)
+    _CM.extract_data = staticmethod(_cm_named)     # Fetcher copied aextract_data to extract_data when the class was made
+    applied.append("IMF container metrics name each port (Busan (PORT1065))")
+
 
 # ---------------------------------------------------------------- request guard (Host, Origin, error text)
 def origins_for(port: str) -> set:

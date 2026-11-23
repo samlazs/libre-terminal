@@ -18,15 +18,17 @@
   "federal_reserve/kc/ag_finance_databook": "Kansas City Fed removed the file (HTTP 404)",
   "federal_reserve/kc/ag_interest_rates": "Kansas City Fed removed the file (HTTP 404)",
   "federal_reserve/minneapolis/business_conditions": "Minneapolis Fed changed the file layout (no Date column)",
+  "federal_reserve/ny/core_trend_inflation": "the New York Fed file currently returns no rows",
   "finra/equity/securities": "FINRA lookup not readable",
   "fixedincome/government/treasury_prices": "TreasuryDirect blocks the request (HTTP 403); Canadian prices still available via the source switcher",
-  "federal_reserve/ny/core_trend_inflation": "the New York Fed file currently returns no rows",
   "regulators/sec/rss_litigation": "the feed mixes time zones the reader cannot combine (the SEC & Regulation card uses the newer source)",
   "regulators/sec/sic_search": "SEC changed the columns of its SIC code list",
   "sec/institutions_search": "the SEC search page changed and can no longer be read",
   "sec/sic_search": "SEC changed the columns of its SIC code list",
+  "uscongress/mandated_reports": "Congress.gov (GovInfo) returns an empty list for every Congress (probed twice, 2026-11-23, key set)",
   "usda/farm_household_income_and_characteristics": "USDA labels the latest year '2025P', which the reader cannot parse",
   "usda/livestock_and_meat_domestic_data": "USDA renamed the file inside its archive",
   "usda/livestock_and_meat_international_trade_data": "USDA returns no rows for any table right now",
+  "usda/publication_documents": "USDA ERS publication list returns no documents for any series (probed twice, 2026-11-23)",
   "usda/vegetables_and_pulses": "USDA renamed the file inside its archive"
 }

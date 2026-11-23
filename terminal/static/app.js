@@ -1172,11 +1172,14 @@
     var mkt = T.marketOf(sym);
     function covers(m) { return !m || !m.mk || !mkt || m.mk.indexOf(mkt) >= 0; }
     var pick = selOf("srcsel", item), pm = pick && c.members.filter(function (m) { return m.b + ":" + m.w === pick; })[0];
-    // On tab open, a user's explicit source pick stands even if they chose another market's source (e.g. TMX for ENB).
-    if (!onGroupChange && pick === item.backend + ":" + item.widgetId && pm && resolveDef(pm.b, pm.w)) return had;
+    // On tab open, a user's explicit source pick stands even if they chose another market's source for a U.S. ticker
+    // (TMX for dual-listed ENB). A listing abroad (SU.TO, SHEL.L, BTC-USD) is routed to a source that covers it, for
+    // display only: the saved pick is kept and comes back with a U.S. ticker.
+    var pickStands = pm && (covers(pm) || mkt === "us" || !mkt);
+    if (!onGroupChange && pick === item.backend + ":" + item.widgetId && pickStands && resolveDef(pm.b, pm.w)) return had;
     if (covers(mo.member) && (!(mo.member && mo.member.paid) || pick === item.backend + ":" + item.widgetId)) return had;
     // automatic routing never lands on a paid plan; the user can still pick it
-    if (pm && (covers(pm) || !onGroupChange) && resolveDef(pm.b, pm.w)) { applySource(item, pm.b + ":" + pm.w); return true; }
+    if (pm && (covers(pm) || (!onGroupChange && pickStands)) && resolveDef(pm.b, pm.w)) { applySource(item, pm.b + ":" + pm.w); return true; }
     if (onGroupChange && pick && S.cur && S.state.srcsel && S.state.srcsel[S.cur.id]) {
       delete S.state.srcsel[S.cur.id][item.uid];
       saveNow();
@@ -1481,7 +1484,8 @@
     g.value = v === "" ? null : v;
     rememberGroup(g);
     // a group that belongs to another (Report to Symbol) starts over when that one changes: a new company opens on its latest report
-    if (S.cur) S.cur.groups.forEach(function (o) { if (o !== g && o.resetWith === g.name && o.value != null && o.value !== "") { o.value = null; rememberGroup(o); } });
+    var reset = [];
+    if (S.cur) S.cur.groups.forEach(function (o) { if (o !== g && o.resetWith === g.name && o.value != null && o.value !== "") { o.value = null; rememberGroup(o); reset.push(o.name); } });
     if (S.cur && S.cur.id.indexOf("d:") !== 0 && S.state.dashboards[S.cur.id]) S.state.dashboards[S.cur.id] = S.cur;
     paintGroups();
     if (S.cur && g.value != null && g.value !== "") {
@@ -1498,6 +1502,10 @@
       });
     }
     S.cards.slice().forEach(function (c) {
+      if (reset.length && (c.item.groups || []).some(function (n) { return reset.indexOf(n) >= 0; }) && (c.item.groups || []).indexOf(g.name) < 0) {
+        if (c.def) { c.redrawParams(); c.refresh(false); }
+        return;
+      }
       var inGrp = (c.item.groups || []).indexOf(g.name) >= 0;
       var routedConcept = !inGrp && g.paramName === "symbol" && (function () {
         var mo = memberOf(c.item), co = mo && S.concepts[mo.id];
@@ -1591,11 +1599,20 @@
     if (l.group) {
       // the value is set before the dashboard opens, so its cards load it straight away (as a ticker search does)
       S.state.groups = S.state.groups || {};
-      (S.state.groups[l.dash] = S.state.groups[l.dash] || {})[l.group] = l.value;
+      var sg = (S.state.groups[l.dash] = S.state.groups[l.dash] || {}), more = l.groups || {}, before = sg[l.group];
+      sg[l.group] = l.value;
+      Object.keys(more).forEach(function (k) { sg[k] = more[k]; });      // a CUSIP: Issuer and Bond together
       saveNow();
       if (!openDashboard(l.dash, l.tab)) return;
       var g = S.cur.groups.filter(function (x) { return x.name === l.group; })[0];
       if (g && g.value !== l.value) setGroup(g, l.value);
+      else if (g && before !== l.value) {             // set before opening: a group that starts over with this one does so now
+        S.cur.groups.forEach(function (o) { if (o.resetWith === g.name && !(o.name in more) && o.value != null && o.value !== "") setGroup(o, null); });
+      }
+      Object.keys(more).forEach(function (k) {
+        var o = S.cur.groups.filter(function (x) { return x.name === k; })[0];
+        if (o && o.value !== more[k]) setGroup(o, more[k]);
+      });
       return;
     }
     if (!openDashboard(l.dash, l.tab)) return;
@@ -2048,7 +2065,7 @@
         // FRED:<series id> opens the series on the Markets Summary chart; a check-digit-valid CUSIP opens the bond lookup
         var direct = /^FRED:[A-Za-z0-9_.]+$/i.test(q) ? [{ kind: "FRED", label: q.toUpperCase(), name: "FRED series", where: "→ Markets Summary › Chart", ticker: q.toUpperCase() }]
           : cusipOk(q) ? [{ kind: "CUSIP", label: q.toUpperCase(), name: "bond (FINRA TRACE)", where: "→ Credit › Bond Lookup",
-            jump: { label: "Bond", dash: "d:credit", tab: "bond-lookup-trace", param: "company", value: q.toUpperCase(), also: { cusip: q.toUpperCase() } } }] : [];
+            jump: { label: "Bond", dash: "d:credit", tab: "bond-lookup-trace", group: "Issuer", value: q.toUpperCase(), groups: { Bond: q.toUpperCase() } } }] : [];
         if (secFor === q && !secs.length && /^[A-Za-z0-9.^=\-]{1,12}$/.test(q)) secs = [{ kind: "Ticker", label: q.toUpperCase(), name: "open as typed", where: "→ " + T.sec.where(q), ticker: q.toUpperCase() }];
         // data first when the words clearly name a dashboard or dataset (cpi, sofr, options), securities first otherwise
         // and when no security matched (only the "open as typed" guess: "wasde") or a phrase is in a dataset's name ("high yield")
@@ -2056,7 +2073,9 @@
         var dataFirst = hits.some(function (e) { var i = at(e); return i === 0 || (i > 0 && /\s/.test(nq)); })
           || (fallbackOnly && hits.length > 0);
         var local = hits.slice(0, secs.length ? 9 : 14);
-        shown = direct.concat(dataFirst ? local.concat(secs) : secs.concat(local));
+        // an equity CUSIP (037833100) is found by the security search too: the listing first, the bond lookup after it
+        var equityCusip = direct.length && direct[0].kind === "CUSIP" && secs.length && !fallbackOnly;
+        shown = equityCusip ? secs.concat(direct, local) : direct.concat(dataFirst ? local.concat(secs) : secs.concat(local));
         foot = (secFor === q ? "" : "Looking up securities… · ") + hits.length + " dashboards and datasets · ↑↓ move · Enter opens";
       }
       if (hl >= shown.length) hl = 0;
@@ -2127,7 +2146,7 @@
       el("div", { class: "help-body" }, [
         sec("Keyboard", [["Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
           ["[  ]", "Previous / next tab"], ["Esc", "Close a maximized card, menu or dialog"], ["?", "This guide"]]),
-        sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; a topic (cpi, sofr, options) for that card; a 9-char CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
+        sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; an SEC CIK (0000320193) or an equity CUSIP (037833100) for its listing; a topic (cpi, sofr, options) for that card; a bond CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
           ["Pickers", "Symbol, Country and Bank boxes at the top drive linked cards. Clicking a ticker, country, CUSIP, CRD, RSSD or bill id in a table fills them too."]]),
         sec("Work with cards", [["Source: X ▾", "Click the header source to switch providers for the same data or open the source's page."],
           ["↻ Refresh", "Card ↻ bypasses server and browser cache for that card; top-bar ↻ reloads all cards on the current tab."],
@@ -2140,7 +2159,9 @@
           ["Credit & Rates", "Credit › Bond Lookup (TRACE by issuer, ticker or CUSIP), Credit › Spreads (CFTC index CDS & OAS), Rates & Curves › Policy & Inflation (OIS-implied policy paths)."],
           ["News & Banking", "News › Markets situation room (newest-first monitor & official releases); Money & Banking (credit quality, FDIC failures, FFIEC Bank Lookup); Indices › Valuation (S&P 500 multiples)."]]),
         sec("API keys & services", [["Keyless & free keys", "Runs keyless by default on the main V5 data service. Optional free FRED, BLS, EIA and Congress.gov keys unlock extra cards (Setup-Keys.cmd or local/api_keys.env, then restart)."],
-          ["Data status", "Data Explorers › Data status lists configured keys, card counts, sign-up links, runtime fixes, and any source down upstream."]])
+          ["Data status", "Data Explorers › Data status lists configured keys, card counts, sign-up links, runtime fixes, and any source down upstream."]]),
+        sec("Python & AI assistants", [["Python", "The same data from scripts: run .venv-v5\\Scripts\\python.exe, then from openbb import obb; obb.equity.price.historical(\"AAPL\", provider=\"yfinance\").to_df()."],
+          ["MCP", "Assistants that support MCP can query the same data service through openbb-mcp: copy config/mcp.example.json into the assistant's MCP settings and set the folder path in it."]])
       ])
     ]);
     var m = T.modal(box);

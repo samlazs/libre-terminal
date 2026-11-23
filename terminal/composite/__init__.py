@@ -8,6 +8,8 @@ rate-limited sources (OECD, BIS, FRED, EIA, SEC facts, curves) also on disk in l
 
 from __future__ import annotations
 
+import importlib
+
 import time as time
 
 from .core.http import (  # noqa: F401
@@ -79,7 +81,7 @@ from .geo.gpr import _gpr, GPR_NAMES, gpr_table  # noqa: F401
 from .geo.shipping import PORTWATCH_FIELDS, _chokepoints, CHOKEPOINT_ORDER, chokepoint_monitor  # noqa: F401
 from .equity.lookup import TYPE_NAMES, MINOR_UNITS, _syms, search, META_TTL, _meta, _first, snapshot  # noqa: F401
 from .equity.comps import (  # noqa: F401
-    _slug, _norm_name, _profiles, _yahoo_recs, _peers, COMP_FIELDS, _METRICS, _ev_parts, comps,
+    _slug, _norm_name, _profiles, _yahoo_recs, _peers, COMP_FIELDS, _METRICS, _ev_parts, comps, is_bank, BANK_NA,
 )
 from .equity.earnings import (  # noqa: F401
     EARN_PERIODS, _STORE_LOCK, _est_raw, _report_info, _timing_from_acceptance, _earnings_release,
@@ -193,7 +195,7 @@ def static_sources(name, params=None):
         return _links.SOURCES
     if name in ("bond_lookup", "bond_curve"):
         import bonds as _bonds                    # imported late: bonds.py imports this module
-        return [_bonds.SOURCE_FINRA, _bonds.SOURCE_SEC]
+        return [_bonds.SOURCE_FINRA, _bonds.SOURCE_SEC] + ([_bonds.SOURCE_PAR] if name == "bond_lookup" else [])
     if name in ("cds_indices", "cds_history"):
         import cds as _cds                        # imported late: cds.py imports this module
         return [_cds.SOURCE]
@@ -217,6 +219,9 @@ def static_sources(name, params=None):
     if name == "sp500_multiples":
         import multpl as _mp                        # imported late: multpl.py imports this module
         return _mp.static_sources(p.get("series_name"))
+    if name in LATE_VIEWS:                          # Stage 3 views: each module states its own sources
+        mod = importlib.import_module(LATE_VIEWS[name][0])
+        return mod.static_sources(name, p)
     return []
 
 def news_view(**params):
@@ -279,6 +284,22 @@ def sp500_multiples_view(**params):
     return _mp.chart(**params)
 
 
+# Stage 3 views, imported late (their modules import this one): view name -> (module, function)
+LATE_VIEWS = {
+    "valuation_bands": ("valuation", "bands"), "roic_dupont": ("valuation", "roic_dupont"),
+    "bond_pricer": ("bonds", "pricer"), "debt_maturity_wall": ("bonds", "maturity_wall"),
+    "etf_overlap": ("etfs", "etf_overlap"), "gex_strike": ("optionsx", "gex"), "vol_cone": ("optionsx", "vol_cone"),
+    "correlation": ("risk", "correlation"), "risk_stats": ("risk", "risk_stats"), "fx_rate_diff": ("risk", "fx_rate_diff"),
+}
+
+
+def _late(module, fn):
+    def view(**params):
+        return getattr(importlib.import_module(module), fn)(**params)
+    view.__name__ = fn + "_view"
+    return view
+
+
 ROUTES = {
     'board': board, 'performance': performance, 'perf_bars': perf_bars, 'style_box': style_box,
     'yield_curves': yield_curves, 'yield_curve_table': yield_curve_table, 'global_yields': global_yields,
@@ -296,3 +317,4 @@ ROUTES = {
     'bond_curve': bond_curve_view, 'company_links': company_links_view,
     'sp500_multiples': sp500_multiples_view,
 }
+ROUTES.update({k: _late(*v) for k, v in LATE_VIEWS.items()})

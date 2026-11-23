@@ -55,6 +55,14 @@ ANALYST_ACTIONS = dict(sort="published_date:desc", cols=["published_date", "anal
                                                         "price_target_previous", "price_target_action"])
 
 
+def MOVERS(h):
+    """U.S. movers from Nasdaq (V5 has no Yahoo losers / most-active lists; its only gainers list is TMX's): gainers,
+    losers and most active, each with the session (regular, pre-market, after-hours) on the card."""
+    return [W("nasdaq/markets/movers", w, h, provider="nasdaq", params={"category": cat, "asset_class": "stocks", "session": "market", "limit": 25}, title=title)
+            for w, cat, title in ((13, "most_advanced", "Top gainers (Nasdaq)"), (14, "most_declined", "Top losers (Nasdaq)"),
+                                  (13, "most_active_share_volume", "Most active (Nasdaq, shares)"))]
+
+
 def X(name, w=None, h=None, title=None, groups=None, cols=None, **params):
     return W("x:" + name, w, h, params=params, title=title, groups=groups, cols=cols)
 
@@ -128,7 +136,7 @@ DASHBOARDS = [
                              X("perf_bars", 13, 18, preset="us_industries", period="1M")],          # one horizon per row (review G2)
                             [X("perf_bars", 14, 22, preset="themes", period="1M"), X("board", 26, 22, preset="themes")],
                             [X("board", 15, 18, preset="volatility"), PERF("^VIX,^MOVE,^OVX", "1Y", w=12, h=18, title="Normalized Performance: volatility"), X("board", 13, 18, preset="us_factors")],
-                            [W("equity/discovery/gainers", 13, 16), W("equity/discovery/losers", 14, 16), W("equity/discovery/active", 13, 16)]]),
+                            MOVERS(16)]),
         T("Rates & Credit", rows=[[X("global_yields", 24, 20), X("yield_curves", 16, 20)],
                                   [X("policy_rates", 14, 18), X("policy_rate_history", 13, 18), X("board", 13, 18, preset="fixed_income")],
                                   [M("credit_spreads", 14, 16), M("treasury_yields", 13, 16), M("fed_liquidity", 13, 16)],
@@ -164,9 +172,11 @@ DASHBOARDS = [
             [W("yfinance/estimates/eps_revisions", 20, 12, title="EPS estimate revisions: analysts raising vs cutting (7 and 30 days)"), LIB("More estimates", ["rest:yfinance/estimates/*", "rest:equity/estimates/*"], w=20, h=12)]]),
         T("Price & Peers", rows=[[X("chart", 40, 24, compare="^GSPC", view="pct", period="1Y")],
                                  [X("comps", 40, 18)], [W("equity/fundamental/metrics", 20, 14), W("equity/price/quote", 20, 14)],
-                                 [W("equity/profile", 20, 14, title="Company profile"), W("yfinance/asset_info/view", 20, 14)]],
-          auto=["equity/price/historical", "equity/compare/peers", "equity/compare/groups", "equity/price/nbbo"]),
-        T("Growth & Ratios", auto=["equity/fundamental/income_growth", "equity/fundamental/balance_growth", "equity/fundamental/cash_growth", "equity/fundamental/ratios",
+                                 [W("equity/profile", 20, 14, title="Company profile"), W("x:risk_stats", 20, 14, wid="x_peer_risk")]],
+          auto=["yfinance/asset_info/view", "equity/price/historical", "equity/compare/peers", "equity/compare/groups", "equity/price/nbbo"]),
+        # Stage 3 8d: where the multiple sits in its own 5-year history, and what drives the return on equity
+        T("Growth & Ratios", rows=[[X("valuation_bands", 24, 16, title="Valuation bands (5 years)"), X("roic_dupont", 16, 16)]],
+          auto=["equity/fundamental/income_growth", "equity/fundamental/balance_growth", "equity/fundamental/cash_growth", "equity/fundamental/ratios",
                                     "equity/historical_market_cap", "equity/fundamental/trailing_dividend_yield", "equity/price/performance"]),
         T("Ownership & Insiders", auto=["yfinance/ownership/major", "yfinance/ownership/institutional", "yfinance/ownership/mutual_fund", "equity/ownership/insider_trading",
                                          "equity/ownership/share_statistics", "yfinance/ownership/*", "equity/ownership/institutional", "equity/ownership/major_holders", "sec/beneficial_ownership",
@@ -174,7 +184,8 @@ DASHBOARDS = [
                                          "sec/pay_versus_performance"]),
         T("Dividends & Events", auto=["yfinance/company_calendar", "equity/fundamental/dividends", "equity/fundamental/historical_eps", "equity/fundamental/historical_splits",
                                        "equity/fundamental/transcript", "equity/calendar/events"]),
-        T("Segments & KPIs", auto=["equity/fundamental/revenue_per_segment", "equity/fundamental/revenue_per_geography", "equity/fundamental/employee_count",
+        # SEC segment revenue (keyless, U.S. filers) opens the tab; the KPI endpoints after it need legacy V4 (FMP / Intrinio)
+        T("Segments & KPIs", rows=[[W("sec/section_markdown", 40, 20, wid="sec_segment_revenue_sec_obb", title="Segment revenue (SEC filings)")]], auto=["equity/fundamental/revenue_per_segment", "equity/fundamental/revenue_per_geography", "equity/fundamental/employee_count",
                                     "equity/fundamental/historical_attributes", "equity/fundamental/latest_attributes", "equity/fundamental/search_attributes", "equity/fundamental/esg_score"]),
         # filings & header drill-down into the viewer first, then overview/MD&A/sections/exhibits, then XBRL & as-filed statements
         T("Filings & SEC Data", rows=[
@@ -197,8 +208,8 @@ DASHBOARDS = [
 
     D("eq-screen", "Screeners & Movers", "equities", "Find stocks: screeners, daily movers, sectors and industries, relative rotation, symbol lookup.", [
         T("Screener", rows=[[W("yfinance/screener_builder/view", 40, 30)], [W("equity/screener", 40, 20, provider="finviz")]]),
-        T("Movers", rows=[[W("equity/discovery/gainers", 13, 18), W("equity/discovery/losers", 14, 18), W("equity/discovery/active", 13, 18)]],
-          auto=["re:equity/discovery/(?!filings|latest).*", "nasdaq/markets/movers", "equity/market_snapshots"]),
+        T("Movers", rows=[MOVERS(18)],
+          auto=["re:equity/discovery/(?!filings|latest|gainers|losers|active).*", "equity/market_snapshots"]),
         T("Sectors & Industries", rows=[[X("perf_bars", 13, 18, preset="us_sectors"), X("board", 14, 18, preset="us_sectors"), X("board", 13, 18, preset="us_industries")]],
           auto=["yfinance/sectors/*", "yfinance/industry/*"]),
         T("Themes", rows=[[X("perf_bars", 13, 22, preset="themes", period="1M"), X("board", 27, 22, preset="themes")],
@@ -263,7 +274,7 @@ DASHBOARDS = [
           auto=["etf/holdings", "etf/price_performance", "etf/equity_exposure", "etf/historical", "etf/sectors", "etf/countries"]),
         T("ETF Search & Movers", auto=[W("etf/discovery/gainers", title="ETF movers (gainers, losers, most active)"), "etf/search", "etf/discovery/*"], groups=[]),
         T("Mutual Funds", auto=["yfinance/funds/*"], groups=["Fund"]),
-        T("Fund Filings (N-PORT)", auto=["etf/nport_disclosure", "sec/nport_fund_metrics"]),
+        T("Fund Filings (N-PORT)", rows=[[X("etf_overlap", 20, 18, groups=[])]], auto=["etf/nport_disclosure", "sec/nport_fund_metrics"]),
     ], groups=[dict(SYMBOL, value="SPY"), {"name": "Fund", "paramName": "symbol", "value": "VFIAX"}], more=["etf/*"]),
 
     # ============================================================ RATES & CREDIT
@@ -307,17 +318,17 @@ DASHBOARDS = [
 
     D("credit", "Credit", "rates", "Credit spreads by rating and region, sovereign spreads, private credit and loans, corporate debt, bank lending, stress, CDS index trades and bond lookup.", [
         # Spreads first: credit ETFs (keyless) on top, then ICE BofA option-adjusted spreads (FRED) by rating, region and euro sovereigns
-        T("Spreads", rows=[[X("board", 14, 18, preset="fixed_income"), PERF("LQD,HYG,EMB,BKLN,TLT", "1Y", w=26, h=18, title="Normalized Performance: credit vs Treasuries")],
+        T("Spreads", groups=[], rows=[[X("board", 14, 18, preset="fixed_income"), PERF("LQD,HYG,EMB,BKLN,TLT", "1Y", w=26, h=18, title="Normalized Performance: credit vs Treasuries")],
                            [M("credit_spreads", 14, 16, since="2019"), M("ig_by_rating", 13, 16, since="2023"), M("hy_by_rating", 13, 16, since="2023")],
                            [X("cds_indices", 14, 16), X("cds_history", 13, 16), M("credit_regions", 13, 16, since="2023")]],
           auto=["fixedincome/bond_indices", W("fixedincome/corporate/hqm", plot={"x": "maturity", "ys": ["rate"], "split": "", "type": "line"}), "fixedincome/corporate/spot_rates", "fixedincome/mortgage_indices", "cftc/cds_index_trades"]),
-        T("Private Credit & Loans", rows=[[X("board", 15, 26, preset="private_markets"), PERF("BIZD,BKLN,JAAA,HYG,PSP", "3Y", w=25, h=26, title="Normalized Performance: BDCs, loans, CLOs, high yield, listed PE")],
+        T("Private Credit & Loans", groups=[], rows=[[X("board", 15, 26, preset="private_markets"), PERF("BIZD,BKLN,JAAA,HYG,PSP", "3Y", w=25, h=26, title="Normalized Performance: BDCs, loans, CLOs, high yield, listed PE")],
                                           [M("bank_lending", 14, 18), C("alt_managers", "revenue", 13, 18, period="annual"), METRICS("ARCC,OBDC,BXSL,FSK,MAIN,GBDC", "Valuation and yield: BDCs", 13, 18)],
                                           [METRICS("BX,KKR,APO,ARES,OWL,CG", "Valuation and margins: alternative managers", 20, 16), M("distressed_spreads", 20, 16)]]),
-        T("Corporate Debt", rows=[[M("corporate_yields", 14, 18), M("corporate_debt", 13, 18, since="2000"), C("hyperscalers", "debt", 13, 18)],
+        T("Corporate Debt", groups=[], rows=[[M("corporate_yields", 14, 18), M("corporate_debt", 13, 18, since="2000"), C("hyperscalers", "debt", 13, 18)],
                                   [C("megacaps", "interest_expense", 14, 16, period="annual"), C("megacaps", "buybacks", 13, 16, period="ttm"), M("corporate_profits", 13, 16)]]),
         # bank lending and financial stress on one tab: charts first, the source tables in two library cards
-        T("Lending & Stress", rows=[[M("bank_lending", 14, 18), M("lending_standards", 13, 18), M("delinquencies", 13, 18)],
+        T("Lending & Stress", groups=[], rows=[[M("bank_lending", 14, 18), M("lending_standards", 13, 18), M("delinquencies", 13, 18)],
                                     [M("financial_conditions", 20, 16), W("federal_reserve/ny/corporate_bond_distress", 20, 16, params={"start_date": "2000-01-01"}, title="Corporate bond distress index (NY Fed; 0-1, percentile of history)",
                                                                          plot={"x": "date", "ys": ["market", "investment_grade", "high_yield"], "split": "", "type": "line"})],
                                     [LIB("Bank lending surveys and conditions", ["economy/survey/sloos", "federal_reserve/ny/consumer_credit_access", "federal_reserve/dallas/banking_conditions",
@@ -326,11 +337,18 @@ DASHBOARDS = [
                                                                                        "federal_reserve/cleveland/systemic_risk", "federal_reserve/ny/corporate_bond_distress",
                                                                                        "federal_reserve/kc/risk_index", "federal_reserve/stl/national_index"], 20, 22)]]),
         # HANDOFF P3-1: company -> FINRA issuer name, filtered and typed (terminal/bonds.py); the raw TRACE card stays last
-        T("Bond Lookup (TRACE)", rows=[[X("bond_lookup", 24, 18), X("bond_curve", 16, 18)]], cols=1, h=18, auto=[
-            W("finra/fixedincome/bond_historical", plot={"x": "date", "ys": ["price"], "split": "", "type": "line"}, sort="date:desc"),
-            W("fixedincome/corporate/bond_prices", provider="finra", only=["finra"], params={"issuer_name": "APPLE INC", "limit": 1000}, title="TRACE bond prices (raw, by issuer name)"),
-            W("finra/fixedincome/bonds", manual="The full FINRA bond list is about 150 MB (300,000 bonds) and cannot be filtered. Use the issuer filter in the card above, or load everything:")]),
-    ], more=["fixedincome/*", "finra/fixedincome/*"]),
+        # Issuer drives the table and the curve together; clicking a CUSIP (table row or curve point) sets Bond, which drives
+        # the trade history; a new issuer clears Bond so the history never shows the previous issuer's bond
+        T("Bond Lookup (TRACE)", rows=[[X("bond_lookup", 24, 18, groups=["Issuer"]), X("bond_curve", 16, 18, groups=["Issuer"])],
+                                       [X("bond_pricer", 20, 16, groups=["Bond"]), X("debt_maturity_wall", 20, 16, groups=["Issuer"])]], cols=1, h=18, auto=[
+            W("finra/fixedincome/bond_historical", groups=["Bond"], plot={"x": "date", "ys": ["price"], "split": "", "type": "line"}, sort="date:desc", title="Bond price history (TRACE, the bond clicked above)"),
+            W("fixedincome/corporate/bond_prices", provider="finra", only=["finra"], groups=[], params={"issuer_name": "APPLE INC", "limit": 1000}, title="TRACE bond prices (raw, by issuer name)"),
+            W("finra/fixedincome/bonds", groups=[], manual="The full FINRA bond list is about 150 MB (300,000 bonds) and cannot be filtered. Use the issuer filter in the card above, or load everything:")],
+          groups=["Issuer", "Bond"]),
+    ], groups=[{"name": "Issuer", "paramName": "company", "value": "AAPL"},
+               {"name": "Bond", "paramName": "cusip", "value": None, "resetWith": "Issuer",
+                "prompt": "Click a CUSIP in the bonds table, or a point on the issuer yield curve, to load that bond's trade history."}],
+       more=["fixedincome/*", "finra/fixedincome/*"]),
 
     D("govfin", "Government Finance", "rates", "U.S. public debt, the Treasury's daily cash position, auctions, Fed balance sheet and primary dealers.", [
         # Treasury's own daily data (keyless) first, then the FRED history charts
@@ -353,7 +371,8 @@ DASHBOARDS = [
     D("options", "Equity Options", "derivatives", "Option chains, volatility surfaces, smiles and term structure, and strategy pricing.", [
         # the chain with open interest and the term structure first; smile and surface on Volatility
         T("Chain", rows=[[W("derivatives/options/chains", 40, 22, provider="yfinance", groups=["Symbol"])], [W("cboe/options/stats", 20, 16), W("cboe/options/term_structure", 20, 16)]]),
-        T("Volatility", auto=["cboe/options/smile", "cboe/options/surface"]),
+        # Stage 3 10a: where dealer hedging concentrates, and today's realised and implied volatility against the past year
+        T("Volatility", rows=[[X("gex_strike", 22, 16), X("vol_cone", 18, 16)]], auto=["cboe/options/smile", "cboe/options/surface"]),
         # one card per analysis; its source follows the ticker (Cboe for U.S. listings, TMX for .TO, Deribit for BTC/ETH).
         # The market-wide Intrinio scans need a paid key: last on the tab.
         T("Strategies", auto=["cboe/options/straddle", "cboe/options/strangle", "cboe/options/spreads", "cboe/options/payoff", "cboe/options/trade_optimizer",
@@ -394,7 +413,8 @@ DASHBOARDS = [
                   X("perf_bars", h=18, title="Ranking: currencies vs USD", preset="fx", period="1M")]),
             (20, [X("fx_moves", h=22, period="1D"), X("fx_trend", h=22, period="3M")]),
         ], rows=[[X("fx_matrix", 40, 14)],
-                 [X("policy_rates", 18, 16, title="Policy rates and differential vs the Fed"), NEWS(22, 16, subject="eurusd", title="Currency news", groups=[])]]),
+                 [X("policy_rates", 18, 16, title="Policy rates and differential vs the Fed"), X("fx_rate_diff", 22, 16)],
+                 [NEWS(40, 14, subject="eurusd", title="Currency news", groups=[])]]),
         T("History & Reference", rows=[[W("currency/price/historical", 26, 20, chart=True, params={"symbol": "EURUSD"}), M("dollar", 14, 20, since="2006")],
                                        [M("reer", 20, 16, since="2010"), M("fx_reserves", 20, 16, since="2010")]],
           auto=["currency/reference_rates", "currency/snapshots", "currency/search"]),
@@ -581,7 +601,7 @@ DASHBOARDS = [
                                [M("red_sea_diversion", 20, 16, since="2023"), M("asia_straits", 20, 16, since="2023")],
                                [X("board", 16, 20, preset="shipping"), PERF("BWET,BDRY,ZIM,FRO,SPY", "1Y", w=24, h=20, title="Normalized Performance: freight and shipping")]],
           auto=["economy/shipping/chokepoint_info", "economy/shipping/chokepoint_volume"]),
-        T("Disruptions", auto=["imf/portwatch/disruption_events", "imf/portwatch/disruptions_map", "imf/portwatch/disruption_sankey"]),
+        T("Disruptions", auto=["imf/portwatch/disruption_events", W("imf/portwatch/disruptions_map", chart=True), "imf/portwatch/disruption_sankey"]),
         T("Ports & Trade Volumes", auto=["economy/shipping/port_volume", W("economy/shipping/port_info", sort="vessel_count_total:desc"), "imf/portwatch/*"]),
         T("Trade Flows & Tariffs", rows=[[M("trade_balance", 13, 16, since="2015"), M("federal_interest_tariffs", 14, 16, since="2000"), M("trade_uncertainty", 13, 16, since="2015")],
                                          [M("dollar", 20, 16, since="2006")]],
@@ -646,6 +666,8 @@ DASHBOARDS = [
         "Live factor, style and rotation views, plus Fama-French factor and portfolio returns.", [
         T("Live", rows=[[X("board", 16, 22, preset="us_factors"), X("perf_bars", 14, 22, preset="us_factors", period="YTD"), X("style_box", 10, 11)],
                         [PERF("MTUM,QUAL,USMV,VLUE,IWM,SPY", "1Y", w=20, h=22, title="Normalized Performance: factor ETFs vs S&P 500"), W("yfinance/rrg/view", 20, 22)]]),
+        # Stage 3 3a: how the main assets move together, and their risk over the same window
+        T("Correlation & Risk", rows=[[X("correlation", 20, 18), W("x:risk_stats", 20, 18, wid="x_risk_stats")]]),
         T("Fama-French", auto=["famafrench/factors", "famafrench/us_portfolio_returns", "famafrench/*"]),
     ]),
 ]

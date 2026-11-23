@@ -158,7 +158,7 @@ from openbb_imf.utils import port_watch_helpers as pwh  # noqa: E402
 
 imf_applied = []
 rb.install_imf_arcgis_fix(imf_applied)
-check(len(imf_applied) == 1 and "IMF PortWatch" in imf_applied[0], "IMF ArcGIS fix applies cleanly")
+check(len(imf_applied) == 2 and "IMF PortWatch" in imf_applied[0] and "port" in imf_applied[1], f"IMF ArcGIS fix and port names apply cleanly: {imf_applied}")
 
 
 class _FakeResp:

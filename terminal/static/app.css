@@ -278,6 +278,7 @@ iframe.dark-doc { filter: invert(0.9) hue-rotate(180deg); }
 .le .modal-head { gap: 10px; }
 .le-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .le-bar .dd-btn.le-dd { max-width: 260px; font-weight: 600; color: var(--text); padding-top: 4px; padding-bottom: 4px; }
+.le-bar .le-new { width: 220px; font-size: 13px; padding: 4px 7px; }
 .le-add { width: 100%; font-size: 14px; padding: 7px 9px !important; }
 .le-rows { overflow-y: auto; flex: 1; min-height: 120px; padding: 4px 8px; }
 .le-row { display: flex; align-items: center; gap: 8px; padding: 3px 6px; border-bottom: 1px solid var(--hair); }
@@ -348,6 +349,11 @@ iframe.dark-doc { filter: invert(0.9) hue-rotate(180deg); }
 .w.xs .tv table { font-size: 11.5px; }
 .w.xs .tv th, .w.xs .tv td { padding: 2px 4px; max-width: 78px; }
 .w.xs .tv td.pin, .w.xs .tv th.pin { max-width: 88px; }
+/* a narrow card keeps room for its source ("Yahoo ▾"): the title gives way first, the "Source:" prefix is dropped */
+.w-head .w-src { min-width: 54px; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.w.xs .w-src .k { display: none; }
 /* Company jump buttons (HANDOFF P3-4) */
 .jumps { display: flex; gap: 4px; align-items: center; }
 .btn.jump { padding: 3px 8px; font-size: 12px; }
+.stmt-views { display: inline-flex; gap: 4px; padding-left: 6px; margin-left: 2px; border-left: 1px solid var(--hair); }
+.stmt-bar .chip[disabled] { opacity: .45; cursor: not-allowed; }
