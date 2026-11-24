@@ -548,11 +548,11 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = composite.dispatch(name, params)
             except composite.CompositeError as e:
-                # written for the user (or carrying a source's own error, which the page classifies). Bad parameters are
-                # found by dispatch against the view's signature (400), an unknown view is 404, everything else 502.
-                kind = e.kind or "upstream"
-                code = e.status or (400 if kind == "input" else 502)
-                return self._json(code, contract.error_body(kind, redact(str(e)), retryable=e.transient or None, retry_after=e.retry_after,
+                # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
+                # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
+                kind = contract.kind_of(e)
+                code = e.status or contract.STATUS_BY_KIND[kind]
+                return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,
                                                             sources=_safe_sources(name, params), user_message=True))
             except Exception as e:  # noqa: BLE001
                 # A TypeError/ValueError raised inside a view is a defect: logged with a ref.

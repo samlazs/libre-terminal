@@ -22,7 +22,14 @@ ERROR_KINDS = ("input", "not_covered", "upstream", "rate_limited", "timeout", "u
 RETRYABLE_KINDS = frozenset({"upstream", "rate_limited", "timeout", "unavailable"})
 KIND_BY_STATUS = {400: "input", 403: "input", 404: "input", 405: "input", 409: "input", 413: "input", 415: "input",
                   422: "input", 429: "rate_limited", 500: "internal", 502: "upstream", 503: "unavailable", 504: "timeout"}
+STATUS_BY_KIND = {"input": 400, "not_covered": 404, "rate_limited": 429, "timeout": 504, "upstream": 502,
+                  "unavailable": 503, "internal": 500}
 NO_DATE = "This answer has no dated data points (links, a directory or a prompt)."
+_RATE_RE = re.compile(r"\b429\b|too many requests|rate.?limit", re.I)
+_TIMEOUT_RE = re.compile(r"did not answer in time|timed? ?out\b|\btimeout\b|slow to answer the first request", re.I)
+_INPUT_RE = re.compile(r"^(?:Click|Enter|Choose|Pick|Type|Select|Give|Provide|Please)\b|\bis required\b|^Bad parameters", re.I)
+_NOT_COVERED_RE = re.compile(r"\bnot found\b|not covered|\bno (?:data|options|results|price history|filings?|quotes?)\b|covers U\.S\.|"
+                             r"is not (?:supported|available) for|\bhas no\b|\bunknown (?:symbol|ticker|series|country)", re.I)
 
 _ISO = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
 _DATE_KEYS = ("as_of", "date", "period", "time", "datetime", "timestamp", "last_trade", "updated")
@@ -122,6 +129,23 @@ def enforce(name: str, out) -> None:
     if name not in _logged:
         _logged.add(name)
         _log.warning("view %s answered outside the envelope: %s", name, "; ".join(v))
+
+
+def kind_of(exc) -> str:
+    """The one place an error is classified: the kind the raiser gave, else read once from its message."""
+    k = getattr(exc, "kind", None)
+    if k in ERROR_KINDS:
+        return k
+    m = str(exc)
+    if _RATE_RE.search(m):
+        return "rate_limited"
+    if _TIMEOUT_RE.search(m):
+        return "timeout"
+    if _INPUT_RE.search(m):
+        return "input"
+    if _NOT_COVERED_RE.search(m):
+        return "not_covered"
+    return "upstream"
 
 
 def error_body(kind: str, message: str, *, retryable: bool | None = None, retry_after: float | None = None,

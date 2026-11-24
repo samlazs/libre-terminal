@@ -119,6 +119,41 @@
     return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: m };
   };
 
+  /**
+   * The terminal's own views (/x/*) say what kind of error they hit: {error: {kind, message, retryable, retry_after}}.
+   * Cards render from that kind; T.classifyError above stays only for raw /api/v1 backend answers.
+   * Text shown never carries a URL, a traceback, "Error:" or a Python exception name (T.cleanMessage).
+   */
+  var TECH_TEXT = /Traceback|\bError:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception|Warning)\b|\bErrno\b|WinError|<urlopen|\bKeyError\b/;
+  T.cleanMessage = function (m) {
+    var t = String(m || "")
+      .replace(/\s*\((?:[^()]*?(?:https?:\/\/|Error|Exception|Errno|urlopen|Traceback)[^()]*)\)/g, "")   // technical tails in parentheses
+      .replace(/\s*\(?https?:\/\/[^\s)]+\)?/g, "").replace(/\s+/g, " ").trim();
+    return !t || TECH_TEXT.test(t) || t.length > 300 ? null : t;
+  };
+  function waitText(secs, fallbackMin) {
+    if (!(secs > 0)) return fallbackMin + " minutes";
+    return secs < 90 ? Math.round(secs) + " seconds" : Math.ceil(secs / 60) + " minutes";
+  }
+  T.classifyKind = function (kind, msg, ctx, info) {
+    ctx = ctx || {}; info = info || {};
+    var src = ctx.source || "The source", clean = T.cleanMessage(msg), atSource = "The problem is at the source, not in your settings. Try again later (press ↻).";
+    if (kind === "input") return { cls: "input", kind: "info", text: clean || "Choose the missing setting to load this card.", hint: null, param: null };
+    if (kind === "not_covered") return { cls: "covered", kind: "info", text: clean || ("Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + "."), hint: "Try another symbol." };
+    if (kind === "rate_limited") return { cls: "ratelimit", kind: "info", text: src + " is limiting how often it can be asked right now.", hint: "Try again in about " + waitText(info.retryAfter, /OECD/i.test(String(msg) + src) ? 10 : 2) + " (press ↻)." };
+    if (kind === "timeout") {
+      if (/keeps loading in the background/i.test(String(msg))) return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
+      return { cls: "upstream", kind: "info", text: src + " did not answer in time.", hint: atSource };
+    }
+    if (kind === "unavailable") return { cls: "upstream", kind: "info", text: "The terminal is busy or restarting.", hint: "Press ↻ in a moment." };
+    if (kind === "upstream") {
+      var own = ctx.userMessage && clean && !/not reachable|did not answer|answered with|^HTTP \d{3}\b|not answering/i.test(clean);
+      return { cls: own ? "message" : "upstream", kind: "info", text: own ? clean : src + " is not answering properly right now.", hint: own ? null : atSource };
+    }
+    var ref = (/\(ref (\w+)/.exec(String(msg)) || [])[1] || T.errorRef(msg);
+    return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: String(msg) };
+  };
+
   /** What really answered, when the backend had to substitute the source asked (X-Terminal-Source: "Yahoo Finance"). */
   T.substituteSources = function (names, note) {
     return String(names || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean).map(function (n) {
@@ -272,10 +307,13 @@
       var err = new Error(errText(resp.status, bodyTxt)); err.status = resp.status;
       var subE = resp.headers && resp.headers.get("X-Terminal-Source");
       if (subE) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
-      try { var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
-      if (rlKey && (resp.status === 429 || /rate limit|too many requests|temporarily blocked/i.test(err.message))) {
-        var rlSecs = /~(\d+)\s*s\b/.exec(err.message);
-        limitedBy[limKey] = { until: Date.now() + (rlSecs ? +rlSecs[1] * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
+      try {
+        var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources;
+        if (ej.error && typeof ej.error.kind === "string") { err.errorKind = ej.error.kind; err.retryAfter = +ej.error.retry_after || 0; err.retryable = ej.error.retryable === true; }
+      } catch (e3) { /* not JSON */ }
+      if (rlKey && (err.errorKind === "rate_limited" || resp.status === 429 || (!err.errorKind && /rate limit|too many requests|temporarily blocked/i.test(err.message)))) {
+        var rlSecs = err.retryAfter || +((/~(\d+)\s*s\b/.exec(err.message) || [])[1] || 0);
+        limitedBy[limKey] = { until: Date.now() + (rlSecs ? rlSecs * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
       }
       throw err;
     }
@@ -1418,12 +1456,14 @@
           if (ctx.backendDown) ctx.backendDown(ctx.backend.id);
           return message("info", "The data backend is restarting.", "This card reloads by itself as soon as it is back (usually within a minute).");
         }
-        var c = T.classifyError(msg, e && e.status, {
+        var cctx = {
           userMessage: !!(e && e.userMessage), source: srcName(), provider: provName(),
           hasFreeOnTab: ctx.hasFreeOnTab ? ctx.hasFreeOnTab(item) : false,
           symbol: def.params.some(function (p) { return p.paramName === "symbol"; }) ? String(eff().symbol || "").toUpperCase().split(",")[0] : null,
           param: function (n) { var np = def.params.filter(function (x) { return x.paramName === n; })[0]; return np ? (np.label || pretty(n)) : pretty(n); }
-        });
+        };
+        // the terminal's own views name the kind; only raw backend answers are still read by T.classifyError
+        var c = e && e.errorKind ? T.classifyKind(e.errorKind, msg, cctx, e) : T.classifyError(msg, e && e.status, cctx);
         failed = true;
         if (c.cls === "slow" && slowRetries < T.SLOW_RETRY_DELAYS.length) {
           var delayS = T.SLOW_RETRY_DELAYS[slowRetries++];

@@ -247,7 +247,7 @@ def gate_g2(ctx) -> tuple[str, list[str]]:
     good, why = cold_start(ctx)
     ok &= good
     ev.append(why)
-    rc, lines = probe_all(ctx, "--assert-envelope", "--allow", "200,204,400,404,502,503,504")
+    rc, lines = probe_all(ctx, "--assert-envelope", "--allow", "200,204,400,404,429,502,503,504")
     ok &= rc == 0
     ev += [f"probe --all-routes exit {rc}"] + lines[-4:]
     return ("pass" if ok else "fail"), ev
@@ -260,7 +260,7 @@ def gate_g3(ctx) -> tuple[str, list[str]]:
     ev = [f"check_sources{' --offline' if ctx.offline else ''} exit {rc}"] + lines[-2:]
     if ctx.offline:
         return ("manual" if rc == 0 else "fail"), ev + ["live as_of coverage needs the running terminal"]
-    rc2, lines2 = probe_all(ctx, "--assert-envelope", "--require-as-of", "--allow", "200,204,400,404,502,503,504")
+    rc2, lines2 = probe_all(ctx, "--assert-envelope", "--require-as-of", "--allow", "200,204,400,404,429,502,503,504")
     ev += [f"probe --require-as-of exit {rc2}"] + lines2[-4:]
     return ("pass" if rc == 0 and rc2 == 0 else "fail"), ev
 

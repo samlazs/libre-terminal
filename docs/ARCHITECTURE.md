@@ -119,6 +119,11 @@ The whole envelope is defined and checked in `terminal/composite/core/contract.p
   sources}`; `detail` repeats the message for older pages. Kinds: `input`, `not_covered`, `upstream`,
   `rate_limited`, `timeout`, `unavailable`, `internal`. `server._json` adds the object to any error body built
   elsewhere, from the status code.
+- **Kinds are set once:** the HTTP layer tags 429 `rate_limited` (with `retry_after` from Retry-After), timeouts
+  `timeout`, 5xx/refused/non-JSON `upstream`, 404 `not_covered`; `contract.kind_of` reads an untyped view error once.
+  The `/x/*` status follows the kind (400, 404, 429, 502, 503, 504, 500). The page renders from `error.kind`
+  (`T.classifyKind`, text passed through `T.cleanMessage`); `T.classifyError` regexes remain only for raw `/api/v1`
+  backend answers. `test_errors.py` holds the fault-kind to error-kind table.
 - **Parameters** are checked against the view's signature (a lazy wrapper's `_target`) before the call: an unknown
   or missing parameter is 400 `input`, an unknown view 404; a TypeError inside a view is a defect (500 with a ref).
 - `scripts/tests/test_contract.py` runs every route under success, CompositeError and a defect through the real
@@ -281,6 +286,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_redact.py`, `test_backend_wrapper.py` | Key redaction, backend guard and sanitized 500s, TradingView bar repair, NaN/Inf scrubbing |
 | `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
 | `test_contract.py` | Response envelope for every route (success, CompositeError, defect), parameter checks, one error object on `/api/*` |
+| `test_errors.py` | Fault kind to error kind table (HTTP layer and real server), Retry-After, server-side classification |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |

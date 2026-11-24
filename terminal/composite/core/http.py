@@ -25,8 +25,9 @@ class CompositeError(Exception):
 
     def __init__(self, msg, *, transient=False, kind=None, retry_after=None, status=None):
         super().__init__(msg)
-        self.transient = bool(transient)
         self.kind = kind
+        # with a kind, "worth retrying" follows from it (contract.RETRYABLE_KINDS); without one, the caller says
+        self.transient = kind in ("upstream", "rate_limited", "timeout", "unavailable") if kind else bool(transient)
         self.retry_after = retry_after
         self.status = status
 
@@ -41,6 +42,43 @@ def _no_retry(url: str) -> bool:
     return bool(_NO_RETRY_RE.search(str(url or "")))
 
 
+def _retry_after(headers) -> float | None:
+    """Seconds from a Retry-After header (delta-seconds or an HTTP date); None when absent or unreadable."""
+    raw = (headers.get("Retry-After") if headers is not None else None) or ""
+    raw = str(raw).strip()
+    if not raw:
+        return None
+    if raw.isdigit():
+        return float(raw)
+    try:
+        import email.utils
+        when = email.utils.parsedate_to_datetime(raw)
+        return max(0.0, when.timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+
+def _status_kind(code: int) -> str | None:
+    """The error kind of an HTTP status from a source (contract.ERROR_KINDS)."""
+    if code == 429:
+        return "rate_limited"
+    if code in (408, 504):
+        return "timeout"
+    if code == 404:
+        return "not_covered"
+    if code in (400, 422):
+        return None                  # a backend's 400/422 is often a provider's own error: the server reads its message once
+    return "upstream"
+
+
+def _net_kind(e) -> str:
+    """timeout for a connect/read timeout, upstream for anything else that kept the answer from arriving."""
+    reason = getattr(e, "reason", e)
+    if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+        return "timeout"
+    return "upstream"
+
+
 def _parse_json(body: bytes, url: str):
     """Parse a JSON answer. NaN/Infinity become None (a number is either right or blank), and a body that is not JSON
     (an HTML error or login page, a truncated answer) is a transient CompositeError, never a raw ValueError."""
@@ -49,7 +87,7 @@ def _parse_json(body: bytes, url: str):
     except (ValueError, UnicodeDecodeError):
         head = body[:200].lstrip().lower()
         what = "an HTML page" if head.startswith((b"<!doctype", b"<html", b"<")) else "a reply that is not JSON"
-        raise C.CompositeError(f"{C._which(url)} answered with {what} instead of data.", transient=True) from None
+        raise C.CompositeError(f"{C._which(url)} answered with {what} instead of data.", kind="upstream") from None
 
 
 def _transport(req, timeout, context=None):
@@ -86,21 +124,25 @@ def http_json(url, timeout=45):
                 detail = None
             msg = str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}"
             if e.code == 429:
-                raise C.CompositeError(msg, transient=True) from None
+                raise C.CompositeError(msg, kind="rate_limited", retry_after=_retry_after(e.headers)) from None
             if e.code in (502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
                 time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
                 continue
-            raise C.CompositeError(msg, transient=e.code in (502, 503, 504)) from None
+            raise C.CompositeError(msg, kind=_status_kind(e.code)) from None
         except urllib.error.URLError as e:
             if attempt + 1 < max_attempts and time.monotonic() < deadline:
                 time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
                 continue
-            raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", transient=True) from None
+            if _net_kind(e) == "timeout":
+                raise C.CompositeError(f"{C._which(url)} did not answer in time.", kind="timeout") from None
+            raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", kind="upstream") from None
         except (TimeoutError, OSError) as e:                 # read timeouts are not URLErrors
             if attempt + 1 < max_attempts and time.monotonic() < deadline:
                 time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
                 continue
-            raise C.CompositeError(f"{C._which(url)} did not answer in time ({type(e).__name__}).", transient=True) from None
+            kind = _net_kind(e)
+            raise C.CompositeError(f"{C._which(url)} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e})."),
+                                   kind=kind) from None
 
 
 def _which(url):
@@ -175,19 +217,22 @@ def _download(url, timeout=60, data=None, ua="Mozilla/5.0 (compatible; terminal-
             with C._transport(req, rem, C._ssl_context()) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            transient = e.code in (408, 429, 502, 503, 504)
             if e.code in (408, 502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
                 delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
                 if delay > 0:
                     time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
                 continue
-            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=transient) from None
+            kind = _status_kind(e.code)
+            raise C.CompositeError(f"{host} is not reachable ({e}).", kind=kind,
+                                   retry_after=_retry_after(e.headers) if kind == "rate_limited" else None) from None
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             if attempt + 1 < max_attempts and time.monotonic() < deadline:
                 delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
                 if delay > 0:
                     time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
                 continue
-            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=True) from None
+            kind = _net_kind(e)
+            raise C.CompositeError(f"{host} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e})."),
+                                   kind=kind) from None
         except Exception as e:  # noqa: BLE001
-            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=False) from None
+            raise C.CompositeError(f"{host} could not be read ({type(e).__name__}).", kind="internal") from None

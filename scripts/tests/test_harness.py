@@ -77,7 +77,7 @@ with no_retry_delays():
     check(e is not None and e.transient and rec.calls == 3 and "HTTP 503" in str(e), "503 -> retried, transient, 'HTTP 503'")
     with fault("http5xx", code=500, body={"detail": "Unexpected error."}) as rec:
         e = raises(lambda: C.http_json(V5_URL, timeout=5))
-    check(e is not None and not e.transient and rec.calls == 1 and str(e) == "Unexpected error.", "500 -> one attempt, backend detail kept")
+    check(e is not None and e.kind == "upstream" and rec.calls == 1 and str(e) == "Unexpected error.", "500 -> one attempt, upstream, backend detail kept")
 
     # ---- 404
     with fault("http404") as rec:

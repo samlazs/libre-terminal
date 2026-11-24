@@ -423,6 +423,47 @@ window.__fcPromise = (async function (T) {
   hHost.querySelector("td.click").click();
   ok(hActions.length === 1 && hActions[0][0] === "document_url" && /primary_doc\.xml$/.test(hActions[0][1]), "transposed Filing Headers click fires document_url");
 
+  // P4-04: /x/ errors render from error.kind; under the whole fault matrix no card text shows a URL, a traceback,
+  // "Error:" or a Python exception name.
+  (function () {
+    var FORBID = /Traceback|Error:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception)\b/;
+    var MSGS = [
+      "OpenBB V5 backend is not reachable (<urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>).",
+      "OpenBB V5 backend did not answer in time.", "HTTP 503 from http://127.0.0.1:6900/api/v1/equity/price/quote",
+      "Too many requests", "not found", "OpenBB V5 backend answered with an HTML page instead of data.",
+      "Traceback (most recent call last):\n  File \"x.py\", line 1\nKeyError: 'close'", "ValueError: could not convert string to float: 'n/a'",
+      "Internal error in the terminal (ref a1b2c3; details in local/logs/ui.log).", "SHEL.L was not found in the Cboe options directory (see https://www.cboe.com/).",
+      "Click a bond's CUSIP in the table or the curve above (or type a CUSIP in the settings)."];
+    var KINDS = ["input", "not_covered", "upstream", "rate_limited", "timeout", "unavailable", "internal"];
+    var seen = 0;
+    KINDS.forEach(function (k) {
+      MSGS.forEach(function (m) {
+        [true, false].forEach(function (um) {
+          var c = T.classifyKind(k, m, { source: "Yahoo Finance", symbol: "SAP.DE", userMessage: um }, { retryAfter: 30 });
+          var shown = (c.text || "") + " " + (c.hint || "");
+          ok(c.text && !FORBID.test(shown), "kind " + k + " never shows technical text: " + shown.slice(0, 120));
+          seen++;
+        });
+      });
+    });
+    ok(seen === KINDS.length * MSGS.length * 2, "fault matrix covered (" + seen + ")");
+    ok(T.classifyKind("rate_limited", "Too many requests", { source: "Nasdaq" }, { retryAfter: 30 }).hint === "Try again in about 30 seconds (press ↻).", "Retry-After 30 s reaches the hint");
+    ok(/about 3 minutes/.test(T.classifyKind("rate_limited", "x", { source: "Nasdaq" }, { retryAfter: 150 }).hint), "Retry-After 150 s -> about 3 minutes");
+    ok(/about 10 minutes/.test(T.classifyKind("rate_limited", "OECD limit", { source: "OECD" }, {}).hint), "no Retry-After from OECD -> 10 minutes");
+    var ic = T.classifyKind("internal", MSGS[8], {}, {});
+    ok(ic.cls === "bug" && ic.kind === "err" && ic.ref === "a1b2c3" && /ref a1b2c3/.test(ic.text), "internal keeps the server's ref");
+    var inp = T.classifyKind("input", MSGS[10], { userMessage: true }, {});
+    ok(inp.cls === "input" && inp.text === MSGS[10], "input shows the view's prompt as written");
+    var nc = T.classifyKind("not_covered", MSGS[9], { source: "Cboe", symbol: "SHEL.L" }, {});
+    ok(nc.cls === "covered" && nc.text === "SHEL.L was not found in the Cboe options directory.", "not covered keeps the message, drops the URL");
+    var up = T.classifyKind("upstream", MSGS[0], { source: "Yahoo Finance", userMessage: true }, {});
+    ok(up.cls === "upstream" && up.text === "Yahoo Finance is not answering properly right now.", "an unreachable source gets the plain upstream text");
+    var own = T.classifyKind("upstream", "Yahoo Finance has no bid/ask quotes for SPX right now, so strategies cannot be priced.", { source: "Cboe", userMessage: true }, {});
+    ok(own.cls === "message" && /no bid\/ask quotes/.test(own.text), "a view's own clean explanation is shown as is");
+    ok(T.classifyKind("timeout", "V5 is slow to answer the first request for this dataset. It keeps loading in the background", {}, {}).cls === "slow", "slow first request keeps its auto-retry class");
+    ok(T.cleanMessage("Traceback (most recent call last)") === null && T.cleanMessage("x (HTTPError 503)") === "x", "cleanMessage drops technical tails or refuses");
+  })();
+
   ok(T.classifyError("CIK not found for symbol SAP.DE", 400, { source: "SEC", provider: "sec", symbol: "SAP.DE" }).cls === "covered", "CIK not found classifies as not covered");
   var xmlErr = T.classifyError("Invalid URL. Please a SEC URL that directs specifically to a HTM or HTML file.", 400, { source: "SEC", provider: "sec" });
   ok(xmlErr.cls === "input" && xmlErr.kind === "info", "sec/htm_file XML rejection classifies as input info, not bug");
