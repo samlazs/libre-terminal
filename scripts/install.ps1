@@ -14,7 +14,7 @@ try {
 function Find-Uv {
     $cmd = Get-Command uv -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    foreach ($p in "$env:USERPROFILE\.local\bin\uv.exe", "$env:USERPROFILE\.cargo\bin\uv.exe") { if (Test-Path $p) { return $p } }
+    foreach ($p in "$env:USERPROFILE\.local\bin\uv.exe", "$env:USERPROFILE\.cargo\bin\uv.exe", "$env:LOCALAPPDATA\Programs\uv\uv.exe") { if (Test-Path $p) { return $p } }
     return $null
 }
 
@@ -23,6 +23,7 @@ if (-not $uv) {
     Write-Host "uv is not installed. uv is a small, free tool (by Astral) that downloads Python and this project's packages." -ForegroundColor Cyan
     Write-Host "Installing it for your Windows user only (no administrator rights needed) from https://astral.sh/uv ..." -ForegroundColor Cyan
     try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
     } catch {
         Write-Host $_.Exception.Message -ForegroundColor Red

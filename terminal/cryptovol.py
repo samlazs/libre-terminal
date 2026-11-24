@@ -22,6 +22,10 @@ SOURCES = [C.src("Deribit", "DVOL: 30-day implied volatility index from Deribit 
                  "https://finance.yahoo.com/quote/BTC-USD/history")]
 
 
+def _fin(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
 def realised(closes, window=WINDOW):
     """[(date, close)] in date order -> [(date, realised vol in %)] from the trailing `window` log returns."""
     out, rets = [], []
@@ -56,8 +60,8 @@ def chart(currency="BTC", range="1Y", today=None, **_):
         return dv, px
     dv, px = C.cached(("cryptovol", ccy, start.isoformat()), 900, load)
     done = today.isoformat()                                   # complete UTC days only
-    implied = sorted((_day(r.get("date")), r.get("close")) for r in dv if r.get("close") is not None and _day(r.get("date")) < done)
-    closes = sorted((_day(r.get("date")), r.get("close")) for r in px if r.get("close") and _day(r.get("date")) < done)
+    implied = sorted((_day(r.get("date")), c) for r in dv for c in [_fin(r.get("close"))] if c is not None and _day(r.get("date")) < done)
+    closes = sorted((_day(r.get("date")), c) for r in px for c in [_fin(r.get("close"))] if c is not None and c > 0 and _day(r.get("date")) < done)
     real = [(d, v) for d, v in realised(closes) if d >= start.isoformat()]
     if not implied and not real:
         raise C.CompositeError(f"Neither Deribit DVOL nor Yahoo daily closes answered for {name} just now.")

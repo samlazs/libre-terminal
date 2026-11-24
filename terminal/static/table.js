@@ -356,7 +356,8 @@
     line.setAttribute("stroke", nums[nums.length - 1] >= nums[0] ? "#0ca30c" : "#e66767");
     svg.appendChild(line);
     var t = document.createElementNS(ns, "title");
-    t.textContent = pctOnly ? "3 months: " + ((nums[nums.length - 1] / nums[0] - 1) * 100).toFixed(1) + "% against the dollar" : "3 months: " + T.fmtNum(nums[0]) + " → " + T.fmtNum(nums[nums.length - 1]) + " (" + (bp ? ((nums[nums.length - 1] - nums[0]) * 100 >= 0 ? "+" : "") + Math.round((nums[nums.length - 1] - nums[0]) * 100) + " bp" : ((nums[nums.length - 1] / nums[0] - 1) * 100).toFixed(1) + "%") + ")";
+    var pctDelta = nums[0] !== 0 ? ((nums[nums.length - 1] / nums[0] - 1) * 100).toFixed(1) + "%" : "–";
+    t.textContent = pctOnly ? "3 months: " + pctDelta + " against the dollar" : "3 months: " + T.fmtNum(nums[0]) + " → " + T.fmtNum(nums[nums.length - 1]) + " (" + (bp ? ((nums[nums.length - 1] - nums[0]) * 100 >= 0 ? "+" : "") + Math.round((nums[nums.length - 1] - nums[0]) * 100) + " bp" : pctDelta) + ")";
     svg.appendChild(t);
     return svg;
   }
@@ -491,7 +492,7 @@
     }
 
     function compute() {
-      var rows = filtered();
+      var rows = state.transposed && canTranspose ? baseRows : filtered();
       if (state.transposed && canTranspose) {
         var hk = null;
         for (var i = 0; i < HEADER_KEYS.length && !hk; i++) {
@@ -515,7 +516,17 @@
           src.forEach(function (r, j) { row["c" + j] = r[c.field]; if (r[c.field] != null && r[c.field] !== "") any = true; });
           if (any) out.push(row);
         });
-        view = { rows: out, cols: cols, transposed: true };
+        var outTotal = out.length, q = state.filter.trim().toLowerCase();
+        if (q) {
+          var terms = q.split(/\s+/);
+          out = out.filter(function (r) {
+            var hay = String(r.__f || "");
+            for (var j = 0; j < src.length; j++) { var rv = r["c" + j]; if (rv != null) hay += " " + (typeof rv === "object" ? JSON.stringify(rv) : rv); }
+            hay = hay.toLowerCase();
+            return terms.every(function (t) { return hay.indexOf(t) >= 0; });
+          });
+        }
+        view = { rows: out, cols: cols, transposed: true, totalFields: outTotal };
       } else {
         var sorted = rows;
         visCols.forEach(function (c) {
@@ -659,11 +670,16 @@
       view.cols.forEach(function (c) {
         var th = el("th", { class: (c.pin ? "pin " : "") + (c.type === "number" || c.perRow ? "n" : ""), title: c.tip || c.name }, c.name);
         if (!view.transposed && !opts.noSort) {
-          if (state.sortField === c.field && state.sortDir) th.appendChild(el("span", { class: "s" }, state.sortDir > 0 ? "▲" : "▼"));
+          var activeSort = state.sortField === c.field && state.sortDir;
+          th.setAttribute("aria-sort", activeSort ? (state.sortDir > 0 ? "ascending" : "descending") : "none");
+          if (activeSort) th.appendChild(el("span", { class: "s" }, state.sortDir > 0 ? "▲" : "▼"));
           th.addEventListener("click", function () {
             state.then = null;                    // the owner's own sort replaces the card's two-key default
-            if (state.sortField !== c.field) { state.sortField = c.field; state.sortDir = c.type === "number" || c.type === "date" ? -1 : 1; }
-            else state.sortDir = state.sortDir === -1 ? 1 : state.sortDir === 1 ? (c.type === "number" || c.type === "date" ? 0 : -1) : (c.type === "number" || c.type === "date" ? -1 : 1);
+            var numOrDate = c.type === "number" || c.type === "date";
+            if (state.sortField !== c.field) { state.sortField = c.field; state.sortDir = numOrDate ? -1 : 1; }
+            else state.sortDir = numOrDate
+              ? (state.sortDir === -1 ? 1 : state.sortDir === 1 ? 0 : -1)
+              : (state.sortDir === 1 ? -1 : state.sortDir === -1 ? 0 : 1);
             if (state.sortDir === 0) state.sortField = null;
             render();
           });
@@ -674,12 +690,15 @@
       appendChunk();
       wrap.scrollTop = 0;
       if (opts.onCount) {
-        var total = dataCount, shown = view.transposed ? total : view.rows.filter(function (r) { return !r._section && !r._pin; }).length;
+        var total = dataCount, shown = view.transposed ? view.rows.length : view.rows.filter(function (r) { return !r._section && !r._pin; }).length;
         var nAll = baseCols.length, asOf = "";
         // as-of: the latest date in the list's date column (the footer's "updated" is only the fetch time)
         var dcol = visCols.filter(function (c) { return c.type === "date" && !EXPIRY.test(c.field) && !opts.calendar; })[0];
         if (dcol && total > 1) baseRows.forEach(function (r) { var v = String(r[dcol.field] || "").slice(0, 10); if (DATE_RE.test(v) && v > asOf) asOf = v; });
-        opts.onCount((asOf ? "latest " + asOf + " · " : "") + (state.filter && !view.transposed ? nf(0, 0, true).format(shown) + " of " : "") + nf(0, 0, true).format(total) + (total === 1 ? " row" : " rows") + " · " +
+        var countText = view.transposed && state.filter.trim()
+          ? nf(0, 0, true).format(shown) + " of " + nf(0, 0, true).format(view.totalFields) + " fields"
+          : (state.filter ? nf(0, 0, true).format(shown) + " of " : "") + nf(0, 0, true).format(total) + (total === 1 ? " row" : " rows");
+        opts.onCount((asOf ? "latest " + asOf + " · " : "") + countText + " · " +
           (visCols.length < nAll ? visCols.length + " of " + nAll + " columns" : visCols.length + " columns"));
       }
     }

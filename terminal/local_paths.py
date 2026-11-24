@@ -117,7 +117,14 @@ def ensure() -> Path:
 def saved_ports() -> dict:
     """Ports remembered by the last `launcher.py start` ({'v5': 6900, 'v4': 6901, 'ui': 6950}), or {}."""
     try:
-        return {k: int(v) for k, v in json.loads(PORTS_FILE.read_text(encoding="utf-8")).items() if k in ("v5", "v4", "ui")}
+        raw = json.loads(PORTS_FILE.read_text(encoding="utf-8"))
+        out = {}
+        for k, v in raw.items():
+            if k in ("v5", "v4", "ui") and not isinstance(v, bool):
+                p = int(v)
+                if 1 <= p <= 65535:
+                    out[k] = p
+        return out
     except (OSError, ValueError, TypeError, AttributeError):
         return {}
 
@@ -149,6 +156,15 @@ def prune_local(now: float | None = None, max_cache_mb: float = 150.0) -> int:
                     gone += 1
             except OSError:
                 pass
+    for stale_dir in (CACHE_DIR, STATE_DIR, RUN_DIR):
+        if stale_dir.exists():
+            for f in stale_dir.rglob("*.tmp*"):
+                try:
+                    if f.is_file() and now - f.stat().st_mtime > 86400:
+                        f.unlink()
+                        gone += 1
+                except OSError:
+                    pass
     cap = int(max_cache_mb * 1024 * 1024)
     if cap > 0 and CACHE_DIR.exists():
         evictable = []

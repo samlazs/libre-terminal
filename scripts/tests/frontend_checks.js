@@ -1150,6 +1150,84 @@
     }
   })();
 
+  // ---- v0.7.0 checks: 3-state text sort, transposed filter, sparkline zero safety, arrival routing & instant _stmtview
+  (function () {
+    var sortBox = document.createElement("div");
+    T.table(sortBox, {
+      data: [{ name: "Banana", v: 2 }, { name: "Apple", v: 1 }, { name: "Cherry", v: 3 }],
+      colDefs: [{ field: "name", headerName: "Name", cellDataType: "text" }, { field: "v", headerName: "Val", cellDataType: "number" }]
+    });
+    var th0 = function () { return sortBox.querySelector("th"); };
+    var firstCell = function () { return sortBox.querySelector("tbody td").textContent; };
+    ok(firstCell() === "Banana" && th0().getAttribute("aria-sort") === "none", "text column starts unsorted");
+    th0().click();
+    ok(firstCell() === "Apple" && th0().getAttribute("aria-sort") === "ascending", "1st click sorts text ascending");
+    th0().click();
+    ok(firstCell() === "Cherry" && th0().getAttribute("aria-sort") === "descending", "2nd click sorts text descending");
+    th0().click();
+    ok(firstCell() === "Banana" && th0().getAttribute("aria-sort") === "none", "3rd click restores original order (3-state text sort)");
+
+    var tfBox = document.createElement("div"), tfCount = "";
+    var tfTbl = T.table(tfBox, {
+      data: [{ price: 10, eps: 2, margin: 0.2 }],
+      colDefs: [
+        { field: "price", headerName: "Price", cellDataType: "number" },
+        { field: "eps", headerName: "EPS", cellDataType: "number" },
+        { field: "margin", headerName: "Operating Margin", cellDataType: "number" }
+      ],
+      onCount: function (c) { tfCount = c; }
+    });
+    tfTbl.setTranspose(true);
+    tfTbl.setFilter("margin");
+    ok(tfBox.querySelectorAll("tbody tr").length === 1 && /1 of 3 fields/.test(tfCount), "transposed table filters fields cleanly");
+
+    var spBox = document.createElement("div");
+    T.table(spBox, {
+      data: [{ s: "ZERO", hist: [0, 5, 10] }],
+      colDefs: [{ field: "s", cellDataType: "text" }, { field: "hist", renderFn: "sparkline" }]
+    });
+    var spTip = spBox.querySelector("td.spark title");
+    ok(spTip && !/Infinity|NaN/.test(spTip.textContent) && /\(–\)/.test(spTip.textContent), "sparkline zero base handles tooltip without Infinity/NaN");
+
+    var canvasEl = document.getElementById("canvas");
+    var keepCurR = T.S.cur, keepTabR = T.S.tabId, keepCardsR = T.S.cards, keepWidgetsR = T.S.widgets,
+      keepStateR = T.S.state, keepByIdR = T.S.byId, keepGridR = T.S.grid, keepConceptsR = T.S.concepts;
+    var keepChildrenR = canvasEl ? [].slice.call(canvasEl.childNodes) : [];
+    try {
+      T.S.concepts = Object.assign({}, keepConceptsR, {
+        "company.overview": {
+          label: "Company overview",
+          members: [
+            { b: "v5", w: "sec_company_overview_sec_obb", l: "SEC", mk: ["us"] },
+            { b: "v5", w: "tmx_equity_asset_info_obb", l: "TMX", mk: ["ca"], sym: "tmx" }
+          ]
+        }
+      });
+      var caItem = { uid: "ca1", backend: "v5", widgetId: "sec_company_overview_sec_obb", x: 0, y: 0, w: 6, h: 6, params: {}, groups: ["Symbol"] };
+      var caMissing = T.missingWidget(caItem, function () {}, { id: "v5", name: "V5", up: false });
+      canvasEl.appendChild(caMissing.node);
+      T.S.cur = { id: "d:route-test", name: "Route", groups: [{ name: "Symbol", paramName: "symbol", value: "SU.TO" }], tabs: [{ id: "t1", name: "T1", items: [caItem] }] };
+      T.S.tabId = "t1";
+      T.S.state = { v: 4, dashboards: {}, groups: {}, view: {}, libsel: {}, srcsel: {}, colsel: {}, cardview: {}, ui: {} };
+      T.S.byId = Object.assign({}, keepByIdR, { v5: { id: "v5", name: "V5", url: "http://127.0.0.1:6900", up: true } });
+      T.S.grid = { replace: function () {}, remove: function () {}, layout: function () {} };
+      T.S.cards = [caMissing];
+      T.S.widgets = Object.assign({}, keepWidgetsR, {
+        v5: {
+          sec_company_overview_sec_obb: { widgetId: "sec_company_overview_sec_obb", name: "SEC Overview", endpoint: "/api/v1/sec", type: "table", params: [{ paramName: "symbol" }] },
+          tmx_equity_asset_info_obb: { widgetId: "tmx_equity_asset_info_obb", name: "TMX Overview", endpoint: "/api/v1/tmx", type: "table", params: [{ paramName: "symbol" }] }
+        }
+      });
+      T.applyBackendArrival({ id: "v5", name: "V5", up: true });
+      ok(caItem.widgetId === "tmx_equity_asset_info_obb", "applyBackendArrival routes missing Canadian card to TMX on backend recovery");
+    } finally {
+      (T.S.cards || []).forEach(function (c) { if (c && c.destroy) try { c.destroy(); } catch (e) {} });
+      T.S.cur = keepCurR; T.S.tabId = keepTabR; T.S.cards = keepCardsR; T.S.widgets = keepWidgetsR;
+      T.S.state = keepStateR; T.S.byId = keepByIdR; T.S.grid = keepGridR; T.S.concepts = keepConceptsR;
+      if (canvasEl) { canvasEl.textContent = ""; keepChildrenR.forEach(function (n) { canvasEl.appendChild(n); }); }
+    }
+  })();
+
   console.log("frontend checks: " + n + " passed");
   return n;
 })(window.T);

@@ -40,6 +40,7 @@ scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
 terminal/server.py           UI server: static files (ETag/304, gzip), /api/config, /api/warm, /api/dashboards, /api/state, /x/*
+terminal/version.py          Single release version constant (VERSION) shared by server.py, UI, and project_check.py
 terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...) and two-phase cache warmer (warm.py)
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
@@ -170,10 +171,11 @@ Applied in memory at start; no installed file is modified.
   it binds openbb_cboe's shared HTTP cache to a dead event loop.
 - Request guard: Host allow-list (blocks DNS rebinding), Origin must be the UI (any local host name, case-insensitive),
   requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names that origin only, error
-  bodies redacted; `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without
+  bodies redacted, and unhandled pre-header exceptions return sanitized HTTP 500 JSON with CORS headers; `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without
   altering OpenAPI. The UI page carries a Content-Security-Policy (server.py `content_security_policy`).
-- TradingView widget: `install_tvchart_fix` shares TTL caches across `yf_symbol_info` (600 s) and `BarCache` (300 s),
-  never caching empty results, and injects `#obb-tv-loading` / `openbb-chart-ready` into `tvchart_widget_html`.
+- TradingView widget: `install_tvchart_fix` shares bounded LRU caches across `yf_symbol_info` (600 s) and `BarCache` (300 s),
+  never caching empty results, strips non-finite `NaN`/`Inf` bars, repairs active-session daily bars from Yahoo metadata, forces `allow_nan=False` in `pywry` WebSocket frames, delays WebSocket room teardown across transient reloads, adds extra callback workers, and injects `#obb-tv-loading` (with retry/timeout recovery) / `openbb-chart-ready` into `tvchart_widget_html`.
+- Additional reliability patches (`install_blocking_route_offload`, `install_session_leak_fix`, `install_yfinance_options_fix`, `install_tmx_gainers_fix`, `install_nasdaq_empty_json_fix`, `install_user_settings_cache`, `install_disable_mcp_subprocesses`) offload blocking routes to worker threads, reclaim `ClientSession` pools, tolerate empty HTTP 204 bodies and missing TMX string fields, and eliminate unused child MCP subprocesses.
 - Each fix that does not apply logs one `[fixes] WARNING` line; `local/run/patches-<name>.json` feeds the
   "Backend fixes" table in Data Explorers > Data status.
 - Watchdog: if the backend stops answering for 45 s it writes every thread's stack to

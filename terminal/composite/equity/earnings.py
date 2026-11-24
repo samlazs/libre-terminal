@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
+import math
 import re
 import threading
 import time
@@ -134,8 +134,9 @@ def _last_price(sym):
                        start_date=(dt.date.today() - dt.timedelta(days=4)).isoformat()) or []
         except C.CompositeError:
             return None
-        rows = [r for r in rows if r.get("close") is not None]
-        return (str(rows[-1]["date"])[:19], float(rows[-1]["close"])) if rows else None
+        rows = [(str(r.get("date"))[:19], float(r["close"])) for r in rows
+                if isinstance(r.get("close"), (int, float)) and not isinstance(r.get("close"), bool) and math.isfinite(r["close"])]
+        return rows[-1] if rows else None
     return C.cached(("last_price", sym), 60, run)
 
 
@@ -152,15 +153,12 @@ def _consensus_store(sym, date=None, entry=None):
         if date and entry and {k: mine.get(date, {}).get(k) for k in entry} != entry:
             mine[date] = dict(entry, seen=dt.date.today().isoformat())
             data[sym] = dict(sorted(mine.items())[-8:])
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data), encoding="utf-8")
-            os.replace(tmp, path)
+            C._write_json(path, data)
         return dict(data.get(sym, {}))
 
 
 def _f(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
 
 
 def _surprise(actual, est):

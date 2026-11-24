@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import composite as C
 
 def _gpr():
@@ -22,8 +24,9 @@ def _gpr():
                 continue
             d = f"{day[:4]}-{day[4:6]}-{day[6:]}"
             for c in cols:
-                if isinstance(row[idx[c]], float):
-                    out["D_" + c].append([d, round(row[idx[c]], 3)])
+                v = row[idx[c]]
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                    out["D_" + c].append([d, round(v, 3)])
         for c in ("GPRD_ACT", "GPRD_THREAT"):
             if out.get("D_" + c):
                 out[f"D_{c}_MA30"] = [[d, round(v, 3)] for d, v in C._rolling(out["D_" + c], 30)]
@@ -41,8 +44,9 @@ def _gpr():
             if d.year < 1985:
                 continue
             for i in keep:
-                if isinstance(row[i], float) and row[i] == row[i]:
-                    out["M_" + hdr[i]].append([d.replace(day=1).isoformat(), round(row[i], 4)])
+                v = row[i]
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                    out["M_" + hdr[i]].append([d.replace(day=1).isoformat(), round(v, 4)])
         if not out.get("D_GPRD"):
             raise C.CompositeError("The geopolitical risk index file could not be read.")
         return out
@@ -67,8 +71,8 @@ def gpr_table(**_):
         vals = [v for _, v in pts]
         last, m3 = vals[-1], sum(vals[-3:]) / 3
         y12 = sum(vals[-13:-1]) / 12
-        lr = [v for d, v in pts if d >= "2000-01-01"]
-        lr = sum(lr) / len(lr)
+        lr_vals = [v for d, v in pts if d >= "2000-01-01"]
+        lr = sum(lr_vals) / len(lr_vals) if lr_vals else None
         rows.append({"country": "World (global index)" if key == "M_GPR" else GPR_NAMES.get(key[7:], key[7:]), "latest": last, "avg_3m": m3,
                      "vs_12m": last / y12 - 1 if y12 else None, "vs_long_run": m3 / lr - 1 if lr else None, "as_of": pts[-1][0][:7]})
     rows.sort(key=lambda r: (r["country"] != "World (global index)", -(r["vs_long_run"] or -9)))

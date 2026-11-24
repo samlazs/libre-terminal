@@ -7,6 +7,7 @@ import contextvars
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 import re
 import threading
@@ -125,8 +126,11 @@ def cached_text(times):
 
 def mtl_time(t):
     """Epoch seconds -> 'YYYY-MM-DD HH:MM' in Montreal time (every time shown is Montreal time, whatever the machine's zone)."""
-    from zoneinfo import ZoneInfo
-    return dt.datetime.fromtimestamp(t, ZoneInfo("America/Toronto")).strftime("%Y-%m-%d %H:%M")
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.datetime.fromtimestamp(t, ZoneInfo("America/Toronto")).strftime("%Y-%m-%d %H:%M")
+    except Exception:  # noqa: BLE001 - Python builds without tzdata still render UTC instead of 500
+        return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 def cached_disk(name, ttl, fn):
@@ -169,6 +173,17 @@ def cached_disk(name, ttl, fn):
     return val
 
 
+def _clean_json(v):
+    """Recursively replace non-finite floats with None so cache files are always valid RFC 8259 JSON."""
+    if isinstance(v, float):
+        return v if math.isfinite(v) else None
+    if isinstance(v, dict):
+        return {k: _clean_json(val) for k, val in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_clean_json(val) for val in v]
+    return v
+
+
 def _write_json(path, obj):
     """Write a cache file atomically: a temporary name of this process and thread, then a rename, so a reader never
     sees half a file and two writers (a second process on the same local/) never share a temporary file. Best effort:
@@ -176,7 +191,13 @@ def _write_json(path, obj):
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(obj), encoding="utf-8")
+        try:
+            text = json.dumps(obj, allow_nan=False)
+        except (TypeError, ValueError):
+            text = json.dumps(_clean_json(obj), allow_nan=False)
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
         tmp.replace(path)
     except OSError:
         try:

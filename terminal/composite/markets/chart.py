@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import math
 
 import composite as C
 
@@ -149,6 +150,8 @@ def chart(symbol="^GSPC", compare=None, view="price", period="1Y", studies="cand
             notes.append("No drawdown for " + ", ".join(skipped) + " (not a price)")
         notes.append("Drawdown from the running high within the range")
     else:
+        if not others:
+            raise C.CompositeError(f"Could not load a comparison symbol to plot a {view} against {main}.")
         other = others[0]
         o_dates = [r[0] for r in series[other]]
         o_vals = [r[4] for r in series[other]]
@@ -158,6 +161,8 @@ def chart(symbol="^GSPC", compare=None, view="price", period="1Y", studies="cand
             if j < 0 or (dt.date.fromisoformat(r[0]) - dt.date.fromisoformat(o_dates[j])).days > 10:
                 continue
             o = o_vals[j]
+            if not (isinstance(r[4], (int, float)) and isinstance(o, (int, float)) and math.isfinite(r[4]) and math.isfinite(o)):
+                continue
             if view == "ratio":
                 if not o:
                     continue

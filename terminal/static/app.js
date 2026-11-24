@@ -6,7 +6,12 @@
   var STATUS = ["d:explorers", "data-status"];          // where "what is down / which keys are missing" lives
   // The product name is set in one place, PRODUCT_NAME in terminal/server.py, and arrives with /api/config.
   T.product = "Libre Terminal";
-  function paintProduct() { document.title = T.product; $("brand-name").textContent = T.product; }
+  T.version = "";
+  function paintProduct() {
+    document.title = T.product;
+    $("brand-name").textContent = T.product;
+    if (T.version) $("brand-name").title = "v" + T.version;
+  }
 
   var S = {
     backends: [], byId: {}, widgets: {},
@@ -859,9 +864,14 @@
         ss[uid] !== c.item.backend + ":" + c.item.widgetId && validSource(c.item, ss[uid]);
       if (savedSrc) {
         applySource(c.item, ss[uid]);
+        routeItem(c.item, false);
         replaceCard(c.item);
         replaced = true;
       } else if (c.missing && c.backend === b.id) {
+        routeItem(c.item, false);
+        replaceCard(c.item);
+        replaced = true;
+      } else if (c.item && routeItem(c.item, false)) {
         replaceCard(c.item);
         replaced = true;
       } else if (c.backend === b.id || (c.item && c.item.backend === b.id)) {
@@ -1170,7 +1180,7 @@
       if (sg && sg.value) sym = Array.isArray(sg.value) ? sg.value[0] : sg.value;
     }
     var mkt = T.marketOf(sym);
-    function covers(m) { return !m || !m.mk || !mkt || m.mk.indexOf(mkt) >= 0; }
+    function covers(m) { return !!(m && (!m.mk || !mkt || m.mk.indexOf(mkt) >= 0)); }
     var pick = selOf("srcsel", item), pm = pick && c.members.filter(function (m) { return m.b + ":" + m.w === pick; })[0];
     // On tab open, a user's explicit source pick stands even if they chose another market's source for a U.S. ticker
     // (TMX for dual-listed ENB). A listing abroad (SU.TO, SHEL.L, BTC-USD) is routed to a source that covers it, for
@@ -1216,7 +1226,11 @@
     if (value == null) delete v[param]; else v[param] = value;
     if (!Object.keys(v).length) delete d[item.uid];
     saveNow();
-    S.cards.forEach(function (c) { if (c.item === item) { c.redrawParams(); c.refresh(false); } });
+    S.cards.forEach(function (c) {
+      if (c.item !== item) return;
+      if (param.charAt(0) === "_" && c.rerender) c.rerender();
+      else { c.redrawParams(); c.refresh(false); }
+    });
   }
   /** Columns the user picked for a list (state.colsel[dashboard][card]); like source and view picks, not a layout edit. */
   function colsel(item) {
@@ -1478,7 +1492,7 @@
     return S.cur ? S.cur.groups.filter(function (g) { return (item.groups || []).indexOf(g.name) >= 0; }) : [];
   }
   var syncSeq = {};
-  function setGroup(g, v) {
+  function setGroup(g, v, sourceWin) {
     if (typeof v === "string") { v = v.trim(); if (g.paramName === "symbol") v = v.toUpperCase(); }
     if (Array.isArray(v) && !v.length) v = null;
     g.value = v === "" ? null : v;
@@ -1515,6 +1529,7 @@
         if (g.paramName === "symbol" && c.clearLive && c.clearLive()) c.refresh(false);
         return;
       }
+      if (sourceWin && c.ownsFrame && c.ownsFrame(sourceWin)) return;
       if (routeItem(c.item, true)) { replaceCard(c.item); return; }       // the new ticker trades where another source covers it
       if (c.def) { c.redrawParams(g.paramName); c.refresh(false); }
     });
@@ -1903,10 +1918,15 @@
       });
       foot.textContent = total.toLocaleString() + " matching widgets" + (total > shown.length ? " (showing first " + shown.length + ", type to narrow)" : "") + " · Enter adds the highlighted one · Esc closes";
     }
+    function moveHl(next) {
+      if (list.children[hl]) list.children[hl].classList.remove("hl");
+      hl = next;
+      if (list.children[hl]) { list.children[hl].classList.add("hl"); list.children[hl].scrollIntoView({ block: "nearest" }); }
+    }
     input.addEventListener("input", function () { hl = 0; draw(); list.scrollTop = 0; });
     input.addEventListener("keydown", function (e) {
-      if (e.key === "ArrowDown") { hl = Math.min(hl + 1, shown.length - 1); draw(); e.preventDefault(); var n = list.children[hl]; if (n) n.scrollIntoView({ block: "nearest" }); }
-      else if (e.key === "ArrowUp") { hl = Math.max(hl - 1, 0); draw(); e.preventDefault(); var n2 = list.children[hl]; if (n2) n2.scrollIntoView({ block: "nearest" }); }
+      if (e.key === "ArrowDown" && shown.length) { moveHl(Math.min(hl + 1, shown.length - 1)); e.preventDefault(); }
+      else if (e.key === "ArrowUp" && shown.length) { moveHl(Math.max(hl - 1, 0)); e.preventDefault(); }
       else if (e.key === "Enter" && shown[hl]) { m.close(); addWidget(shown[hl]); }
     });
     draw();
@@ -2103,12 +2123,22 @@
     }
     var lookupLater = T.debounce(lookup, 140);
     function pick(e) { close(); input.value = ""; input.blur(); wantPick = false; goTo(e); }
+    function moveHl(next) {
+      var listEl = box && box.querySelector(".pop-list");
+      if (!listEl) { hl = next; return draw(); }
+      if (listEl.children[hl]) listEl.children[hl].classList.remove("hl");
+      hl = next;
+      if (listEl.children[hl]) {
+        listEl.children[hl].classList.add("hl");
+        if (listEl.children[hl].scrollIntoView) listEl.children[hl].scrollIntoView({ block: "nearest" });
+      }
+    }
     input.addEventListener("input", function () { hl = 0; wantPick = false; draw(); lookupLater(); });
     input.addEventListener("focus", function () { index = null; draw(); });
-    input.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== input) close(); }, 120); });
+    input.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== input) { wantPick = false; close(); } }, 120); });
     input.addEventListener("keydown", function (e) {
-      if (e.key === "ArrowDown") { hl = Math.min(hl + 1, shown.length - 1); draw(); e.preventDefault(); }
-      else if (e.key === "ArrowUp") { hl = Math.max(hl - 1, 0); draw(); e.preventDefault(); }
+      if (e.key === "ArrowDown" && shown.length) { moveHl(Math.min(hl + 1, shown.length - 1)); e.preventDefault(); }
+      else if (e.key === "ArrowUp" && shown.length) { moveHl(Math.max(hl - 1, 0)); e.preventDefault(); }
       else if (e.key === "Enter") {
         e.preventDefault();
         var q = input.value.trim();
@@ -2142,7 +2172,7 @@
       })));
     }
     var box = el("div", { class: "modal help-box" }, [
-      el("div", { class: "help-head" }, [el("b", null, (T.product || "Libre Terminal") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
+      el("div", { class: "help-head" }, [el("b", null, (T.product || "Libre Terminal") + (T.version ? " v" + T.version : "") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
       el("div", { class: "help-body" }, [
         sec("Keyboard", [["/ or Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
           ["[  ]", "Previous / next tab"], ["Esc", "Close a maximized card, menu or dialog"], ["?", "This guide"]]),
@@ -2208,17 +2238,36 @@
     fitSidebar();
     window.addEventListener("resize", T.debounce(fitSidebar, 150));
     try {
-      var cfg = await (await fetch("/api/config")).json();
-      if (cfg.product) { T.product = cfg.product; paintProduct(); }
+      var resps = await Promise.all([fetch("/api/config"), fetch("/api/state"), fetch("/api/dashboards")]);
+      var cfgr = resps[0], sr = resps[1], gr = resps[2];
+      var parsed = await Promise.all([
+        cfgr.json(),
+        sr.json().catch(function () { return {}; }),
+        gr.json().catch(function () { return {}; })
+      ]);
+      var cfg = parsed[0], st = parsed[1], gen = parsed[2];
+      T.version = cfg.version || "";
+      if (cfg.product) T.product = cfg.product;
+      paintProduct();
       S.backends = cfg.backends;
       S.backends.forEach(function (b) { S.byId[b.id] = b; });
-      var sr = await fetch("/api/state"), st = await sr.json().catch(function () { return {}; });
+      window.addEventListener("message", function (event) {
+        var d = event && event.data;
+        if (!d || d.type !== "openbb:widget-params:update" || !d.params || !d.params.symbol) return;
+        var okOrigin = event.origin === window.location.origin || S.backends.some(function (b) {
+          if (!b.url) return false;
+          try { return new URL(b.url).origin === event.origin; } catch (e) { return false; }
+        });
+        if (!okOrigin || !S.cur || !Array.isArray(S.cur.groups)) return;
+        var sym = String(d.params.symbol).trim().toUpperCase();
+        var g = S.cur.groups.filter(function (x) { return x.paramName === "symbol"; })[0];
+        if (sym && g && g.value !== sym) setGroup(g, sym, event.source);
+      });
       if (!sr.ok) stateUnusable(st && st.detail);                                  // 503: unreadable, nothing restored
       else if (st && st.dashboards) S.state = Object.assign({ v: 4, dashboards: {}, last: null }, st);
       var restored = sr.headers.get("X-State-Notice");
       if (restored) { try { notice(decodeURIComponent(restored)); } catch (e) { /* malformed header */ } }
       S.state.ui = S.state.ui || {}; S.state.ui.collapsed = S.state.ui.collapsed || {};
-      var gr = await fetch("/api/dashboards"), gen = await gr.json().catch(function () { return {}; });
       if (!gr.ok) notice((gen && gen.detail) || "The built-in dashboards could not be loaded.");
       S.generated = gen.dashboards || [];
       S.concepts = gen.concepts || {};

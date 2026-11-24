@@ -38,7 +38,12 @@ def _usd_values(hist):
 
 def _own_strength(values, base, at):
     """{currency: change from base to at against the other seven, equally weighted, geometric}."""
-    logs = {ccy: math.log(v[at] / v[base]) for ccy, v in values.items()}
+    logs = {}
+    for ccy, v in values.items():
+        vb, va = v[base], v[at]
+        if not (isinstance(vb, (int, float)) and isinstance(va, (int, float)) and math.isfinite(vb) and math.isfinite(va) and vb > 0 and va > 0):
+            raise C.CompositeError(f"Invalid price series for {ccy} while computing currency strength.")
+        logs[ccy] = math.log(va / vb)
     total, n = sum(logs.values()), len(logs) - 1
     return {ccy: math.exp(x - (total - x) / n) - 1 for ccy, x in logs.items()}
 
@@ -59,10 +64,11 @@ def fx_changes(period="1D"):
     own = C._own_strength(values, base, last)
     rows = []
     for ccy, sym in FX_MAJORS.items():
-        usd = values[ccy][last] / values[ccy][base] - 1 if sym else None
+        usd = values[ccy][last] / values[ccy][base] - 1 if (sym and values[ccy][base]) else None
         inverted = sym and C.fx_pair(sym)[0] == "USD"
+        pair = (1 / (1 + usd) - 1) if (inverted and usd is not None and 1 + usd > 0) else usd
         rows.append({"ccy": ccy, "quote": C.fx_pair_label(sym) if sym else None, "own": own[ccy], "usd": usd,
-                     "pair": 1 / (1 + usd) - 1 if inverted else usd})
+                     "pair": pair})
     return {"rows": rows, "dates": dates[base:], "values": {ccy: v[base:] for ccy, v in values.items()}}
 
 

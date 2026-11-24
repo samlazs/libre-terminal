@@ -16,5 +16,12 @@ if not exist ".venv-v5\Scripts\python.exe" (
   exit /b 0
 )
 ".venv-v5\Scripts\python.exe" scripts\launcher.py stop %*
-timeout /t 5 >nul 2>nul
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" (
+  echo.
+  echo Stop exited with code %RC%.
+  pause
+  exit /b %RC%
+)
+timeout /t 3 >nul 2>nul
 exit /b 0

@@ -270,8 +270,11 @@ def global_yields(countries="", **_):
                 continue
             if o.get("y10") is None:
                 continue
-            month = o.get("as_of")             # YYYY-MM: aged from the first of that month, never assumed recent
-            age = (today - dt.date.fromisoformat(month + "-01")).days if month else 9999
+            month = str(o.get("as_of") or "")[:7]             # YYYY-MM: aged from the first of that month, never assumed recent
+            try:
+                age = (today - dt.date.fromisoformat(month + "-01")).days if len(month) == 7 else 9999
+            except ValueError:
+                age = 9999
             new = {"country": C.COUNTRIES[key][0] if key in C.COUNTRIES else name, "key": key, "as_of": month, "m3": o.get("m3"), "y10": o.get("y10"),
                    "y10_chg_1m": o.get("y10_chg_1m"), "y10_chg_1y": o.get("y10_chg_1y"), "freq": "monthly", "age": age, "source": C.curve_label("oecd"),
                    "policy": have.get("policy") if have else None, "_m3_kind": "interbank"}

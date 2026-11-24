@@ -165,7 +165,20 @@
     var next = s.q.shift();
     if (next) next.run(); else s.n--;
   }
-  function wait(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+  function wait(ms, signal) {
+    return new Promise(function (res, rej) {
+      if (signal && signal.aborted) { var ab = new Error("aborted"); ab.name = "AbortError"; return rej(ab); }
+      var tid = setTimeout(function () {
+        if (signal) signal.removeEventListener("abort", onAbort);
+        res();
+      }, ms);
+      function onAbort() {
+        clearTimeout(tid);
+        var ab2 = new Error("aborted"); ab2.name = "AbortError"; rej(ab2);
+      }
+      if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
 
   // OECD limits requests per hour and its data is monthly or slower: keep its answers in the browser for 12 hours.
   var REQUEST_TIMEOUT = 45000;
@@ -253,7 +266,7 @@
         var base = /^https?:\/\/[^/]+/.exec(url);
         var alive = base ? await fetch(base[0] + "/", { mode: "no-cors", signal: signal }).then(function () { return true; }, function () { return false; }) : true;
         if (!alive) { var down = new Error("BACKEND_DOWN"); down.backendDown = true; throw down; }
-        await wait(1500);
+        await wait(1500, signal);
         r = await fetch(url, fetchOpts);
       }
       if (!r.ok) {
@@ -261,7 +274,7 @@
         // Yahoo's client library trips over itself when two requests land at once: one retry clears it.
         // Rate limits are not retried (that only prolongs them).
         if (/database is locked|RemoteDisconnected|Invalid Crumb/i.test(etxt)) {
-          await wait(1200 + Math.random() * 1500);
+          await wait(1200 + Math.random() * 1500, signal);
           r = await fetch(url, fetchOpts);
           etxt = r.ok ? null : await r.text();
         }
@@ -279,7 +292,7 @@
       if (size > 40e6 && !force) { ctl.abort(); var big = new Error("TOO_LARGE"); big.size = size; throw big; }
       var txt = await r.text();
       if (!txt && /[?&]provider=yfinance(&|$)/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
-        await wait(1200);
+        await wait(1200, signal);
         r = await fetch(url, fetchOpts);
         txt = r.ok ? await r.text() : "";
       }
@@ -526,7 +539,7 @@
     var rz = el("div", { class: "w-resize", title: "Resize" });
     node.appendChild(head); node.appendChild(strip); node.appendChild(pbar); node.appendChild(body); node.appendChild(foot); node.appendChild(rz);
 
-    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0;
+    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
     var fileParam = def.params.filter(function (p) { return (p.roles || []).indexOf("fileSelector") >= 0; })[0] || null;
     var lastFileSig = null;          // the other parameters the current document pick was made for
     var isFrame = def.type === "iframe" || def.type === "html";
@@ -649,10 +662,16 @@
         var q = T.optionsQuery(p.optionsParams, eff());
         var url = (/^https?:/.test(p.optionsEndpoint) ? "" : base) + p.optionsEndpoint + qs(q);
         if (!optCache.has(url)) {
-          optCache.set(url, fetch(url).then(function (r) {
-            if (!r.ok) return r.text().then(function (t) { throw new Error(errText(r.status, t)); });
-            return r.json();
-          }).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) { optCache.delete(url); throw e; }));
+          var oCtl = new AbortController(), oTimer = setTimeout(function () { oCtl.abort(); }, 30000);
+          optCache.set(url, fetch(url, { signal: oCtl.signal }).then(function (r) {
+            return r.text().then(function (txt) {
+              if (!r.ok) throw new Error(errText(r.status, txt));
+              if (!txt || !txt.trim()) return [];
+              return JSON.parse(txt);
+            });
+          }).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) {
+            optCache.delete(url); throw e;
+          }).finally(function () { clearTimeout(oTimer); }));
         }
         return optCache.get(url);
       };
@@ -769,10 +788,12 @@
     // ---------- body states ----------
     function clearBody() {
       if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+      if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
       if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
       if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
       if (plotNode && window.Plotly) { try { window.Plotly.purge(plotNode); } catch (e) { /* ignore */ } }
       plotNode = null; tv = null;
+      Array.prototype.forEach.call(body.querySelectorAll("iframe"), function (f) { try { f.src = "about:blank"; } catch (e) { /* ignore */ } });
       blobUrls.forEach(function (u) { URL.revokeObjectURL(u); }); blobUrls = [];
       body.textContent = "";
     }
@@ -877,7 +898,7 @@
       tools.textContent = "";
       var isTable = def.type === "table" || (def.type === "chart" && item.view === "table");
       if (tv && isTable && item.view !== "chart" && !item.compact) {
-        var f = el("input", { type: "search", class: "w-filter", placeholder: "filter…", oninput: T.debounce(function () { tv.setFilter(f.value); }, 180) });
+        var f = el("input", { type: "search", class: "w-filter", placeholder: "filter…", value: filterVal, oninput: T.debounce(function () { filterVal = f.value; tv.setFilter(filterVal); }, 180) });
         tools.appendChild(f);
       }
       if (def.symbolList === "watchlist") {
@@ -983,7 +1004,8 @@
         }
       });
       if (item.flip != null && tv.canTranspose) tv.setTranspose(item.flip);
-      else if (capNote()) tv.setFilter("");   // repaint so the footer can say the result was capped
+      if (filterVal) tv.setFilter(filterVal);
+      else if (capNote() && item.flip == null) tv.setFilter("");   // repaint so the footer can say the result was capped
       if (!tv.baseRows.length) { message("info", noData()); tv = null; }
     }
     function renderQuickChart(data) {
@@ -1121,10 +1143,11 @@
     }
 
     // ---------- loading ----------
-    async function load(force) {
+    async function load(force, silent) {
       pending = false;
       if (force) slowRetries = 0;
       if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
+      var quiet = !!(silent && lastJson !== null && !isFrame);
       var my = ++seq;
       if (abort) abort.abort();
       abort = new AbortController();
@@ -1165,8 +1188,21 @@
             // a terminal view picks the document ({frame} or {message}); the frame then loads the backend's viewer directly,
             // since Firefox calls a redirected frame load cross-site and the backend's request guard refuses it
             message("load", "Loading…");
-            var fr = await fetch(frameSrc, { headers: { Accept: "application/json" }, signal: abort.signal });
-            var fj = await fr.json().catch(function () { return null; });
+            var fCtl = new AbortController(), fTimedOut = false, fMs = T.requestTimeout(frameSrc, false);
+            var fTmo = setTimeout(function () { fTimedOut = true; fCtl.abort(); }, fMs);
+            var onMainAbort = function () { fCtl.abort(); };
+            abort.signal.addEventListener("abort", onMainAbort, { once: true });
+            var fr, fj;
+            try {
+              fr = await fetch(frameSrc, { headers: { Accept: "application/json" }, signal: fCtl.signal });
+              fj = await fr.json().catch(function () { return null; });
+            } catch (fe) {
+              if (fTimedOut) throw new Error("No answer after " + Math.round(fMs / 1000) + " seconds. The source is slow or not responding.");
+              throw fe;
+            } finally {
+              clearTimeout(fTmo);
+              abort.signal.removeEventListener("abort", onMainAbort);
+            }
             if (my !== seq || !alive) return;
             if (!fr.ok || !fj) throw new Error((fj && fj.detail) || "The terminal could not pick a document (HTTP " + fr.status + ").");
             if (Array.isArray(fj.sources)) answerSources = fj.sources;
@@ -1179,24 +1215,37 @@
           clearBody();
           // sandboxed: the embedded page (a backend tool or a provider widget) cannot navigate the terminal itself
           // a frame shows nothing until its page has loaded (the rotation graph stayed black for 30 s+, review C4): say so
-          var wait = el("div", { class: "msg center frame-wait" }, "Loading…");
+          var waitMsg = el("span", null, "Loading…");
+          var waitBox = el("div", { class: "msg center frame-wait" }, [el("div", { class: "spin" }), waitMsg]);
           var fr2 = el("iframe", { title: def.name, referrerpolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin allow-popups allow-forms" });
           fr2.style.visibility = "hidden";
           // the SEC filing viewer is a white document page on another origin: shown inverted to the dark palette (review G1)
           if (/filing_viewer_app/.test(frameSrc)) fr2.classList.add("dark-doc");
-          frameTimer = setTimeout(function () { if (wait.isConnected) wait.textContent = "Still building this chart in the background — it appears here when ready."; }, 12000);
+          frameTimer = setTimeout(function () {
+            if (!alive || my !== seq || !waitBox.isConnected) return;
+            waitMsg.textContent = "Still loading this chart — fetching upstream data…";
+            if (!waitBox.querySelector("button")) waitBox.appendChild(el("button", { class: "btn", type: "button", onclick: function () { refresh(true); } }, "Reload"));
+          }, 12000);
+          // a cold backend build can take longer than the 45 s request timeout: keep the frame loading, only reword the hint
+          frameHardTimer = setTimeout(function () {
+            if (!alive || my !== seq || !waitBox.isConnected) return;
+            waitMsg.textContent = "This view is taking unusually long. It still appears here when ready, or press Reload.";
+          }, 60000);
           fr2.addEventListener("load", function () {
+            if (!alive || my !== seq) return;
             if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
-            if (wait.parentNode) wait.parentNode.removeChild(wait);
+            if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
+            if (waitBox.parentNode) waitBox.parentNode.removeChild(waitBox);
             fr2.style.visibility = "";
           });
           fr2.addEventListener("error", function () {
-            if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
-            if (wait.parentNode) wait.parentNode.removeChild(wait);
-            message("err", "This view did not load.", "Press ↻ to try again.");
+            if (!alive || my !== seq) return;
+            clearBody();
+            body.appendChild(el("div", { class: "msg err center" }, [el("b", null, "Could not load"), el("span", null, "This view did not load."),
+              el("button", { class: "btn", type: "button", onclick: function () { refresh(true); } }, "Retry")]));
           });
           fr2.src = frameSrc;
-          body.appendChild(wait);
+          body.appendChild(waitBox);
           body.appendChild(fr2);
           foot.textContent = ""; drawTools();
           return;
@@ -1208,17 +1257,19 @@
           body.appendChild(ask);
           return;
         }
-        message("load", "Loading…");
-        loadTimer = setTimeout(function () {
-          if (!alive || my !== seq) return;
-          var sp = body.querySelector(".msg span");
-          if (sp) sp.textContent = "Still loading — first build fetches from upstream…";
+        if (!quiet) {
+          message("load", "Loading…");
           loadTimer = setTimeout(function () {
             if (!alive || my !== seq) return;
-            var sp2 = body.querySelector(".msg span");
-            if (sp2) sp2.textContent = "Building in the background — slow datasets take a bit longer on first launch.";
-          }, 10000);
-        }, 5000);
+            var sp = body.querySelector(".msg span");
+            if (sp) sp.textContent = "Still loading — first build fetches from upstream…";
+            loadTimer = setTimeout(function () {
+              if (!alive || my !== seq) return;
+              var sp2 = body.querySelector(".msg span");
+              if (sp2) sp2.textContent = "Building in the background — slow datasets take a bit longer on first launch.";
+            }, 10000);
+          }, 5000);
+        }
         if (isFiles) {
           var files;
           if (fileParam) {
@@ -1239,7 +1290,9 @@
               live[fileParam.paramName] = sel;
               drawParams();
             }
-            var bodyObj = {}; bodyObj[fileParam.paramName] = Array.isArray(sel) ? sel : [sel];
+            var selList = (Array.isArray(sel) ? sel : [sel]).filter(function (v) { return v != null && v !== ""; });
+            if (!selList.length) return message("info", "No documents available for these settings.");
+            var bodyObj = {}; bodyObj[fileParam.paramName] = selList;
             var ft = await postText(endpoint, bodyObj, abort.signal);
             if (!ft) throw new Error("The source returned nothing for this document. It may have moved; try another one from the list.");
             files = JSON.parse(ft);
@@ -1265,9 +1318,10 @@
         renderData();
       } catch (e) {
         if (e && e.name === "AbortError") return;
-        if (my !== seq) return;
+        if (my !== seq || !alive) return;
         if (e && Array.isArray(e.sources) && e.sources.length) { answerSources = e.sources; paintSource(); }
         var msg = e && e.message || String(e);
+        if (quiet) { stamp("auto-refresh failed — showing previous data"); return; }
         if (msg === "TOO_LARGE") {
           foot.textContent = ""; drawTools();
           if (item.compact) { item.compact = false; drawParams(); }
@@ -1278,7 +1332,7 @@
         var backendGone = e && e.backendDown;
         if (!backendGone && /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
           var up = await fetch(base + "/", { mode: "no-cors" }).then(function () { return true; }, function () { return false; });
-          if (my !== seq) return;
+          if (my !== seq || !alive) return;
           backendGone = !up;
           if (up) msg = "upstream failed: the source did not answer (Bad Gateway)";
         }
@@ -1355,13 +1409,14 @@
       measure();
       if ((visible || item.needsKey || item.manual) && pending) { var f = pendingForce; pendingForce = false; load(f); }
     }
-    var ro = new ResizeObserver(T.debounce(function () { checkNarrow(); if (plotNode && window.Plotly && plotNode.data) { try { window.Plotly.Plots.resize(plotNode); } catch (e) { /* ignore */ } } }, 120));
+    var ro = new ResizeObserver(T.debounce(function () { if (!alive) return; checkNarrow(); if (plotNode && window.Plotly && plotNode.data) { try { window.Plotly.Plots.resize(plotNode); } catch (e) { /* ignore */ } } }, 120));
     ro.observe(body);
-    if (typeof def.refetchInterval === "number" && def.refetchInterval >= 30000) timer = setInterval(function () { if (visible && !document.hidden) load(true); }, def.refetchInterval);
+    if (typeof def.refetchInterval === "number" && def.refetchInterval >= 30000) timer = setInterval(function () { if (visible && !document.hidden) load(true, true); }, def.refetchInterval);
 
     function clearLive(changedParam) {
       var had = Object.keys(live).length > 0;
       live = {};
+      filterVal = "";
       if (clearDepParams(changedParam, false)) had = true;
       drawParams(); paintTitle(); paintSource();
       if (had) {
@@ -1377,6 +1432,8 @@
     return {
       node: node, head: head, resize: rz, item: item, def: def,
       refresh: refresh,
+      rerender: function () { if (alive && lastJson !== null && !isFrame) renderData(); else if (alive) refresh(false); },
+      ownsFrame: function (win) { var fr = body.querySelector("iframe"); return !!(fr && fr.contentWindow === win); },
       check: check,
       /** Reload only if the last attempt failed (used when a backend comes back). */
       retryIfFailed: function () { if (failed && alive) { failed = false; pending = true; check(); } },
@@ -1401,7 +1458,7 @@
         drawParams();
         if ((isFrame || isFiles) && node.isConnected) load(false); else refresh(false);
       },
-      destroy: function () { alive = false; if (abort) abort.abort(); ro.disconnect(); if (timer) clearInterval(timer); clearBody(); }
+      destroy: function () { alive = false; ++seq; if (abort) abort.abort(); ro.disconnect(); if (timer) clearInterval(timer); clearBody(); }
     };
   };
 

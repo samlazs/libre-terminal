@@ -207,7 +207,7 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
                 row["beta"] = None if b is None else round(b, 2)
         if len(px) > 1:
             row["max_dd"] = round(max_drawdown(px), 2)
-            row["ret_1y"] = round((px[-1] / px[0] - 1) * 100, 2)
+            row["ret_1y"] = round((px[-1] / px[0] - 1) * 100, 2) if (px[0] and px[0] > 0 and math.isfinite(px[0]) and math.isfinite(px[-1])) else None
         rows.append(row)
     if not any(r["vol"] is not None for r in rows):
         raise C.CompositeError("Too few common prices to compute risk statistics.")
@@ -247,7 +247,8 @@ def rolling_corr(spot, diff, window=CORR_WINDOW):
     """Correlation of daily spot log returns with daily differential changes over the last `window` shared dates."""
     s, d = dict(spot), dict(diff)
     days = sorted(set(s) & set(d))
-    ch = [(days[i], math.log(s[days[i]] / s[days[i - 1]]), d[days[i]] - d[days[i - 1]]) for i in range(1, len(days)) if s[days[i - 1]]]
+    ch = [(days[i], math.log(s[days[i]] / s[days[i - 1]]), d[days[i]] - d[days[i - 1]])
+          for i in range(1, len(days)) if s[days[i - 1]] and s[days[i - 1]] > 0 and s[days[i]] and s[days[i]] > 0]
     out = []
     for i in range(window, len(ch) + 1):
         w = ch[i - window:i]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
+import math
 
 import composite as C
 
@@ -36,9 +37,10 @@ def _bis_rates(flow, start):
             v = float(row.get("OBS_VALUE") or "nan")
         except ValueError:
             continue
-        if v != v:
+        area, per = row.get("REF_AREA"), row.get("TIME_PERIOD")
+        if not math.isfinite(v) or not area or not per:
             continue
-        out.setdefault(row.get("REF_AREA"), []).append((row.get("TIME_PERIOD"), v))
+        out.setdefault(area, []).append((per, v))
     for k in out:
         out[k].sort()
     return out

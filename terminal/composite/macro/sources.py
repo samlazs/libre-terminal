@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import re
 import time
@@ -27,9 +28,12 @@ def _fred(ids, start):
         for r in j.get("results") or []:
             d = str(r.get("date"))[:10]
             for i in ids:
-                v = r.get(i)
-                if v is not None:
-                    out[i].append([d, float(v)])
+                try:
+                    vf = float(r.get(i))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(vf):
+                    out[i].append([d, vf])
         if not any(out.values()):
             raise C.CompositeError("FRED returned no data for: " + ", ".join(ids))
         meta = (j.get("extra") or {}).get("results_metadata") or {}
@@ -216,7 +220,7 @@ def _fred_csv(sid, start):
             rows = fred_public.observations(sid, start=start[:4] + "-01-01")
         except fred_public.FredPublicError as e:
             raise C.CompositeError(f"FRED has no series '{sid}'." if e.missing else str(e)) from None
-        return [[d, v] for d, v in rows if v is not None]
+        return [[d, v] for d, v in rows if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
     pts = C.cached_disk("fredcsv_" + re.sub(r"[^A-Za-z0-9]+", "_", sid) + "_" + start[:4], 3 * 3600, run)
     return [p for p in pts if p[0] >= start[:10]]
 

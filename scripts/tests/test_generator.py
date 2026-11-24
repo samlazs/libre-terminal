@@ -22,6 +22,8 @@ def market_of(sym):
         return ""
     if re.match(r"^(BTC|ETH|SOL|XRP|PAXG|MATIC|BNB|ADA|DOGE)(-?USDT?)?$", s):
         return "crypto"
+    if re.match(r"^[A-Z0-9]{2,10}-(USD|USDT|USDC|EUR|GBP|JPY|CAD|AUD|CHF|BTC|ETH)$", s):
+        return "crypto"
     if re.search(r"\.(TO|V|NE|CN)$", s):
         return "ca"
     if re.search(r"\.(ST|HE|CO|IC)$", s) or re.match(r"^[A-Z0-9]+ [A-Z]$", s):
@@ -40,8 +42,9 @@ def route(cid, sym):
     return None
 
 
-check(market_of("AAPL") == "us" and market_of("BRK.B") == "us" and market_of("^GSPC") == "us", "U.S. tickers")
+check(market_of("AAPL") == "us" and market_of("BRK.B") == "us" and market_of("BRK-B") == "us" and market_of("^GSPC") == "us", "U.S. tickers")
 check(market_of("SU.TO") == "ca" and market_of("BTC") == "crypto" and market_of("BTC-USD") == "crypto", "Canadian and crypto tickers")
+check(market_of("LTC-USD") == "crypto" and market_of("ETH-EUR") == "crypto" and market_of("AVAX-USDC") == "crypto", "crypto pairs beyond majors")
 check(market_of("VOLV-B.ST") == "nordic" and market_of("SAP.DE") == "other", "Nordic and other listings")
 for k in bd.OPT_LABELS:
     cid = "options." + k
