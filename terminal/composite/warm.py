@@ -169,12 +169,15 @@ def _warm_geo_energy() -> None:
             list(ex.map(lambda s: C._safe(C._eia_one, s), eia))
 
 
-def warm():
+def warm(force: bool = False):
     """Pre-load landing views & charts in parallel, then secondary caches in the background."""
-    global _warm_started, _warm_thread
+    global _warm_started, _warm_thread, _warm_gen, _warm_state
     with _warm_lock:
-        if _warm_started:
+        if _warm_started and not force:
             return _warm_thread
+        if force:
+            _warm_gen += 1
+            _warm_state = _initial_state()
         _warm_started = True
         gen = _warm_gen
         _warm_state["phase"] = "landing"
@@ -218,6 +221,7 @@ def warm():
 
     t = threading.Thread(target=run, daemon=True, name="terminal-warm")
     with _warm_lock:
-        _warm_thread = t
+        if gen == _warm_gen:
+            _warm_thread = t
     t.start()
     return t

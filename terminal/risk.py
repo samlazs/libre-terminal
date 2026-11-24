@@ -75,11 +75,13 @@ def returns(closes):
 
 
 def _mean(x):
+    if not x:
+        return None
     return sum(x) / len(x)
 
 
 def corr(a, b):
-    if len(a) < 3:
+    if len(a) < 3 or len(b) < 3:
         return None
     ma, mb = _mean(a), _mean(b)
     sa = math.sqrt(sum((x - ma) ** 2 for x in a))
@@ -88,8 +90,10 @@ def corr(a, b):
 
 
 def stdev(x):
+    if not x or len(x) < 2:
+        return None
     m = _mean(x)
-    return math.sqrt(sum((v - m) ** 2 for v in x) / (len(x) - 1)) if len(x) > 1 else None
+    return math.sqrt(sum((v - m) ** 2 for v in x) / (len(x) - 1))
 
 
 def max_drawdown(values):
@@ -103,6 +107,8 @@ def max_drawdown(values):
 
 
 def beta(r, rb):
+    if not r or not rb:
+        return None
     mb = _mean(rb)
     var = sum((y - mb) ** 2 for y in rb)
     if not var:
@@ -186,7 +192,8 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
         bills = [v for d, v in tb.get("DGS3MO", []) if v is not None and d >= start.isoformat()]
     except C.CompositeError:
         bills = []
-    rf = _mean(bills) / 100 if bills else None
+    rf_pct = _mean(bills)
+    rf = rf_pct / 100 if rf_pct is not None else None
     rows = []
     rb = rets.get(bench) or {}
     for s in syms:

@@ -1,4 +1,4 @@
-"""Paced live health runner for all placed cards (promoted from local/tools/review).
+"""Paced live health runner for all placed cards.
 
 Standard library only; never reads/writes outside local/ (plus local/notes/ reports)
 and redacts all secrets via terminal/redact.py before writing CSV, JSON, or logs.

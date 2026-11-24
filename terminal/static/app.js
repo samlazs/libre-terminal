@@ -875,7 +875,8 @@
         replaceCard(c.item);
         replaced = true;
       } else if (c.backend === b.id || (c.item && c.item.backend === b.id)) {
-        c.retryIfFailed();
+        if (c.isFrame || (c.def && (c.def.type === "iframe" || c.def.type === "html"))) c.refresh(true);
+        else c.retryIfFailed();
       }
     });
     if (replaced) { paintGroups(); paintEmpty(); }
@@ -887,30 +888,42 @@
   }
   T.backendArrived = backendArrived;
   T.applyBackendArrival = applyBackendArrival;
+  function stopWatchBackend(b) {
+    if (!b) return;
+    b._watchGen = (b._watchGen || 0) + 1;
+    if (b._watchTimer) { clearTimeout(b._watchTimer); b._watchTimer = null; }
+    b.watching = false;
+  }
   /**
    * A backend stopped answering (crash, restart, not started yet): say so once in the banner, poll it, and when it
    * answers again reload what it serves (cards that failed retry; cards it never described are rebuilt).
    */
   function watchBackend(b) {
-    if (b.watching) return;
+    if (!b || b.watching || S.restarting) return;
     b.watching = true;
+    var gen = (b._watchGen = (b._watchGen || 0) + 1);
     var tries = 0;
     /** Is the launcher still restarting this backend? "stopped" = its supervisor gave up: stop polling and say so. */
     function supervised() {
       if (tries % 4 !== 1) return Promise.resolve(b.service || "running");
       return fetchT("/api/services", 4000).then(function (r) { return r.ok ? r.json() : {}; }).then(function (j) {
+        if (!b.watching || b._watchGen !== gen || S.restarting) return b.service || "running";
         var s = j && j[b.id];
         b.service = s ? s.state : "running"; b.serviceWhy = s && s.why || "";
         return b.service;
       }, function () { return b.service || "running"; });
     }
     (function poll() {
-      setTimeout(function () {
+      b._watchTimer = setTimeout(function () {
+        b._watchTimer = null;
+        if (!b.watching || b._watchGen !== gen || S.restarting) return;
         tries++;
         fetchT(b.url + "/", 4000).then(function (r) { return r.ok || r.status < 500; }, function () { return false; }).then(function (ok) {
+          if (!b.watching || b._watchGen !== gen || S.restarting) return;
           if (!ok) {
             var before = b.service;
             return supervised().then(function (state) {
+              if (!b.watching || b._watchGen !== gen || S.restarting) return;
               if (state === "not started" && before !== state && S.cur && S.cards.some(function (c) { return c.missing && c.backend === b.id; })) openTab(S.tabId);
               if (state === "stopped") {                              // the launcher gave up: no more polling
                 b.watching = false; paintStatus();
@@ -924,6 +937,7 @@
           b.service = "running";
           var hadDefs = !!(S.widgets[b.id] && Object.keys(S.widgets[b.id]).length);
           (hadDefs ? Promise.resolve() : loadBackend(b)).then(function () {
+            if (b._watchGen !== gen || S.restarting) return;
             b.watching = false;
             if (hadDefs) { b.up = true; paintStatus(); backendArrived(b); }      // loadBackend repaints and redraws itself
             else if (!b.up) watchBackend(b);
@@ -942,14 +956,15 @@
     var box = $("backend-status"); box.textContent = "";
     box.className = "be-wrap"; box.title = "Data status: sources that are down upstream and API keys that are not set";
     box.onclick = function () { openDashboard(STATUS[0], STATUS[1]); };
-    var down = [], stopped = [], absent = [];
+    var down = [], stopped = [], absent = [], restarting = [];
     S.backends.forEach(function (b) {
-      var st = b.up ? b.count + " widgets" : b.up === false ? (b.service === "stopped" ? "stopped" : b.service === "not started" ? "not started" : "offline") : "connecting…";
+      var st = b.up ? b.count + " widgets" : b.up === false ? (b.service === "restarting" ? "restarting…" : b.service === "stopped" ? "stopped" : b.service === "not started" ? "not started" : "offline") : "connecting…";
       box.appendChild(el("div", { class: "be " + (b.up ? "up" : b.up === false ? "down" : ""), title: (b.url || "this server") + (b.serviceWhy ? " · " + b.serviceWhy : "") }, [el("i"), b.name, el("span", { class: "n" }, st)]));
-      if (b.up === false) (b.service === "stopped" ? stopped : b.service === "not started" ? absent : down).push(b.name);
+      if (b.up === false) (b.service === "restarting" ? restarting : b.service === "stopped" ? stopped : b.service === "not started" ? absent : down).push(b.name);
     });
     var ban = $("banner"), parts = (S.notices || []).map(function (t) { return el("div", null, t); });
     function are(list) { return list.join(" and ") + (list.length > 1 ? " are" : " is"); }
+    if (restarting.length) parts.push(el("div", null, "Restarting data services… Cards reload automatically when ready."));
     if (down.length) parts.push(el("div", null, [are(down) + " not answering (starting or restarting). Its cards load by themselves when it is back; if it stays down for minutes, double-click ", el("code", null, "Start.cmd"), " (or start.sh). Logs: local/logs."]));
     if (stopped.length) parts.push(el("div", null, [are(stopped) + " stopped: it crashed repeatedly and the launcher no longer restarts it, so this page has stopped waiting for it. Look at local/logs, then start the terminal again with ", el("code", null, "Start.cmd"), " (or start.sh) and reload this page."]));
     if (absent.length) parts.push(el("div", null, [are(absent) + " not running (not started by the launcher). Its cards stay empty; start the terminal with ", el("code", null, "Start.cmd"), " (or start.sh)."]));
@@ -2179,7 +2194,7 @@
         sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; an SEC CIK (0000320193) or an equity CUSIP (037833100) for its listing; a topic (cpi, sofr, options) for that card; a bond CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
           ["Pickers", "Symbol, Country and Bank boxes at the top drive linked cards. Clicking a ticker, country, CUSIP, CRD, RSSD or bill id in a table fills them too."]]),
         sec("Work with cards", [["Source: X ▾", "Click the header source to switch providers for the same data or open the source's page."],
-          ["↻ Refresh", "Card ↻ bypasses server and browser cache for that card; top-bar ↻ reloads all cards on the current tab."],
+          ["↻ Refresh", "Card ↻ bypasses server and browser cache for that card; top-bar ↻ reloads all cards on the current tab; Restart (next to Refresh) restarts the data services if charts or data stop responding."],
           ["Dataset", "Library cards (EIA, BLS, USDA, regional Feds, FFIEC) hold a family of datasets and remember your pick."],
           ["Columns", "Lists open with key columns. ⋯ › Columns shows or hides the rest; Default columns resets."],
           ["⤓ Export", "Copy a table for Excel, download CSV, or save a chart as PNG (exports include source and date)."],
@@ -2198,6 +2213,101 @@
     var m = T.modal(box);
   }
 
+  async function restartServices() {
+    if (S.restarting) return;
+    S.restarting = true;
+    var btn = $("btn-restart");
+    if (btn) { btn.classList.add("busy"); btn.disabled = true; btn.textContent = "Restarting…"; }
+    function restoreBtn() {
+      S.restarting = false;
+      if (btn) { btn.classList.remove("busy"); btn.disabled = false; btn.textContent = "Restart"; }
+    }
+    if (T.clearAllCaches) T.clearAllCaches();
+    T.toast("Restarting data services…");
+    var active = S.backends.filter(function (b) { return b.id !== "x" && b.url; });
+    active.forEach(function (b) { stopWatchBackend(b); b.up = false; b.service = "restarting"; });
+    paintStatus();
+    try {
+      var res = await fetch("/api/services/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target: "backends" })
+      });
+      var j = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(j.detail || j.error || ("HTTP " + res.status));
+      var seq = j.restart_seq || 0;
+      var deadline = Date.now() + 90000;
+      var started = Date.now();
+      var lastInfo = null;
+      var completed = false;
+      while (Date.now() < deadline) {
+        await new Promise(function (r) { setTimeout(r, 1500); });
+        var sr = await fetchT("/api/services", 4000).catch(function () { return null; });
+        var sj = sr && sr.ok ? await sr.json().catch(function () { return null; }) : null;
+        if (!sj) continue;
+        lastInfo = sj;
+        var done = sj.restart && !sj.restart.restarting && (!seq || sj.restart.seq >= seq);
+        var fallbackReady = !sj.restart && (Date.now() - started >= 3000) && sj.v5 && sj.v5.reachable;
+        if (done || fallbackReady) { completed = true; break; }
+      }
+      if (lastInfo && lastInfo.restart && lastInfo.restart.last_ok === false) {
+        restoreBtn();
+        T.toast("Restart failed: " + (lastInfo.restart.error || "check local/logs"), true);
+        active.forEach(function (b) { b.service = "stopped"; watchBackend(b); });
+        paintStatus();
+        return;
+      }
+      var failedBackends = [];
+      var loadedFresh = {};
+      await Promise.all(active.map(async function (b) {
+        var ok = await fetchT(b.url + "/", 4000).then(function (r) { return r.ok || r.status < 500; }, function () { return false; });
+        if (!ok) {
+          b.up = false;
+          b.service = "offline";
+          failedBackends.push(b);
+          return;
+        }
+        b.service = "running";
+        var hadDefs = !!(S.widgets[b.id] && Object.keys(S.widgets[b.id]).length);
+        if (!hadDefs) {
+          await loadBackend(b);
+          if (b.up) { loadedFresh[b.id] = true; }
+          else { b.service = "offline"; failedBackends.push(b); }
+        } else {
+          b.up = true;
+        }
+      }));
+      restoreBtn();
+      failedBackends.forEach(watchBackend);
+      paintStatus();
+      if (failedBackends.length) {
+        T.toast(completed
+          ? "Some data services are still offline — waiting for them to come back"
+          : "Restart timed out — waiting for data services to come back", true);
+        if (failedBackends.length < active.length) {
+          S.cards.slice().forEach(function (c) {
+            if (!c.missing && !loadedFresh[c.backend]) c.refresh(true);
+          });
+        }
+        return;
+      }
+      if (!completed) {
+        T.toast("Restart status check timed out — data services are responding, reloading widgets", true);
+      } else {
+        T.toast("Data services restarted — reloading widgets");
+      }
+      S.cards.slice().forEach(function (c) {
+        if (!c.missing && !loadedFresh[c.backend]) c.refresh(true);
+      });
+    } catch (e) {
+      restoreBtn();
+      T.toast("Restart failed: " + (e && e.message ? e.message : "check local/logs"), true);
+      active.forEach(function (b) { b.up = false; b.service = "offline"; watchBackend(b); });
+      paintStatus();
+    }
+  }
+  T.restartServices = restartServices;
+
   async function boot() {
     S.grid = T.grid($("canvas"), $("canvas-wrap"), { onChange: function () { touch(); checkAll(); } });
     var lazy = T.debounce(checkAll, 80);
@@ -2205,6 +2315,8 @@
     window.addEventListener("resize", lazy);
     $("btn-add").addEventListener("click", function () { openLibrary(); });
     $("btn-refresh").addEventListener("click", function () { S.cards.forEach(function (c) { c.refresh(true); }); T.toast("Reloading " + S.cards.length + " widgets"); });
+    var rstBtn = $("btn-restart");
+    if (rstBtn) rstBtn.addEventListener("click", restartServices);
     $("btn-more").addEventListener("click", moreMenu);
     initGoto();
     T.lists.changed = function () { S.cards.forEach(function (c) { if (c.def && c.def.symbolList) { c.redrawParams(); c.refresh(false); } }); };

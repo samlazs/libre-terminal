@@ -4,7 +4,7 @@
  * open Libre Terminal page (it swaps T.S.state briefly for the view-preference checks and puts it back; nothing is saved).
  * It prints "frontend checks: N passed" or throws on the first failure.
  */
-(function (T) {
+window.__fcPromise = (async function (T) {
   "use strict";
   var n = 0;
   function ok(cond, what) { if (!cond) throw new Error("FAILED: " + what); n++; }
@@ -606,12 +606,13 @@
   ok(T.monthKey("Nov 2026") === 202611 && T.monthKey("Oct 2026") < T.monthKey("Nov 2026"), "readable recommendation months sort chronologically");
   ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
     && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
-    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 60000
-    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 60000
-    && T.requestTimeout("/x/policy_path?currency=USD", false) === 60000
-    && T.requestTimeout("/x/global_yields?countries=g10", false) === 60000
-    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 60000
-    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 60000
+    && T.requestTimeout("/x/chart?symbol=AAPL", false) === 60000
+    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 70000
+    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 70000
+    && T.requestTimeout("/x/policy_path?currency=USD", false) === 70000
+    && T.requestTimeout("/x/global_yields?countries=g10", false) === 70000
+    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 70000
+    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 70000
     && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
     "bounded per-card timeouts by route/provider");
   ok(T.boardTier(1200) === 0 && T.boardTier(700) === 1 && T.boardTier(520) === 2 && T.boardTier(400) === 3 && T.boardTier(0) === 0,
@@ -1038,10 +1039,10 @@
       var closeHelp = document.querySelector(".help-box .icon-btn");
       if (closeHelp) closeHelp.click();
 
-      // v0.6.0 UX checks: Stage 3 requestTimeout 60s, / focuses goto, double-click header maximizes, chart footer note helper
-      ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 60000
-        && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 60000
-        && T.requestTimeout("/x/gex_strike?symbol=SPY") === 60000, "Stage 3 composite routes get 60s requestTimeout");
+      // v0.6.0 UX checks: Stage 3 requestTimeout 70s, / focuses goto, double-click header maximizes, chart footer note helper
+      ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 70000
+        && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 70000
+        && T.requestTimeout("/x/gex_strike?symbol=SPY") === 70000, "Stage 3 composite routes get 70s requestTimeout");
       ok(T.chartFooterNote({ warning: "Test warning", convention: "5Y window" }) === "⚠ Test warning · 5Y window"
         && T.chartFooterNote({ convention: "5Y window" }) === "5Y window"
         && T.chartFooterNote({ convention: "5Y window", layout: { annotations: [{ text: "5Y window" }] } }) === ""
@@ -1227,6 +1228,343 @@
       if (canvasEl) { canvasEl.textContent = ""; keepChildrenR.forEach(function (n) { canvasEl.appendChild(n); }); }
     }
   })();
+
+  // ---- reliability hardening: exports, empty plotFigure, frame arrival & postMessage origin, hidden resize, awaited getJSON & restartServices
+  ok(typeof T.clearAllCaches === "function", "T.clearAllCaches is exported");
+  ok(typeof T.getJSON === "function", "T.getJSON is exported");
+  ok(document.getElementById("btn-restart") !== null, "index.html contains #btn-restart");
+  ok(typeof T.restartServices === "function", "app.js defines and exposes restartServices for #btn-restart");
+
+  (function () {
+    var pfNode = document.createElement("div");
+    T.plotFigure(pfNode, { data: [], layout: {} });
+    ok(/No chart data returned/.test(pfNode.textContent || ""), "plotFigure renders clear message for empty data: []");
+
+    var stageF = document.createElement("div");
+    stageF.style.cssText = "position:fixed;left:-9999px;top:0;width:600px;height:400px";
+    document.body.appendChild(stageF);
+    try {
+      var makeStubCtx = function (def) {
+        return {
+          item: { uid: "f_" + def.widgetId, backend: "v5", widgetId: def.widgetId, params: {} },
+          def: def, backend: { id: "v5", url: "http://127.0.0.1:6900" }, scroller: stageF,
+          groupOf: function () { return null; }, groupsOf: function () { return []; }, overrides: function () { return {}; },
+          setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; }, alternatives: function () { return []; },
+          hasFreeOnTab: function () { return false; }, onChange: function () {}, onRemove: function () {}, relayout: function () {}
+        };
+      };
+      var wIframe = T.widget(makeStubCtx({ widgetId: "tv_i", name: "TV Iframe", endpoint: "/api/v1/tv_i", type: "iframe", params: [] }));
+      var wHtml = T.widget(makeStubCtx({ widgetId: "tv_h", name: "TV Html", endpoint: "/api/v1/tv_h", type: "html", params: [] }));
+      var wTable = T.widget(makeStubCtx({ widgetId: "tbl_i", name: "Tbl", endpoint: "/api/v1/tbl", type: "table", params: [] }));
+      ok(wIframe.isFrame === true && wHtml.isFrame === true && wTable.isFrame === false, "T.widget exposes isFrame for iframe/html cards only");
+
+      // postMessage origin check & cleanup on destroy()
+      stageF.appendChild(wIframe.node);
+      wIframe.refresh(true);
+      var fr2 = wIframe.node.querySelector("iframe");
+      ok(fr2 && wIframe.node.querySelector(".frame-wait") !== null, "iframe card renders loading waitBox before ready message");
+      window.dispatchEvent(new MessageEvent("message", { data: { type: "openbb-chart-ready" }, origin: "http://evil.example", source: fr2.contentWindow }));
+      ok(wIframe.node.querySelector(".frame-wait") !== null, "onChartMsg rejects postMessage from unexpected origin");
+      window.dispatchEvent(new MessageEvent("message", { data: { type: "openbb-chart-ready" }, origin: "http://127.0.0.1:6900", source: fr2.contentWindow }));
+      ok(wIframe.node.querySelector(".frame-wait") === null && fr2.style.visibility === "", "onChartMsg accepts postMessage from iframe origin and reveals chart");
+
+      stageF.appendChild(wHtml.node);
+      wHtml.refresh(true);
+      var frH = wHtml.node.querySelector("iframe");
+      var frHWin = frH && frH.contentWindow;
+      wHtml.destroy();
+      window.dispatchEvent(new MessageEvent("message", { data: { type: "openbb-chart-ready" }, origin: "http://127.0.0.1:6900", source: frHWin }));
+      ok(wHtml.node.querySelector(".frame-wait") === null, "destroy() cleans up frame body and chart message listener cleanly");
+
+      wIframe.destroy();
+      wTable.destroy();
+    } finally {
+      stageF.remove();
+    }
+
+    // applyBackendArrival refreshes iframe/html cards with force=true and calls retryIfFailed on data cards
+    var canvasEl = document.getElementById("canvas");
+    var keepCurF = T.S.cur, keepTabF = T.S.tabId, keepCardsF = T.S.cards, keepWidgetsF = T.S.widgets,
+      keepStateF = T.S.state, keepByIdF = T.S.byId, keepGridF = T.S.grid;
+    try {
+      var refIframe = [], refHtml = [], refTbl = 0, retriedTbl = 0;
+      var itIf = { uid: "if1", backend: "v5", widgetId: "w_if", params: {} };
+      var itHt = { uid: "ht1", backend: "v5", widgetId: "w_ht", params: {} };
+      var itTb = { uid: "tb1", backend: "v5", widgetId: "w_tb", params: {} };
+      T.S.cur = { id: "d:frame-arr", name: "FrameArr", groups: [], tabs: [{ id: "t1", name: "T1", items: [itIf, itHt, itTb] }] };
+      T.S.tabId = "t1";
+      T.S.state = { v: 4, dashboards: {}, groups: {}, view: {}, libsel: {}, srcsel: {}, colsel: {}, cardview: {}, ui: {} };
+      T.S.byId = Object.assign({}, keepByIdF, { v5: { id: "v5", name: "V5", url: "http://127.0.0.1:6900", up: true } });
+      T.S.grid = { replace: function () {}, remove: function () {}, layout: function () {} };
+      T.S.widgets = Object.assign({}, keepWidgetsF, {
+        v5: {
+          w_if: { widgetId: "w_if", endpoint: "/api/v1/if", type: "iframe", params: [] },
+          w_ht: { widgetId: "w_ht", endpoint: "/api/v1/ht", type: "html", params: [] },
+          w_tb: { widgetId: "w_tb", endpoint: "/api/v1/tb", type: "table", params: [] }
+        }
+      });
+      T.S.cards = [
+        { item: itIf, def: T.S.widgets.v5.w_if, isFrame: true, backend: "v5", refresh: function (f) { refIframe.push(f); }, retryIfFailed: function () {}, destroy: function () {} },
+        { item: itHt, def: T.S.widgets.v5.w_ht, isFrame: false, backend: "v5", refresh: function (f) { refHtml.push(f); }, retryIfFailed: function () {}, destroy: function () {} },
+        { item: itTb, def: T.S.widgets.v5.w_tb, isFrame: false, backend: "v5", refresh: function () { refTbl++; }, retryIfFailed: function () { retriedTbl++; }, destroy: function () {} }
+      ];
+      T.applyBackendArrival({ id: "v5", name: "V5", up: true });
+      ok(refIframe.length === 1 && refIframe[0] === true && refHtml.length === 1 && refHtml[0] === true
+        && refTbl === 0 && retriedTbl === 1,
+        "applyBackendArrival calls refresh(true) on iframe and html cards and retryIfFailed() on data cards");
+    } finally {
+      T.S.cur = keepCurF; T.S.tabId = keepTabF; T.S.cards = keepCardsF; T.S.widgets = keepWidgetsF;
+      T.S.state = keepStateF; T.S.byId = keepByIdF; T.S.grid = keepGridF;
+    }
+  })();
+
+  // Wait for initial UI boot() before running awaited fetch-stubbed integration checks
+  for (var bw = 0; bw < 80 && !T.S.booted; bw++) {
+    await new Promise(function (r) { setTimeout(r, 50); });
+  }
+  ok(!!T.S.booted, "UI booted before async integration checks");
+
+  // Awaited getJSON retry, non-OK preservation, OECD no-retry & hidden-tab needPlotResize checks
+  var origFetch = window.fetch;
+  try {
+    T.clearAllCaches();
+    var calls503 = 0;
+    window.fetch = async function (u, opts) {
+      if (String(u).indexOf("/api/v1/test_503_") >= 0) {
+        calls503++;
+        if (calls503 === 1) return { ok: false, status: 503, headers: new Headers(), text: async function () { return "Service Unavailable"; } };
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"ok":true}'; } };
+      }
+      return origFetch(u, opts);
+    };
+    var res503 = await T.getJSON("http://127.0.0.1:6950/api/v1/test_503_" + Date.now(), true);
+    ok(calls503 === 2 && res503 && res503.ok === true, "getJSON retries once on HTTP 503");
+
+    var callsTrunc = 0;
+    window.fetch = async function (u, opts) {
+      if (String(u).indexOf("/api/v1/test_trunc_") >= 0) {
+        callsTrunc++;
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"broken":'; } };
+      }
+      return origFetch(u, opts);
+    };
+    var truncErr = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/test_trunc_" + Date.now(), true); } catch (e) { truncErr = e; }
+    ok(callsTrunc === 2 && truncErr && /incomplete response/i.test(truncErr.message), "getJSON retries once on truncated JSON before failing cleanly");
+    ok(T.classifyError(truncErr.message, 200, { source: "Yahoo Finance" }).cls === "upstream", "incomplete response classifies as upstream (not bug)");
+
+    // Empty-body retry returning HTTP 500 throws HTTP error instead of returning null
+    var callsYfErr = 0;
+    window.fetch = async function (u, opts) {
+      if (String(u).indexOf("/api/v1/yfinance/test_empty_500") >= 0) {
+        callsYfErr++;
+        if (callsYfErr === 1) return { ok: true, status: 200, headers: new Headers(), text: async function () { return ""; } };
+        return { ok: false, status: 500, headers: new Headers(), text: async function () { return JSON.stringify({ detail: "Yahoo upstream failed" }); } };
+      }
+      return origFetch(u, opts);
+    };
+    var yfErr = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/yfinance/test_empty_500", true); } catch (e) { yfErr = e; }
+    ok(callsYfErr === 2 && yfErr && yfErr.status === 500 && /Yahoo upstream failed/.test(yfErr.message), "getJSON throws HTTP 500 after empty-body retry instead of returning null");
+
+    // Truncated-JSON retry returning HTTP 502 throws HTTP error instead of incomplete-response
+    var callsTrunc502 = 0;
+    window.fetch = async function (u, opts) {
+      if (String(u).indexOf("/api/v1/test_trunc_502") >= 0) {
+        callsTrunc502++;
+        if (callsTrunc502 === 1) return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"broken":'; } };
+        return { ok: false, status: 502, headers: new Headers(), text: async function () { return JSON.stringify({ detail: "Bad Gateway" }); } };
+      }
+      return origFetch(u, opts);
+    };
+    var trunc502Err = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/test_trunc_502", true); } catch (e) { trunc502Err = e; }
+    ok(callsTrunc502 === 2 && trunc502Err && trunc502Err.status === 502 && /Bad Gateway/.test(trunc502Err.message), "getJSON throws HTTP 502 after truncated-JSON retry");
+
+    // OECD URLs never retry on 503 or truncated JSON, and 429 arms limitedUntil
+    var callsOecd503 = 0, callsOecdTrunc = 0, callsOecd429 = 0;
+    window.fetch = async function (u, opts) {
+      var su = String(u);
+      if (su.indexOf("test_oecd_503") >= 0) {
+        callsOecd503++;
+        return { ok: false, status: 503, headers: new Headers(), text: async function () { return "Service Unavailable"; } };
+      }
+      if (su.indexOf("/api/v1/oecd/test_trunc") >= 0) {
+        callsOecdTrunc++;
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"broken":'; } };
+      }
+      if (su.indexOf("/api/v1/oecd/test_429") >= 0) {
+        callsOecd429++;
+        if (callsOecd429 === 1) return { ok: false, status: 429, headers: new Headers(), text: async function () { return JSON.stringify({ detail: "Too Many Requests" }); } };
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"ok":true}'; } };
+      }
+      return origFetch(u, opts);
+    };
+    var oecdErr503 = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/economy/gdp?provider=oecd&t=test_oecd_503", true); } catch (e) { oecdErr503 = e; }
+    ok(callsOecd503 === 1 && oecdErr503 && oecdErr503.status === 503, "getJSON never retries OECD URL on 503");
+
+    var oecdErrTrunc = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_trunc", true); } catch (e) { oecdErrTrunc = e; }
+    ok(callsOecdTrunc === 1 && oecdErrTrunc && /incomplete response/i.test(oecdErrTrunc.message), "getJSON never retries OECD URL on truncated JSON");
+
+    var oecdErr429a = null, oecdErr429b = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_429", true); } catch (e) { oecdErr429a = e; }
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_429", true); } catch (e) { oecdErr429b = e; }
+    ok(callsOecd429 === 1 && oecdErr429a && oecdErr429b && /Too Many Requests/i.test(oecdErr429b.message),
+      "OECD 429 sets limitedUntil cooldown so next call skips fetch");
+    T.clearAllCaches();
+    var oecdOk = await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_429", true);
+    ok(callsOecd429 === 2 && oecdOk && oecdOk.ok === true, "T.clearAllCaches clears OECD limitedUntil cooldown");
+
+    // Hidden-tab needPlotResize: ResizeObserver while 0x0 defers Plotly.Plots.resize until visible check()
+    var rsStage = document.createElement("div");
+    rsStage.style.cssText = "position:fixed;left:0;top:0;width:520px;height:360px;visibility:hidden";
+    document.body.appendChild(rsStage);
+    var origPlotResize = window.Plotly && window.Plotly.Plots && window.Plotly.Plots.resize;
+    var rsCalls = 0;
+    try {
+      window.fetch = async function (u, opts) {
+        if (String(u).indexOf("/__plot_resize_test") >= 0) {
+          return {
+            ok: true, status: 200, headers: new Headers(),
+            text: async function () { return JSON.stringify({ data: [{ type: "scatter", x: ["2026-01-01", "2026-01-02"], y: [10, 11] }], layout: {} }); }
+          };
+        }
+        return origFetch(u, opts);
+      };
+      var rsCard = T.widget({
+        item: { uid: "rs1", backend: "x", widgetId: "x_rs", params: {} },
+        def: { widgetId: "x_rs", name: "RS Chart", endpoint: "/__plot_resize_test", type: "chart", params: [] },
+        backend: { id: "x", url: "http://127.0.0.1:6950" }, scroller: rsStage,
+        groupOf: function () { return null; }, groupsOf: function () { return []; }, overrides: function () { return {}; },
+        setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; }, alternatives: function () { return []; },
+        hasFreeOnTab: function () { return false; }, onChange: function () {}, onRemove: function () {}, relayout: function () {}
+      });
+      rsStage.appendChild(rsCard.node);
+      rsCard.node.style.height = "300px";
+      rsCard.check();
+      await new Promise(function (r) { setTimeout(r, 80); });
+      var plotEl = rsCard.node.querySelector(".plot");
+      ok(plotEl && plotEl.data && plotEl.data.length === 1, "chart rendered for hidden-tab resize test");
+      if (window.Plotly && window.Plotly.Plots) {
+        window.Plotly.Plots.resize = function (gd) { rsCalls++; return origPlotResize.call(window.Plotly.Plots, gd); };
+      }
+      rsStage.style.display = "none";
+      await new Promise(function (r) { setTimeout(r, 200); });
+      var callsWhileHidden = rsCalls;
+      rsStage.style.display = "";
+      rsCard.check();
+      ok(callsWhileHidden === 0 && rsCalls >= 1, "hidden-tab 0x0 ResizeObserver defers Plotly resize until visible check()");
+      rsCard.destroy();
+    } finally {
+      if (window.Plotly && window.Plotly.Plots && origPlotResize) window.Plotly.Plots.resize = origPlotResize;
+      rsStage.remove();
+    }
+
+    // restartServices() UI flow: error detail, failed restart, offline backend probe, and recovery with missingWidget + /x/ reload
+    var canvasEl2 = document.getElementById("canvas");
+    var keepBackends = T.S.backends, keepByIdS = T.S.byId, keepWidgetsS = T.S.widgets, keepCardsS = T.S.cards,
+      keepCurS = T.S.cur, keepTabS = T.S.tabId, keepStateS = T.S.state, keepGridS = T.S.grid,
+      keepRestarting = T.S.restarting, keepBooted = T.S.booted, keepToast = T.toast;
+    var keepCanvas2 = canvasEl2 ? [].slice.call(canvasEl2.childNodes) : [];
+    var btnRst = document.getElementById("btn-restart");
+    var toasts = [];
+    T.toast = function (msg, isErr) { toasts.push({ msg: String(msg), err: !!isErr }); };
+    try {
+      T.S.booted = true;
+      var fakeV5 = { id: "v5", name: "Main data service", url: "http://127.0.0.1:6900", up: true, count: 0 };
+      var fakeX = { id: "x", name: "Terminal views", url: "", up: true, count: 1 };
+      T.S.backends = [fakeV5, fakeX];
+      T.S.byId = { v5: fakeV5, x: fakeX };
+      T.S.widgets = { x: { x_test: { widgetId: "x_test", name: "X", endpoint: "/x/test", type: "table", params: [] } } };
+      T.S.cards = [];
+      T.S.cur = null;
+
+      // Case 1: 400 with {"detail": ...}
+      window.fetch = async function (u, opts) {
+        if (String(u) === "/api/services/restart") {
+          return { ok: false, status: 400, headers: new Headers(), json: async function () { return { detail: "Legacy V4 backend is not active." }; } };
+        }
+        return origFetch(u, opts);
+      };
+      await T.restartServices();
+      ok(!T.S.restarting && !btnRst.disabled && toasts.some(function (t) { return t.err && /Legacy V4 backend is not active/.test(t.msg); }),
+        "restartServices surfaces server JSON detail on error and restores button");
+
+      // Case 2: restart worker reports last_ok: false -> error toast, no 'restarted' toast
+      toasts.length = 0;
+      window.fetch = async function (u, opts) {
+        var su = String(u);
+        if (su === "/api/services/restart") return { ok: true, status: 202, headers: new Headers(), json: async function () { return { ok: true, restart_seq: 1 }; } };
+        if (su === "/api/services") return { ok: true, status: 200, headers: new Headers(), json: async function () { return { v5: { state: "stopped" }, restart: { restarting: false, seq: 1, last_ok: false, error: "boom restart" } }; } };
+        return origFetch(u, opts);
+      };
+      await T.restartServices();
+      ok(!T.S.restarting && !btnRst.disabled && toasts.some(function (t) { return t.err && /boom restart/.test(t.msg); })
+        && !toasts.some(function (t) { return /reloading widgets/i.test(t.msg); }),
+        "restartServices aborts cleanly with error toast when restart worker fails");
+
+      // Case 3: backend probe fails after restart -> never toasts 'Data services restarted'
+      toasts.length = 0;
+      window.fetch = async function (u, opts) {
+        var su = String(u);
+        if (su === "/api/services/restart") return { ok: true, status: 202, headers: new Headers(), json: async function () { return { ok: true, restart_seq: 2 }; } };
+        if (su === "/api/services") return { ok: true, status: 200, headers: new Headers(), json: async function () { return { v5: { state: "running", reachable: true }, restart: { restarting: false, seq: 2, last_ok: true, error: "" } }; } };
+        if (su === "http://127.0.0.1:6900/") throw new Error("offline");
+        return origFetch(u, opts);
+      };
+      await T.restartServices();
+      ok(!T.S.restarting && !toasts.some(function (t) { return /Data services restarted/i.test(t.msg); })
+        && toasts.some(function (t) { return t.err && /offline|waiting/i.test(t.msg); }),
+        "restartServices never toasts success when backend probe fails");
+
+      // Case 4: successful recovery when S.widgets.v5 is empty -> loadBackend recovers missingWidget and reloads /x/ card once
+      toasts.length = 0;
+      var xRefreshes = 0;
+      var replacedRestartUids = [];
+      var mRstItem = { uid: "mr1", backend: "v5", widgetId: "w_rec", x: 0, y: 0, w: 6, h: 6, manual: "Click", params: {} };
+      var xRstItem = { uid: "xr1", backend: "x", widgetId: "x_test", x: 6, y: 0, w: 6, h: 6, params: {} };
+      var mRstCard = T.missingWidget(mRstItem, function () {}, { id: "v5", name: "Main data service", up: false });
+      var xRstCard = { node: document.createElement("div"), item: xRstItem, def: T.S.widgets.x.x_test, missing: false, backend: "x", refresh: function () { xRefreshes++; }, retryIfFailed: function () {}, destroy: function () {} };
+      canvasEl2.appendChild(mRstCard.node);
+      canvasEl2.appendChild(xRstCard.node);
+      T.S.cur = { id: "d:rst", name: "Rst", groups: [], tabs: [{ id: "t1", name: "T1", items: [mRstItem, xRstItem] }] };
+      T.S.tabId = "t1";
+      T.S.state = { v: 4, dashboards: {}, groups: {}, view: {}, libsel: {}, srcsel: {}, colsel: {}, cardview: {}, ui: {} };
+      T.S.grid = {
+        replace: function (it, node) { replacedRestartUids.push(it.uid); if (mRstCard.node.parentNode) mRstCard.node.parentNode.replaceChild(node, mRstCard.node); },
+        remove: function () {}, layout: function () {}
+      };
+      T.S.cards = [mRstCard, xRstCard];
+      fakeV5.watching = false; fakeV5._watchGen = 0;
+      window.fetch = async function (u, opts) {
+        var su = String(u);
+        if (su === "/api/services/restart") return { ok: true, status: 202, headers: new Headers(), json: async function () { return { ok: true, restart_seq: 3 }; } };
+        if (su === "/api/services") return { ok: true, status: 200, headers: new Headers(), json: async function () { return { v5: { state: "running", reachable: true }, restart: { restarting: false, seq: 3, last_ok: true, error: "" } }; } };
+        if (su === "http://127.0.0.1:6900/") return { ok: true, status: 200, headers: new Headers(), text: async function () { return "ok"; } };
+        if (su === "http://127.0.0.1:6900/widgets.json") return { ok: true, status: 200, headers: new Headers(), json: async function () { return { w_rec: { widgetId: "w_rec", name: "Recovered", endpoint: "/api/v1/none", type: "table", params: [] } }; } };
+        if (su === "http://127.0.0.1:6900/apps.json") return { ok: true, status: 200, headers: new Headers(), json: async function () { return []; } };
+        return origFetch(u, opts);
+      };
+      await T.restartServices();
+      await new Promise(function (r) { setTimeout(r, 320); });
+      var recCardNow = T.S.cards.filter(function (c) { return c.item && c.item.uid === "mr1"; })[0];
+      ok(!T.S.restarting && !btnRst.disabled && fakeV5.up === true
+        && replacedRestartUids.join() === "mr1" && recCardNow && !recCardNow.missing
+        && xRefreshes === 1 && toasts.some(function (t) { return !t.err && /Data services restarted/i.test(t.msg); }),
+        "restartServices loads missing backend defs, recovers missingWidget, and reloads /x/ cards once");
+    } finally {
+      (T.S.cards || []).forEach(function (c) { if (c && c.destroy) try { c.destroy(); } catch (e) {} });
+      T.S.backends = keepBackends; T.S.byId = keepByIdS; T.S.widgets = keepWidgetsS; T.S.cards = keepCardsS;
+      T.S.cur = keepCurS; T.S.tabId = keepTabS; T.S.state = keepStateS; T.S.grid = keepGridS;
+      T.S.restarting = keepRestarting; T.S.booted = keepBooted; T.toast = keepToast;
+      if (btnRst) { btnRst.classList.remove("busy"); btnRst.disabled = false; btnRst.textContent = "Restart"; }
+      if (canvasEl2) { canvasEl2.textContent = ""; keepCanvas2.forEach(function (n) { canvasEl2.appendChild(n); }); }
+    }
+  } finally {
+    window.fetch = origFetch;
+  }
 
   console.log("frontend checks: " + n + " passed");
   return n;

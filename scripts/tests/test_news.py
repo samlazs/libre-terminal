@@ -122,6 +122,53 @@ check(news._sources({"fed", "bloomberg"}, apple, [{"feed": "bloomberg"}])[0]["na
 q = news.rank(mkt, [it("Stocks slide as yields jump", "CNBC", 2, 0), it("Is the stock market rally over?", "CNBC", 2, 0)], hours=48, now=NOW)
 check([r["title"] for r in q][0] == "Stocks slide as yields jump" and q[0]["score"] - q[1]["score"] > 1.4, "a question headline ranks below a news headline")
 
+# ---- _sec_8k / _tmx_releases do not poison C._cache on transient failure, but do cache permanent errors
+_saved_api = composite.api
+_sec_calls = [0]
+_tmx_calls = [0]
+try:
+    def _flaky_sec(*a, **kw):
+        _sec_calls[0] += 1
+        if _sec_calls[0] == 1:
+            raise composite.CompositeError("SEC down", transient=True)
+        return [{"items": "2.02", "filing_date": "2026-11-18", "filing_detail_url": "https://sec/1"}]
+    composite.api = _flaky_sec
+    composite._cache.pop(("news_8k", "TESTSEC"), None)
+    check(news._sec_8k("TESTSEC") == [], "_sec_8k returns [] on transient failure")
+    check(len(news._sec_8k("TESTSEC")) == 1, "_sec_8k retries on next call instead of caching [] after transient error")
+
+    def _perm_sec(*a, **kw):
+        _sec_calls[0] += 1
+        raise composite.CompositeError("HTTP 404 from SEC", transient=False)
+    composite.api = _perm_sec
+    composite._cache.pop(("news_8k", "NONUSPERM"), None)
+    check(news._sec_8k("NONUSPERM") == [] and news._sec_8k("NONUSPERM") == [] and _sec_calls[0] == 3,
+          "_sec_8k caches [] for 900s on permanent non-transient error")
+
+    def _flaky_tmx(*a, **kw):
+        _tmx_calls[0] += 1
+        if _tmx_calls[0] == 1:
+            raise composite.CompositeError("TMX down", transient=True)
+        return [{"title": "TMX News", "url": "https://tmx/1", "date": "2026-11-18T12:00:00Z", "source": "CNW"}]
+    composite.api = _flaky_tmx
+    composite._cache.pop(("news_tmx", "TESTTMX"), None)
+    check(news._tmx_releases("TESTTMX") == [], "_tmx_releases returns [] on transient failure")
+    check(len(news._tmx_releases("TESTTMX")) == 1, "_tmx_releases retries on next call after transient error")
+
+    def _perm_tmx(*a, **kw):
+        _tmx_calls[0] += 1
+        raise composite.CompositeError("HTTP 404 from TMX", transient=False)
+    composite.api = _perm_tmx
+    composite._cache.pop(("news_tmx", "TMXPERM"), None)
+    check(news._tmx_releases("TMXPERM") == [] and news._tmx_releases("TMXPERM") == [] and _tmx_calls[0] == 3,
+          "_tmx_releases caches [] for 900s on permanent non-transient error")
+finally:
+    composite.api = _saved_api
+    composite._cache.pop(("news_8k", "TESTSEC"), None)
+    composite._cache.pop(("news_8k", "NONUSPERM"), None)
+    composite._cache.pop(("news_tmx", "TESTTMX"), None)
+    composite._cache.pop(("news_tmx", "TMXPERM"), None)
+
 # ---- wiring
 check("news" in composite.ROUTES and composite.static_sources("news"), "route and static sources")
 _ws = xwidgets.widgets()

@@ -49,5 +49,7 @@ df = [(f"d{i:03d}", 10.0 * i + (20 if i % 2 else 0)) for i in range(70)]
 rc = r.rolling_corr(sp, df)
 check(len(rc) == 10 and rc[-1][1] > 0.99, "rolling 60-day correlation: same zig-zag moves correlate near +1")
 check([x["name"] for x in r.fx_sources("EURUSD")] == ["Yahoo Finance", "Bundesbank", "FRED"], "EURUSD: Yahoo, Bundesbank 2Y, FRED DGS2")
+check(r._mean([]) is None and r._mean([2.0, 4.0]) == 3.0 and r.stdev([]) is None and r.stdev([1.0]) is None and r.beta([], []) is None and r.beta([], [1.0, 2.0]) is None,
+      "empty/short guards for _mean, stdev, and beta")
 check(all(k in c.ROUTES for k in ("correlation", "risk_stats", "fx_rate_diff")), "routes")
 done("test_risk")

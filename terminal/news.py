@@ -22,6 +22,7 @@ import email.utils
 import html
 import math
 import re
+import sys
 import threading
 import time
 import urllib.parse
@@ -617,7 +618,9 @@ def _sec_8k(sym):
     def run():
         try:
             rows = C.api(C.V5, "equity/fundamental/filings", provider="sec", symbol=sym, form_type="8-K", limit=12) or []
-        except Exception:  # noqa: BLE001 - not an SEC filer, or SEC down
+        except C.CompositeError as e:
+            if getattr(e, "transient", False):
+                raise
             return []
         out = []
         for r in rows:
@@ -628,7 +631,11 @@ def _sec_8k(sym):
             out.append({"title": title, "url": r.get("filing_detail_url") or r.get("report_url") or "", "date": when, "publisher": "SEC EDGAR (8-K)",
                         "tier": 1, "feed": "sec_8k", "boost": 1.5 if set(items) & {"1.01", "1.03", "2.01", "2.02", "4.02", "5.01", "5.02"} else 0.3})
         return out
-    return C.cached(("news_8k", sym), 900, run)
+    try:
+        return C.cached(("news_8k", sym), 900, run)
+    except Exception as e:  # noqa: BLE001 - not an SEC filer, or SEC down
+        print(f"[news] sec_8k({sym}) failed: {type(e).__name__}", file=sys.stderr)
+        return []
 
 
 def _yahoo_ticker(sym):
@@ -640,11 +647,17 @@ def _tmx_releases(sym):
     def run():
         try:
             rows = C.api(C.V5, "tmx/news/feed", symbol=sym, limit=15, fetch_body="false") or []
-        except Exception:  # noqa: BLE001
+        except C.CompositeError as e:
+            if getattr(e, "transient", False):
+                raise
             return []
         return [{"title": _text(r.get("title")), "url": r.get("url") or "", "date": _ptime(str(r.get("date") or "")), "tier": 1, "feed": "tmx",
                  "publisher": "Issuer release via TMX (" + str(r.get("source") or "newswire").split(" via ")[0] + ")"} for r in rows if r.get("title")]
-    return C.cached(("news_tmx", sym), 900, run)
+    try:
+        return C.cached(("news_tmx", sym), 900, run)
+    except Exception as e:  # noqa: BLE001
+        print(f"[news] tmx_releases({sym}) failed: {type(e).__name__}", file=sys.stderr)
+        return []
 
 
 # ------------------------------------------------------------------ ranking and clustering
@@ -679,7 +692,8 @@ def collect(subj, feed_ids, queries=True):
             fid = jobs[fut]
             try:
                 items = fut.result()
-            except Exception:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
+                print(f"[news] feed {fid} failed: {type(e).__name__}", file=sys.stderr)
                 continue
             for it in items:
                 if fid == "gnews":
@@ -693,14 +707,16 @@ def collect(subj, feed_ids, queries=True):
                 out.append(dict(it, title=_clean_title(it["title"], it.get("publisher")), publisher=pub, tier=tier, feed=fid))
                 used.add(fid)
     except _cf.TimeoutError:
-        pass
+        pending = [jobs[f] for f in jobs if not f.done()]
+        if pending:
+            print(f"[news] feeds timed out: {', '.join(sorted(set(pending)))}", file=sys.stderr)
     if prim is not None:
         try:
             for it in prim.result(timeout=max(0.1, deadline - time.monotonic())):
                 out.append(it)
                 used.add(it.get("feed"))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[news] primary feed failed: {type(e).__name__}", file=sys.stderr)
     return out, used
 
 

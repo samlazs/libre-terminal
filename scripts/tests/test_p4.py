@@ -35,9 +35,9 @@ check(rows_out[0]["period"] == "Nov 2026" and rows_out[1]["period"] == "Oct 2026
 
 
 # ---- 2. Pool isolation spec between direct UI cards ('ui') and /x/ views ('x')
-check(rb.pool_slot_spec("openbb_yfinance", "ui") == (("openbb_yfinance", "ui"), 4)
+check(rb.pool_slot_spec("openbb_yfinance", "ui") == (("openbb_yfinance", "ui"), 5)
       and rb.pool_slot_spec("openbb_yfinance", "x") == (("openbb_yfinance", "x"), 4),
-      "yfinance has separate 4-slot pools for ui and x")
+      "yfinance has separate 5-slot (ui) and 4-slot (x) pools")
 check(rb.pool_slot_spec("openbb_oecd", "ui") == (("openbb_oecd", "shared"), 2)
       and rb.pool_slot_spec("openbb_oecd", "x") == (("openbb_oecd", "shared"), 2),
       "OECD shares one 2-slot pool so rate limits are respected")

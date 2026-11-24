@@ -5,10 +5,22 @@ from __future__ import annotations
 import bisect
 import datetime as dt
 import math
+import re
 
 import composite as C
+from redact import redact
 
 CHART_VIEWS = {"price", "pct", "ratio", "spread", "dd"}
+
+
+def _clean_comp_error(err: str) -> str:
+    txt = redact(str(err or ""))
+    txt = re.sub(r"\s+\bfrom\s+https?://\S+", "", txt, flags=re.I)
+    txt = re.sub(r"\s*\(?https?://[^\s)]+\)?", "", txt, flags=re.I)
+    txt = re.sub(r"\s+", " ", txt).strip(" .:")
+    if len(txt) > 80:
+        txt = txt[:79].rstrip() + "…"
+    return txt
 
 
 def chart(symbol="^GSPC", compare=None, view="price", period="1Y", studies="candles,volume,ma50,ma200", shade=None, **_):
@@ -213,7 +225,11 @@ def chart(symbol="^GSPC", compare=None, view="price", period="1Y", studies="cand
     if not weekly and period in ("1M", "3M", "6M", "YTD", "1Y") and not weekend_bars and not any(s.startswith("FRED:") for s in all_syms):
         lay["xaxis"]["rangebreaks"] = [{"bounds": ["sat", "mon"]}]
     if errors:
-        notes.append("No data: " + "; ".join(e.split(":")[0] for e in errors))
+        cleaned = "; ".join(c for c in (_clean_comp_error(e) for e in errors) if c)
+        msg = "Could not load comparison: " + (cleaned or "unavailable")
+        if len(msg) > 180:
+            msg = msg[:179].rstrip() + "…"
+        notes.append(msg)
     if weekly:
         notes.append("Weekly bars")
     if notes:

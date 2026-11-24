@@ -231,9 +231,9 @@ class _OecdRateLimited(Exception):
 # ---------------------------------------------------------------- slow sources: disk cache, one fetch per query, bounded wait
 # provider package -> (fresh for seconds, answer within seconds (None = wait), attempts, name shown in messages)
 CACHE_POLICY = {
-    "openbb_us_eia": (6 * 3600, 55, 1, "EIA"),
+    "openbb_us_eia": (6 * 3600, 55, 1, "EIA"),  # paginate() already retries transient EIA timeouts up to 3 times
     "openbb_famafrench": (24 * 3600, 45, 3, "The Fama-French data library (Dartmouth)"),
-    "openbb_government_us": (3 * 3600, 45, 1, "U.S. Treasury FiscalData"),
+    "openbb_government_us": (3 * 3600, 45, 2, "U.S. Treasury FiscalData"),
     "openbb_cftc": (3 * 3600, 45, 2, "CFTC"),
     "openbb_bls": (6 * 3600, None, 2, "BLS"),
     "openbb_usda": (12 * 3600, 45, 2, "USDA"),
@@ -497,7 +497,7 @@ def pool_slot_spec(prov: str, pool: str) -> tuple[tuple[str, str], int]:
         return (prov, "shared"), PROVIDER_SLOTS[prov]
     p = "x" if pool == "x" else "ui"
     if prov == "openbb_yfinance":
-        return (prov, p), 4
+        return (prov, p), 5 if p == "ui" else 4
     if prov in PROVIDER_SLOTS:
         tot = PROVIDER_SLOTS[prov]
         half = (tot + 1) // 2
@@ -508,12 +508,12 @@ def pool_slot_spec(prov: str, pool: str) -> tuple[tuple[str, str], int]:
 def install_thread_offload(applied: list):
     import asyncio
     import inspect
+    import weakref
     from concurrent.futures import ThreadPoolExecutor
 
     from openbb_core.provider.abstract import fetcher as _fetcher
 
-    sems: dict = {}
-    loops: set = set()
+    loops: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     def _provider(func):
         mod = getattr(func, "__module__", None) or getattr(getattr(func, "__func__", None), "__module__", "") or ""
@@ -523,14 +523,16 @@ def install_thread_offload(applied: list):
         if inspect.iscoroutinefunction(func):
             return await func(*args, **kwargs)
         loop = asyncio.get_running_loop()
-        if id(loop) not in loops:                     # a wider pool than asyncio's default (cpu + 4)
-            loops.add(id(loop))
+        loop_sems = loops.get(loop)
+        if loop_sems is None:                     # a wider pool than asyncio's default (cpu + 4)
+            loop_sems = {}
+            loops[loop] = loop_sems
             loop.set_default_executor(ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="fetch"))
         prov = _provider(func)
         skey, lim = pool_slot_spec(prov, CALLER_POOL.get())
-        sem = sems.get((id(loop), skey))
+        sem = loop_sems.get(skey)
         if sem is None:
-            sem = sems[(id(loop), skey)] = asyncio.Semaphore(lim)
+            sem = loop_sems[skey] = asyncio.Semaphore(lim)
         async with sem:                               # one slow provider or caller pool cannot take every worker thread
             return await asyncio.to_thread(func, *args, **kwargs)
 
@@ -2782,7 +2784,18 @@ def install_tvchart_fix(applied: list):
                 if hit and now - hit[0] < _TV_INFO_TTL:
                     info_cache.move_to_end(key)
                     return dict(hit[1])
-            val = orig_info(symbol)
+                stale_hit = hit
+            val = None
+            for attempt in range(2):
+                try:
+                    val = orig_info(symbol)
+                except Exception as e:  # noqa: BLE001
+                    say(f"[tvchart] {symbol} info failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                    val = None
+                if val is not None:
+                    break
+                if attempt == 0:
+                    time.sleep(0.6)
             if val is not None:
                 with meta_lock:
                     info_cache[key] = (time.monotonic(), dict(val))
@@ -2791,6 +2804,8 @@ def install_tvchart_fix(applied: list):
                         info_cache.popitem(last=False)
                     _bound_aux_caches(key)
                 return dict(val)
+            if stale_hit and stale_hit[1]:
+                return dict(stale_hit[1])
             return None
 
     orig_invalidate = tvdf.BarCache.invalidate
@@ -2812,6 +2827,7 @@ def install_tvchart_fix(applied: list):
                     while len(self._cache) > 64:
                         self._cache.pop(next(iter(self._cache)), None)
                 return bars
+            outer_stale = list(hit[1]) if hit and hit[1] else None
         derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
         derived = derived_map.get(res)
         source_bars = None
@@ -2822,6 +2838,9 @@ def install_tvchart_fix(applied: list):
                 source_bars = self.get(symbol, derived["source"])
             except Exception as e:  # noqa: BLE001
                 say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                if outer_stale:
+                    say(f"[tvchart] {symbol} ({res}) serving {len(outer_stale)} cached bars after upstream failure")
+                    return list(outer_stale)
                 return []
         lk = bar_locks[zlib.crc32(f"{key[0]}|{key[1]}".encode("utf-8")) & 63]
         with lk:
@@ -2834,15 +2853,26 @@ def install_tvchart_fix(applied: list):
                     with self._lock:
                         self._cache[key] = list(bars)
                     return bars
-            try:
-                if derived:
+                stale_bars = list(hit[1]) if hit and hit[1] else None
+            bars = []
+            if derived:
+                try:
                     bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
-                else:
-                    bars = tvdf.yf_fetch_full_history(symbol, resolution)
-            except Exception as e:  # noqa: BLE001
-                say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
-                return []
-            bars = _sanitize_tv_bars(bars)
+                except Exception as e:  # noqa: BLE001
+                    say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                    bars = []
+                bars = _sanitize_tv_bars(bars)
+            else:
+                for attempt in range(2):
+                    try:
+                        bars = tvdf.yf_fetch_full_history(symbol, resolution)
+                    except Exception as e:  # noqa: BLE001
+                        say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                        bars = []
+                    bars = _sanitize_tv_bars(bars)
+                    if bars or attempt == 1:
+                        break
+                    time.sleep(0.8)
             if bars:
                 copied = list(bars)
                 with meta_lock:
@@ -2855,6 +2885,9 @@ def install_tvchart_fix(applied: list):
                     while len(self._cache) > 64:
                         self._cache.pop(next(iter(self._cache)), None)
                 return list(copied)
+            if stale_bars:
+                say(f"[tvchart] {symbol} ({res}) serving {len(stale_bars)} cached bars after upstream failure")
+                return list(stale_bars)
             return []
 
     def refresh(self, symbol: str, resolution: str) -> list:
@@ -2949,11 +2982,12 @@ def install_tvchart_fix(applied: list):
             f'<style>@keyframes obbSpin{{to{{transform:rotate(360deg)}}}}</style>'
             '<script>(function(){'
             'var el=document.getElementById("obb-tv-loading"),sp=document.getElementById("obb-tv-spin"),'
-            'msgEl=document.getElementById("obb-tv-msg"),btn=document.getElementById("obb-tv-retry"),done=false;'
+            'msgEl=document.getElementById("obb-tv-msg"),btn=document.getElementById("obb-tv-retry"),hidden=false,closeTimer=null;'
             'if(btn){btn.addEventListener("click",function(){location.reload();});}'
             'function postReady(){try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:"openbb-chart-ready"},"*");}catch(e){}}'
-            'function hide(){if(done)return;done=true;if(el){el.style.opacity="0";setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},160);}postReady();}'
-            'function showErr(text){if(done)return;done=true;if(sp)sp.style.display="none";if(msgEl)msgEl.textContent=text||"Chart data unavailable.";if(btn)btn.style.display="inline-block";postReady();}'
+            'function hide(){if(hidden)return;hidden=true;if(closeTimer){clearTimeout(closeTimer);closeTimer=null;}'
+            'if(el){el.style.opacity="0";setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},160);}postReady();}'
+            'function showErr(text){if(hidden)return;if(sp)sp.style.display="none";if(msgEl)msgEl.textContent=text||"Chart data unavailable.";if(btn)btn.style.display="inline-block";postReady();}'
             'function hasBars(){var reg=window.__PYWRY_TVCHARTS__;if(!reg)return false;for(var k in reg){var e=reg[k];'
             'if(e&&(e._seriesRawData&&e._seriesRawData.main&&e._seriesRawData.main.length||e._rawData&&e._rawData.length))return true;}return false;}'
             'var hooked=false,ticks=0;'
@@ -2964,9 +2998,18 @@ def install_tvchart_fix(applied: list):
             'if(hasBars()||(d&&d.bars&&d.bars.length)){requestAnimationFrame(hide);return;}'
             'if(d&&(d.error||d.noData||d.status==="no_data"||d.status==="error")){showErr(d.error||"No chart data available for this symbol.");}});});'
             'w.on("tvchart:datafeed-resolve-response",function(d){if(d&&d.error&&!hasBars())showErr(d.error);});'
+            '["tvchart:error","error","ws:error"].forEach(function(ev){try{w.on(ev,function(d){'
+            'if(hasBars()){requestAnimationFrame(hide);return;}'
+            'var msg=(d&&typeof d==="object")?(d.error||d.message||d.reason):(typeof d==="string"?d:"");'
+            'showErr(msg||"Chart connection error.");});}catch(e){}});'
+            '["ws:close","close"].forEach(function(ev){try{w.on(ev,function(d){'
+            'if(hasBars()){requestAnimationFrame(hide);return;}'
+            'var msg=(d&&typeof d==="object")?(d.error||d.message||d.reason):(typeof d==="string"?d:"");'
+            'if(!closeTimer){closeTimer=setTimeout(function(){closeTimer=null;if(!hidden&&!hasBars())showErr(msg||"Chart connection closed.");},4000);}});}'
+            'catch(e){}});'
             'if(hasBars())requestAnimationFrame(hide);return;}'
             'ticks++;setTimeout(wire,20);}'
-            'wire();setTimeout(function(){if(hasBars())hide();else showErr("Chart data request timed out.");},25000);'
+            'wire();setTimeout(function(){if(hasBars())hide();else if(!hidden)showErr("Chart data request timed out.");},35000);'
             '})();</script>'
         )
         return html.replace("</body>", f"{overlay}</body>", 1) if "</body>" in html else html + overlay
@@ -3663,6 +3706,10 @@ def apply_fixes():
     except Exception as e:  # noqa: BLE001
         _not_applied("disable background MCP subprocesses", e)
     try:
+        install_yfinance_crumb_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Yahoo Finance crumb guard and 401 recovery", e)
+    try:
         install_yfinance_options_fix(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("YFinance options chains recovery", e)
@@ -4098,8 +4145,261 @@ def install_disable_mcp_subprocesses(applied: list):
         applied.append("background MCP subprocess spawning disabled (" + ", ".join(disabled) + ")")
 
 
+def install_yfinance_crumb_fix(applied: list):
+    """Prevent poisoned Yahoo Finance crumbs from persisting and recover once from 401 Invalid Crumb responses."""
+    import contextlib
+    import functools
+    import threading
+    import time
+
+    try:
+        import yfinance.data as yf_data
+        from yfinance.config import YfConfig
+        from yfinance.exceptions import YFRateLimitError
+    except ImportError:
+        return
+    if getattr(yf_data.YfData, "_terminal_crumb_fixed", False):
+        return
+
+    with contextlib.suppress(Exception):
+        net = getattr(YfConfig, "network", None)
+        if net is not None and (getattr(net, "retries", 0) or 0) < 2:
+            net.retries = 2
+
+    def _is_bad_crumb(val) -> bool:
+        if not isinstance(val, str):
+            return True
+        s = val.strip()
+        if not s or len(s) > 64 or any(ch.isspace() for ch in val):
+            return True
+        low = s.lower()
+        return (
+            "<html" in low
+            or s.startswith("{")
+            or "too many requests" in low
+            or "unauthorized" in low
+            or "invalid" in low
+        )
+
+    def _wrap_crumb_getter(orig):
+        @functools.wraps(orig)
+        def _wrapped(self, *args, **kwargs):
+            try:
+                res = orig(self, *args, **kwargs)
+            except YFRateLimitError:
+                self._crumb = None
+                raise
+            if _is_bad_crumb(res):
+                self._crumb = None
+                return None
+            return res
+
+        return _wrapped
+
+    orig_basic = yf_data.YfData._get_crumb_basic
+    orig_csrf = yf_data.YfData._get_crumb_csrf
+    orig_cookie_basic = getattr(yf_data.YfData, "_get_cookie_basic", None)
+    orig_set_session = getattr(yf_data.YfData, "_set_session", None)
+    orig_make_request = yf_data.YfData._make_request
+    refresh_init_lock = threading.Lock()
+    is_transient = getattr(yf_data, "_is_transient_error", lambda _exc: False)
+    norm_proxy = getattr(yf_data, "_normalize_proxy", lambda p: p)
+    yf_exception = getattr(yf_data, "YFException", ValueError)
+
+    def _get_refresh_lock(self):
+        refresh_lock = getattr(self, "_terminal_refresh_lock", None)
+        if refresh_lock is None:
+            with refresh_init_lock:
+                refresh_lock = getattr(self, "_terminal_refresh_lock", None)
+                if refresh_lock is None:
+                    refresh_lock = threading.RLock()
+                    self._terminal_refresh_lock = refresh_lock
+        return refresh_lock
+
+    def _reset_crumb_state(self):
+        with _get_refresh_lock(self):
+            lock = getattr(self, "_cookie_lock", None)
+            with lock if lock is not None else contextlib.nullcontext():
+                self._crumb = None
+                self._cookie = None
+                session = getattr(self, "_session", None)
+                if not getattr(self, "_logged_in", False) and session is not None:
+                    with contextlib.suppress(Exception):
+                        session.cookies.clear()
+                with contextlib.suppress(Exception):
+                    from yfinance import cache as yf_cache
+
+                    yf_cache.get_cookie_cache().store("curlCffi", None)
+                cache_get = getattr(self, "cache_get", None)
+                cache_clear = getattr(cache_get, "cache_clear", None)
+                if callable(cache_clear):
+                    with contextlib.suppress(Exception):
+                        cache_clear()
+
+    @functools.wraps(orig_make_request)
+    def _make_request(self, url, request_method, body=None, params=None, timeout=30, data=None, headers=None):
+        net_cfg = getattr(YfConfig, "network", None)
+        proxy_cfg = getattr(net_cfg, "proxy", None)
+        if proxy_cfg is not None and getattr(self, "_session", None) is not None:
+            self._session.proxies = norm_proxy(proxy_cfg)
+
+        req_params = dict(params) if params is not None else {}
+        if "crumb" in req_params:
+            raise yf_exception("Don't manually add 'crumb' to params dict, let data.py handle it")
+
+        crumb_rate_limited = False
+        try:
+            crumb, _ = self._get_cookie_and_crumb()
+        except YFRateLimitError:
+            crumb = None
+            crumb_rate_limited = True
+        except Exception as e:
+            if is_transient(e):
+                crumb = None
+            else:
+                raise
+
+        request_args = {
+            "url": url,
+            "params": {**req_params, **({"crumb": crumb} if crumb is not None else {})},
+            "timeout": timeout,
+        }
+        if body:
+            request_args["json"] = body
+        if data:
+            request_args["data"] = data
+            request_args["headers"] = {"Content-Type": "application/json"}
+        if headers:
+            request_args["headers"] = {**request_args.get("headers", {}), **headers}
+
+        def _active_method(fn):
+            bound_self = getattr(fn, "__self__", None)
+            cur_sess = getattr(self, "_session", None)
+            mname = getattr(fn, "__name__", None)
+            if bound_self is not None and cur_sess is not None and bound_self is not cur_sess and mname:
+                return getattr(cur_sess, mname, fn)
+            return fn
+
+        max_retries = max(2, getattr(net_cfg, "retries", 0) or 0)
+        response = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = _active_method(request_method)(**request_args)
+            except Exception as e:
+                if is_transient(e) and attempt < max_retries:
+                    time.sleep(0.5 * (2**attempt))
+                    continue
+                raise
+            if getattr(response, "status_code", None) in (502, 503, 504) and attempt < max_retries:
+                time.sleep(0.5 * (2**attempt))
+                continue
+            break
+
+        status = getattr(response, "status_code", None) if response is not None else None
+        if status == 429:
+            raise YFRateLimitError()
+
+        text = (getattr(response, "text", "") or "").lower() if response is not None else ""
+        is_crumb_err = response is not None and (
+            (status == 401 and "unable to access this feature" not in text)
+            or (isinstance(status, int) and status >= 400 and "invalid crumb" in text)
+        )
+        if not is_crumb_err:
+            return response
+        if crumb_rate_limited:
+            raise YFRateLimitError()
+
+        with _get_refresh_lock(self):
+            if getattr(self, "_crumb", None) == crumb:
+                _reset_crumb_state(self)
+                new_crumb = None
+                try:
+                    new_crumb, _ = self._get_cookie_and_crumb(timeout)
+                except YFRateLimitError:
+                    raise
+                except Exception as e:
+                    if is_transient(e):
+                        new_crumb = None
+                    else:
+                        raise
+            else:
+                new_crumb = getattr(self, "_crumb", None)
+
+        if new_crumb is not None:
+            request_args["params"]["crumb"] = new_crumb
+        else:
+            request_args["params"].pop("crumb", None)
+
+        response = _active_method(request_method)(**request_args)
+        if getattr(response, "status_code", None) == 429:
+            raise YFRateLimitError()
+        return response
+
+    yf_data.YfData._get_crumb_basic = _wrap_crumb_getter(orig_basic)
+    yf_data.YfData._get_crumb_csrf = _wrap_crumb_getter(orig_csrf)
+    if callable(orig_cookie_basic):
+
+        @functools.wraps(orig_cookie_basic)
+        def _get_cookie_basic(self, timeout=30):
+            if getattr(self, "_cookie", None) is not None:
+                return True
+            ok = orig_cookie_basic(self, timeout)
+            if ok and getattr(self, "_cookie", None) is None:
+                self._cookie = True
+            return ok
+
+        yf_data.YfData._get_cookie_basic = _get_cookie_basic
+    if callable(orig_set_session):
+
+        def _has_items(obj) -> bool:
+            if not obj:
+                return False
+            try:
+                return len(obj) > 0
+            except TypeError:
+                return bool(obj)
+
+        @functools.wraps(orig_set_session)
+        def _set_session(self, session):
+            if session is None:
+                return None
+            cur = getattr(self, "_session", None)
+            if cur is not None:
+                if session is cur:
+                    return orig_set_session(self, session)
+                sess_cookies = getattr(session, "cookies", None)
+                sess_proxies = getattr(session, "proxies", None)
+                cur_cookies = getattr(cur, "cookies", None)
+                has_auth = getattr(self, "_cookie", None) is not None or _has_items(cur_cookies)
+                # yf.download() passes a throwaway empty new_session() on every call: keep the
+                # existing authenticated session instead of wiping shared cookies mid-flight.
+                if type(session) is type(cur) and has_auth and not _has_items(sess_cookies) and not sess_proxies:
+                    net_p = getattr(getattr(YfConfig, "network", None), "proxy", None)
+                    if net_p is not None:
+                        lock = getattr(self, "_cookie_lock", None)
+                        with lock if lock is not None else contextlib.nullcontext():
+                            cur.proxies = norm_proxy(net_p)
+                    return None
+            res = orig_set_session(self, session)
+            new_sess = getattr(self, "_session", None)
+            if cur is not None and new_sess is not cur:
+                if not getattr(self, "_logged_in", False) and not _has_items(getattr(new_sess, "cookies", None)):
+                    lock = getattr(self, "_cookie_lock", None)
+                    with lock if lock is not None else contextlib.nullcontext():
+                        self._cookie = None
+                        self._crumb = None
+            return res
+
+        yf_data.YfData._set_session = _set_session
+    yf_data.YfData._terminal_reset_crumb = _reset_crumb_state
+    yf_data.YfData._make_request = _make_request
+    yf_data.YfData._terminal_crumb_fixed = True
+    applied.append("Yahoo Finance requests guard against poisoned crumbs and recover from 401 Invalid Crumb")
+
+
 def install_yfinance_options_fix(applied: list):
     """Turn Yahoo crumb 401 errors into a crumb refresh + single retry, and missing/empty chains into EmptyDataError."""
+    import contextlib
     import functools
 
     try:
@@ -4121,13 +4421,26 @@ def install_yfinance_options_fix(applied: list):
                     raise EmptyDataError(f"No options found for {sym}")
                 return res
             except Exception as exc:  # noqa: BLE001
-                msg = str(exc)
-                if attempt == 0 and ("401" in msg or "crumb" in msg.lower() or "Unauthorized" in msg):
+                low = str(exc).lower()
+                is_crumb_401 = (
+                    "unable to access this feature" not in low
+                    and "429" not in low
+                    and "too many requests" not in low
+                    and "rate limit" not in low
+                    and ("invalid crumb" in low or "crumb" in low or "401" in low or "unauthorized" in low)
+                )
+                if attempt == 0 and is_crumb_401:
                     try:
                         import yfinance.data as yf_data
                         yd = yf_data.YfData()
-                        yd._crumb = None
-                        yd._cookie = None
+                        reset_crumb = getattr(yd, "_terminal_reset_crumb", None)
+                        if callable(reset_crumb):
+                            reset_crumb()
+                        else:
+                            lock = getattr(yd, "_cookie_lock", None)
+                            with lock if lock is not None else contextlib.nullcontext():
+                                yd._crumb = None
+                                yd._cookie = None
                     except Exception:  # noqa: BLE001
                         pass
                     continue
@@ -4137,6 +4450,7 @@ def install_yfinance_options_fix(applied: list):
 
     aextract_data._terminal_opt_fixed = True
     yf_opt.YFinanceOptionsChainsFetcher.aextract_data = staticmethod(aextract_data)
+    yf_opt.YFinanceOptionsChainsFetcher.extract_data = staticmethod(aextract_data)
     applied.append("Yahoo options chains recover from stale crumb 401 and empty chains")
 
 

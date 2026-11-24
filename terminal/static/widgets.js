@@ -109,7 +109,7 @@
       return { cls: "covered", kind: "info", text: "Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + ".", hint: "Try another symbol." };
     var noQuote = /Yahoo Finance (has no bid\/ask quotes|returned no option prices recent enough)[^"]*/.exec(m);
     if (noQuote) return { cls: "message", kind: "info", text: noQuote[0], hint: null };
-    if (/failed after \d+ attempts|request failed|timed? ?out|Timeout|No answer after \d+ seconds|not answering|not responding|not reachable|did not answer|Connection (aborted|reset|refused)|ConnectionReset|RemoteDisconnected|Server disconnected|\b(502|503|504)\b|Bad Gateway|Service Unavailable|Internal Server Error|HTTPError|HTTP Error \d|Client Error|Error fetching data|Expecting value|framing layer|curl:|SSL|certificate|returned no|returned nothing|could not be read|moved the source|Worksheet named|no item named|not reachable/i.test(m))
+    if (/failed after \d+ attempts|request failed|timed? ?out|Timeout|No answer after \d+ seconds|incomplete response|not answering|not responding|not reachable|did not answer|Connection (aborted|reset|refused)|ConnectionReset|RemoteDisconnected|Server disconnected|\b(502|503|504)\b|Bad Gateway|Service Unavailable|Internal Server Error|HTTPError|HTTP Error \d|Client Error|Error fetching data|Expecting value|framing layer|curl:|SSL|certificate|returned no|returned nothing|could not be read|moved the source|Worksheet named|no item named|not reachable/i.test(m))
       return { cls: "upstream", kind: "info", text: src + " is not answering properly right now.", hint: "The problem is at the source, not in your settings. Try again later (press ↻)." };
     if (ctx.userMessage)            // the terminal's own views explain themselves; only URLs are taken out
       return { cls: "message", kind: "info", text: m.replace(/\s*\(?https?:\/\/[^\s)]+\)?/g, "").slice(0, 300), hint: null };
@@ -188,14 +188,16 @@
       || /\/api\/v1\/(?:cboe\/options\/|derivatives\/options\/chains)\b/.test(u)
       || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release|valuation_bands|roic_dupont|gex_strike|vol_cone|debt_maturity_wall|etf_overlap|correlation|risk_stats|fx_rate_diff)\b/.test(u)
       || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
-      || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 60000;
-    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|chart|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
+      || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 70000;
+    if (/\/x\/chart\b/.test(u)) return 60000;
+    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
       || /[?&]provider=(yfinance|cboe|tmx|nasdaq|deribit|finviz)(&|$)/.test(u)
       || /\/api\/v1\/(yfinance|cboe|tmx|nasdaq|deribit|finviz)\//.test(u)) return 30000;
     return REQUEST_TIMEOUT;
   };
   var limitedUntil = 0, limitedMsg = "";      // set when OECD refuses us; no OECD requests are sent until it passes
-  function isRateLimited(url) { return /[?&]provider=oecd(&|$)|\/api\/v1\/oecd\//.test(url); }
+  T.clearAllCaches = function () { dataCache.clear(); limitedUntil = 0; limitedMsg = ""; };
+  function isRateLimited(url) { return /[?&]provider=oecd(&|$)|\/oecd\//i.test(url); }
   function fetchOptions(force, signal) {
     return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" } } : { signal: signal };
   }
@@ -256,57 +258,86 @@
     function relay() { ctl.abort(); }
     if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
     var fetchOpts = fetchOptions(force, signal);
+    function throwHttpErr(resp, bodyTxt) {
+      var err = new Error(errText(resp.status, bodyTxt)); err.status = resp.status;
+      var subE = resp.headers && resp.headers.get("X-Terminal-Source");
+      if (subE) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
+      try { var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
+      if (slow && (resp.status === 429 || /rate limit|too many requests/i.test(err.message))) { limitedUntil = Date.now() + 600000; limitedMsg = err.message; }
+      throw err;
+    }
     try {
       if (signal && signal.aborted) { var ab = new Error("aborted"); ab.name = "AbortError"; throw ab; }
       var r;
       try { r = await fetch(url, fetchOpts); }
       catch (e) {
-        // one automatic retry for a dropped connection, but only while the backend itself still answers
+        // one automatic retry for a dropped connection, but only while the backend itself still answers (never for OECD)
         if (e && e.name === "AbortError") throw e;
         var base = /^https?:\/\/[^/]+/.exec(url);
         var alive = base ? await fetch(base[0] + "/", { mode: "no-cors", signal: signal }).then(function () { return true; }, function () { return false; }) : true;
         if (!alive) { var down = new Error("BACKEND_DOWN"); down.backendDown = true; throw down; }
+        if (slow) throw e;
         await wait(1500, signal);
         r = await fetch(url, fetchOpts);
       }
       if (!r.ok) {
         var etxt = await r.text();
-        // Yahoo's client library trips over itself when two requests land at once: one retry clears it.
-        // Rate limits are not retried (that only prolongs them).
-        if (/database is locked|RemoteDisconnected|Invalid Crumb/i.test(etxt)) {
-          await wait(1200 + Math.random() * 1500, signal);
+        var isUserMsg = false;
+        try { isUserMsg = JSON.parse(etxt).user_message === true; } catch (e0) { /* not JSON */ }
+        // Yahoo's client library trips over itself when two requests land at once, or a transient gateway/upstream error occurred: one retry clears it.
+        // Rate limits, OECD URLs, and explicit user messages are not retried (that only prolongs them).
+        var shouldRetry = !slow && (/database is locked|RemoteDisconnected|Invalid Crumb|ConnectionReset|TimeoutError/i.test(etxt)
+          || ((r.status === 502 || r.status === 503 || r.status === 504) && !isUserMsg && !/rate limit|too many requests/i.test(etxt)));
+        if (shouldRetry) {
+          await wait(1200 + Math.random() * 1200, signal);
           r = await fetch(url, fetchOpts);
           etxt = r.ok ? null : await r.text();
         }
       }
-      if (!r.ok) {
-        var err = new Error(errText(r.status, etxt)); err.status = r.status;
-        var subE = r.headers && r.headers.get("X-Terminal-Source");
-        if (subE) err.sources = T.substituteSources(subE, r.headers.get("X-Terminal-Fallback"));
-        try { var ej = JSON.parse(etxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
-        if (slow && /rate limit reached/i.test(err.message)) { limitedUntil = Date.now() + 600000; limitedMsg = err.message; }
-        throw err;
-      }
+      if (!r.ok) throwHttpErr(r, etxt);
       // Very large answers (some sources return 100+ MB when unfiltered) would stall the browser: ask first.
-      var size = Number(r.headers.get("content-length") || 0);
+      var size = Number((r.headers && r.headers.get("content-length")) || 0);
       if (size > 40e6 && !force) { ctl.abort(); var big = new Error("TOO_LARGE"); big.size = size; throw big; }
       var txt = await r.text();
-      if (!txt && /[?&]provider=yfinance(&|$)/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
+      if (!txt && !slow && /[?&]provider=yfinance(&|$)|\/api\/v1\/yfinance\/|\/x\/chart\b/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
         await wait(1200, signal);
         r = await fetch(url, fetchOpts);
-        txt = r.ok ? await r.text() : "";
+        if (!r.ok) throwHttpErr(r, await r.text());
+        txt = await r.text();
       }
-      json = txt ? JSON.parse(txt) : null;
+      if (txt) {
+        try {
+          json = JSON.parse(txt);
+        } catch (parseErr) {
+          if (slow) throw new Error("The source returned an incomplete response. Try reloading this card.");
+          await wait(800, signal);
+          r = await fetch(url, fetchOpts);
+          if (!r.ok) throwHttpErr(r, await r.text());
+          txt = await r.text();
+          if (!txt) {
+            if (r.status === 204) json = null;
+            else throw new Error("The source returned an incomplete response. Try reloading this card.");
+          } else {
+            try {
+              json = JSON.parse(txt);
+            } catch (parseErr2) {
+              throw new Error("The source returned an incomplete response. Try reloading this card.");
+            }
+          }
+        }
+      } else {
+        json = null;
+      }
       // a backend answer served from a saved copy because the source failed (HANDOFF P2): kept with the answer in memory
-      var staleH = r.headers.get("X-Terminal-Stale");
+      var staleH = r.headers && r.headers.get("X-Terminal-Stale");
       if (staleH && json && typeof json === "object" && !Array.isArray(json) && json.stale == null) json.stale = staleH;
-      var subH = r.headers.get("X-Terminal-Source");
+      var subH = r.headers && r.headers.get("X-Terminal-Source");
       if (subH && json && typeof json === "object") {       // a list answer carries it too
-        var subNote = r.headers.get("X-Terminal-Fallback") || "";
+        var subNote = (r.headers && r.headers.get("X-Terminal-Fallback")) || "";
         json.sources = T.substituteSources(subH, subNote);
         json.fallback = subNote;
       }
-      var lateH = r.headers.get("X-Terminal-Delayed");
+      var lateH = r.headers && r.headers.get("X-Terminal-Delayed");
       if (lateH && json && typeof json === "object" && !Array.isArray(json) && json.delayed == null) json.delayed = lateH;
     } catch (e2) {
       if (e2 && (e2.message === "TOO_LARGE" || e2.backendDown)) throw e2;
@@ -321,6 +352,7 @@
     if (dataCache.size > 150) dataCache.delete(dataCache.keys().next().value);
     return json;
   }
+  T.getJSON = getJSON;
 
   // ---------- sources: one plain name per provider, and where a card's data comes from ----------
   var PROV = { yfinance: "Yahoo Finance", cboe: "Cboe", tmx: "TMX", nasdaq: "Nasdaq", fred: "FRED", bls: "BLS", eia: "U.S. EIA", sec: "SEC", federal_reserve: "Federal Reserve",
@@ -539,7 +571,7 @@
     var rz = el("div", { class: "w-resize", title: "Resize" });
     node.appendChild(head); node.appendChild(strip); node.appendChild(pbar); node.appendChild(body); node.appendChild(foot); node.appendChild(rz);
 
-    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
+    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, chartMsgHandler = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
     var fileParam = def.params.filter(function (p) { return (p.roles || []).indexOf("fileSelector") >= 0; })[0] || null;
     var lastFileSig = null;          // the other parameters the current document pick was made for
     var isFrame = def.type === "iframe" || def.type === "html";
@@ -789,6 +821,7 @@
     function clearBody() {
       if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
       if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
+      if (chartMsgHandler) { window.removeEventListener("message", chartMsgHandler); chartMsgHandler = null; }
       if (loadTimer) { clearTimeout(loadTimer); loadTimer = null; }
       if (slowTimer) { clearTimeout(slowTimer); slowTimer = null; }
       if (plotNode && window.Plotly) { try { window.Plotly.purge(plotNode); } catch (e) { /* ignore */ } }
@@ -1231,7 +1264,33 @@
             if (!alive || my !== seq || !waitBox.isConnected) return;
             waitMsg.textContent = "This view is taking unusually long. It still appears here when ready, or press Reload.";
           }, 60000);
+          var expectedOrigin = null;
+          try { expectedOrigin = new URL(frameSrc, window.location.href).origin; } catch (e) { expectedOrigin = base || window.location.origin; }
+          if (expectedOrigin === "null") expectedOrigin = null;
+          var onChartMsg = function (ev) {
+            if (!ev || !ev.data || ev.data.type !== "openbb-chart-ready" || !fr2 || ev.source !== fr2.contentWindow) return;
+            if (expectedOrigin && ev.origin !== expectedOrigin) return;
+            if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+            if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
+            if (waitBox.parentNode) waitBox.parentNode.removeChild(waitBox);
+            fr2.style.visibility = "";
+            window.removeEventListener("message", onChartMsg);
+            if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
+          };
+          chartMsgHandler = onChartMsg;
+          window.addEventListener("message", onChartMsg);
+          if (abort && abort.signal) {
+            abort.signal.addEventListener("abort", function () {
+              if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
+              if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
+              window.removeEventListener("message", onChartMsg);
+              if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
+              try { fr2.src = "about:blank"; } catch (e) { /* ignore */ }
+            }, { once: true });
+          }
           fr2.addEventListener("load", function () {
+            window.removeEventListener("message", onChartMsg);
+            if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
             if (!alive || my !== seq) return;
             if (frameTimer) { clearTimeout(frameTimer); frameTimer = null; }
             if (frameHardTimer) { clearTimeout(frameHardTimer); frameHardTimer = null; }
@@ -1239,7 +1298,12 @@
             fr2.style.visibility = "";
           });
           fr2.addEventListener("error", function () {
+            window.removeEventListener("message", onChartMsg);
+            if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
             if (!alive || my !== seq) return;
+            if (base && ctx.backendDown && ctx.backend) {
+              fetch(base + "/", { mode: "no-cors" }).catch(function () { ctx.backendDown(ctx.backend.id); });
+            }
             clearBody();
             body.appendChild(el("div", { class: "msg err center" }, [el("b", null, "Could not load"), el("span", null, "This view did not load."),
               el("button", { class: "btn", type: "button", onclick: function () { refresh(true); } }, "Retry")]));
@@ -1403,13 +1467,28 @@
       node.classList.toggle("narrow", n);
       drawTools();
     }
+    var needPlotResize = false;
     function check() {
       if (!alive) return;
       checkNarrow();
       measure();
+      if (visible && needPlotResize && plotNode && window.Plotly && plotNode.data) {
+        try { window.Plotly.Plots.resize(plotNode); needPlotResize = false; } catch (e) { /* ignore */ }
+      }
       if ((visible || item.needsKey || item.manual) && pending) { var f = pendingForce; pendingForce = false; load(f); }
     }
-    var ro = new ResizeObserver(T.debounce(function () { if (!alive) return; checkNarrow(); if (plotNode && window.Plotly && plotNode.data) { try { window.Plotly.Plots.resize(plotNode); } catch (e) { /* ignore */ } } }, 120));
+    var ro = new ResizeObserver(T.debounce(function () {
+      if (!alive) return;
+      checkNarrow();
+      if (plotNode && window.Plotly && plotNode.data) {
+        var br = body.getBoundingClientRect();
+        if (br.width > 0 && br.height > 0) {
+          try { window.Plotly.Plots.resize(plotNode); needPlotResize = false; } catch (e) { /* ignore */ }
+        } else {
+          needPlotResize = true;
+        }
+      }
+    }, 120));
     ro.observe(body);
     if (typeof def.refetchInterval === "number" && def.refetchInterval >= 30000) timer = setInterval(function () { if (visible && !document.hidden) load(true, true); }, def.refetchInterval);
 
@@ -1430,7 +1509,7 @@
     message("load", "Loads when scrolled into view…");
 
     return {
-      node: node, head: head, resize: rz, item: item, def: def,
+      node: node, head: head, resize: rz, item: item, def: def, isFrame: isFrame,
       refresh: refresh,
       rerender: function () { if (alive && lastJson !== null && !isFrame) renderData(); else if (alive) refresh(false); },
       ownsFrame: function (win) { var fr = body.querySelector("iframe"); return !!(fr && fr.contentWindow === win); },
@@ -1483,7 +1562,7 @@
       : el("div", { class: "msg center" }, [el("span", null, "This data function is not offered by the running backends any more."), el("div", { class: "hint" }, "Remove the card with ✕, or reset the tab from the ⋯ menu.")]);
     node.appendChild(el("div", { class: "w-body" }, msg));
     var rz = el("div", { class: "w-resize" }); node.appendChild(rz);
-    return { node: node, head: head, resize: rz, item: item, def: null, missing: true, backend: item.backend, refresh: function () {}, check: function () {}, retryIfFailed: function () {},
+    return { node: node, head: head, resize: rz, item: item, def: null, missing: true, isFrame: false, backend: item.backend, refresh: function () {}, check: function () {}, retryIfFailed: function () {},
       redrawParams: function () {}, hasParam: function () { return false; }, setParamValue: function () {}, destroy: function () {} };
   };
 })(window.T);

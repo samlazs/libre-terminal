@@ -789,7 +789,7 @@
   /** Render a Plotly figure produced by the backend, re-skinned for this surface. */
   T.plotFigure = function (node, fig) {
     if (typeof fig === "string") { try { fig = JSON.parse(fig); } catch (e) { node.textContent = "Invalid chart payload."; return; } }
-    if (!fig || !fig.data) { node.textContent = "No chart returned."; return; }
+    if (!fig || !Array.isArray(fig.data) || !fig.data.length) { node.textContent = "No chart data returned for these settings."; return; }
     var layout = Object.assign({}, fig.layout || {});
     layout.paper_bgcolor = "rgba(0,0,0,0)";
     layout.plot_bgcolor = "rgba(0,0,0,0)";

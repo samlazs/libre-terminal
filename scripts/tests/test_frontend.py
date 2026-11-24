@@ -44,15 +44,28 @@ CHECKS = (ROOT / "scripts" / "tests" / "frontend_checks.js").read_text(encoding=
 CAPTURE = """
 (function () {
   window.addEventListener("error", function (e) { window.__fcError = window.__fcError || ("uncaught " + e.message + " (" + String(e.filename || "").split("/").pop() + ":" + e.lineno + ")"); });
+  window.addEventListener("unhandledrejection", function (e) { var r = e && e.reason; window.__fcError = window.__fcError || ("unhandled rejection: " + String(r && r.message || r)); });
   var log = console.log;
   console.log = function (m) { if (/^frontend checks: \\d+ passed$/.test(String(m))) window.__fc = String(m); return log.apply(console, arguments); };
 })();
 """
 REPORT = """
 (function () {
-  var out = document.createElement("pre"); out.id = "frontend-result";
-  out.textContent = window.__fcError ? "FRONTEND FAILED: " + window.__fcError : (window.__fc || "FRONTEND FAILED: no result");
-  document.body.appendChild(out);
+  function emit() {
+    if (document.getElementById("frontend-result")) return;
+    var out = document.createElement("pre"); out.id = "frontend-result";
+    out.textContent = window.__fcError ? "FRONTEND FAILED: " + window.__fcError : (window.__fc || "FRONTEND FAILED: no result");
+    document.body.appendChild(out);
+  }
+  var p = window.__fcPromise;
+  if (p && typeof p.then === "function") {
+    p.then(function () { setTimeout(emit, 0); }, function (e) {
+      window.__fcError = window.__fcError || String(e && e.message || e);
+      setTimeout(emit, 0);
+    });
+  } else {
+    emit();
+  }
 })();
 """
 page = (STATIC / "index.html").read_text(encoding="utf-8").replace(
@@ -86,7 +99,7 @@ threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 profile = tempfile.mkdtemp(prefix="terminal-edge-")
 cmd = [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-       f"--user-data-dir={profile}", "--virtual-time-budget=20000", "--dump-dom", f"http://127.0.0.1:{port}/__checks.html"]
+       f"--user-data-dir={profile}", "--virtual-time-budget=30000", "--dump-dom", f"http://127.0.0.1:{port}/__checks.html"]
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
     dom = r.stdout or ""

@@ -112,4 +112,255 @@ finally:
 
 ds_md = c.data_status()["content"]
 check("main V5 data service by default" in ds_md and "--with-v4" in ds_md, "Data status documents V5-only default")
+
+# ---- http_json / _download retries, no-OECD-retry invariant, cached_disk backoff tiers, reset_runtime_caches
+import io as _io
+import urllib.error as _ue
+import urllib.request as _ur
+from composite.core import cache as _cache_mod
+from composite.core import http as _http
+
+_saved_delays = _http._RETRY_DELAYS
+_saved_urlopen = _ur.urlopen
+_http._RETRY_DELAYS = (0.0,)
+try:
+    _calls = [0]
+
+    def _flaky_503(req, timeout=None, **kw):
+        _calls[0] += 1
+        if _calls[0] == 1:
+            raise _ue.HTTPError(req.full_url, 503, "Unavailable", {}, _io.BytesIO(b""))
+        class _R:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b'{"ok": 1}'
+        return _R()
+
+    _ur.urlopen = _flaky_503
+    check(_http.http_json("https://example.com/test") == {"ok": 1} and _calls[0] == 2, "http_json retries once on 503")
+
+    _calls_429 = [0]
+    def _fail_429(req, timeout=None, **kw):
+        _calls_429[0] += 1
+        raise _ue.HTTPError(req.full_url, 429, "Too Many", {}, _io.BytesIO(b""))
+
+    _ur.urlopen = _fail_429
+    try:
+        _http.http_json("https://example.com/rate")
+        check(False, "429 should raise")
+    except c.CompositeError as e:
+        check(e.transient and _calls_429[0] == 1, "http_json 429 raises transient=True without retrying")
+
+    for _oecd_url in ("http://127.0.0.1:6900/api/v1/economy/gdp?provider=oecd", "http://127.0.0.1:6900/api/v1/oecd/nominal"):
+        _oecd_calls = [0]
+        def _fail_oecd_503(req, timeout=None, **kw):
+            _oecd_calls[0] += 1
+            raise _ue.HTTPError(req.full_url, 503, "Unavailable", {}, _io.BytesIO(b""))
+        _ur.urlopen = _fail_oecd_503
+        try:
+            _http.http_json(_oecd_url)
+            check(False, "OECD 503 should raise")
+        except c.CompositeError as e:
+            check(e.transient and _oecd_calls[0] == 1, f"http_json never retries OECD 503: {_oecd_url}")
+
+        _oecd_calls[0] = 0
+        def _fail_oecd_urlerr(req, timeout=None, **kw):
+            _oecd_calls[0] += 1
+            raise _ue.URLError("reset")
+        _ur.urlopen = _fail_oecd_urlerr
+        try:
+            _http.http_json(_oecd_url)
+            check(False, "OECD URLError should raise")
+        except c.CompositeError as e:
+            check(e.transient and _oecd_calls[0] == 1, f"http_json never retries OECD URLError: {_oecd_url}")
+
+    _dl_calls = [0]
+    def _dl_503(req, timeout=None, **kw):
+        _dl_calls[0] += 1
+        if _dl_calls[0] == 1:
+            raise _ue.HTTPError(req.full_url, 503, "Unavailable", {}, _io.BytesIO(b""))
+        class _R2:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b"ok"
+        return _R2()
+    _ur.urlopen = _dl_503
+    check(_http._download("https://example.com/file.csv") == b"ok" and _dl_calls[0] == 2, "_download retries once on 503")
+
+    _dl_calls[0] = 0
+    def _dl_urlerr(req, timeout=None, **kw):
+        _dl_calls[0] += 1
+        if _dl_calls[0] == 1:
+            raise _ue.URLError("dropped")
+        class _R3:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b"ok2"
+        return _R3()
+    _ur.urlopen = _dl_urlerr
+    check(_http._download("https://example.com/file.csv") == b"ok2" and _dl_calls[0] == 2, "_download retries once on URLError")
+
+    for _code, _exp_t in ((429, True), (404, False)):
+        _dl_calls[0] = 0
+        def _dl_no_retry(req, timeout=None, _c=_code, **kw):
+            _dl_calls[0] += 1
+            raise _ue.HTTPError(req.full_url, _c, "Err", {}, _io.BytesIO(b""))
+        _ur.urlopen = _dl_no_retry
+        try:
+            _http._download("https://example.com/file.csv")
+            check(False, f"_download {_code} should raise")
+        except c.CompositeError as e:
+            check(e.transient is _exp_t and _dl_calls[0] == 1, f"_download {_code} does not retry (transient={_exp_t})")
+
+    _dl_calls[0] = 0
+    def _dl_oecd_503(req, timeout=None, **kw):
+        _dl_calls[0] += 1
+        raise _ue.HTTPError(req.full_url, 503, "Unavailable", {}, _io.BytesIO(b""))
+    _ur.urlopen = _dl_oecd_503
+    try:
+        _http._download("https://sdmx.oecd.org/public/rest/data/x")
+        check(False, "_download OECD 503 should raise")
+    except c.CompositeError as e:
+        check(e.transient and _dl_calls[0] == 1, "_download never retries OECD URLs")
+finally:
+    _http._RETRY_DELAYS = _saved_delays
+    _ur.urlopen = _saved_urlopen
+
+# ---- cached_disk backoff tiers + memory cache non-shadowing + OECD / Too Many Requests 600s protection
+_saved_time_fn = _cache_mod.time.time
+_saved_cd = c.CACHE_DIR
+_tmp_bo = tempfile.TemporaryDirectory()
+_clk = [10000.0]
+try:
+    _cache_mod.time.time = lambda: _clk[0]
+    c.CACHE_DIR = pathlib.Path(_tmp_bo.name)
+    c.reset_runtime_caches()
+
+    # 1. Transient with saved copy -> 30s backoff, NOT shadowed by 1800s memory cache
+    (c.CACHE_DIR / "bo_trans_saved.json").write_text(json.dumps({"t": _clk[0] - 7200, "v": {"saved": 1}}), encoding="utf-8")
+    _ts_calls = [0]
+    def _bo_trans_saved():
+        _ts_calls[0] += 1
+        if _ts_calls[0] == 1:
+            raise c.CompositeError("upstream reset", transient=True)
+        return {"fresh": 2}
+    check(c.cached_disk("bo_trans_saved", 3600, _bo_trans_saved) == {"saved": 1} and _ts_calls[0] == 1,
+          "cached_disk serves saved copy on transient error")
+    _clk[0] += 10.0
+    check(c.cached_disk("bo_trans_saved", 3600, _bo_trans_saved) == {"saved": 1} and _ts_calls[0] == 1,
+          "cached_disk honors 30s backoff without calling fn")
+    _clk[0] += 25.0  # t + 35s > 30s backoff (must not be shadowed by 1800s mem TTL)
+    check(c.cached_disk("bo_trans_saved", 3600, _bo_trans_saved) == {"fresh": 2} and _ts_calls[0] == 2
+          and "bo_trans_saved" not in c._STALE_SINCE,
+          "cached_disk retries after 30s transient backoff and clears stale marker")
+
+    # 2. Transient without saved copy -> 10s backoff
+    _t_nosave = [0]
+    def _bo_trans_none():
+        _t_nosave[0] += 1
+        if _t_nosave[0] == 1:
+            raise c.CompositeError("timeout", transient=True)
+        return {"ok": True}
+    for _step in (0, 5):
+        if _step:
+            _clk[0] += _step
+        try:
+            c.cached_disk("bo_trans_none", 3600, _bo_trans_none)
+            check(False, "should fail while in 10s backoff")
+        except c.CompositeError:
+            pass
+    check(_t_nosave[0] == 1, "transient error without saved file backs off for 10s")
+    _clk[0] += 6.0  # +11s total
+    check(c.cached_disk("bo_trans_none", 3600, _bo_trans_none) == {"ok": True} and _t_nosave[0] == 2,
+          "transient error without saved file retries after 10s")
+
+    # 3. Non-transient with saved copy -> 120s backoff
+    (c.CACHE_DIR / "bo_perm_saved.json").write_text(json.dumps({"t": _clk[0] - 7200, "v": {"saved": 9}}), encoding="utf-8")
+    _ps_calls = [0]
+    def _bo_perm_saved():
+        _ps_calls[0] += 1
+        if _ps_calls[0] == 1:
+            raise c.CompositeError("bad schema", transient=False)
+        return {"fresh": 10}
+    check(c.cached_disk("bo_perm_saved", 3600, _bo_perm_saved) == {"saved": 9}, "non-transient serves saved")
+    _clk[0] += 60.0
+    check(c.cached_disk("bo_perm_saved", 3600, _bo_perm_saved) == {"saved": 9} and _ps_calls[0] == 1,
+          "non-transient with saved stays in 120s backoff at 60s")
+    _clk[0] += 65.0  # +125s total
+    check(c.cached_disk("bo_perm_saved", 3600, _bo_perm_saved) == {"fresh": 10} and _ps_calls[0] == 2,
+          "non-transient with saved retries after 120s")
+
+    # 4. Non-transient without saved -> 30s backoff
+    _pn_calls = [0]
+    def _bo_perm_none():
+        _pn_calls[0] += 1
+        if _pn_calls[0] == 1:
+            raise c.CompositeError("404 not found", transient=False)
+        return {"ok": 3}
+    try:
+        c.cached_disk("bo_perm_none", 3600, _bo_perm_none)
+    except c.CompositeError:
+        pass
+    _clk[0] += 20.0
+    try:
+        c.cached_disk("bo_perm_none", 3600, _bo_perm_none)
+    except c.CompositeError:
+        pass
+    check(_pn_calls[0] == 1, "non-transient without saved stays in 30s backoff at 20s")
+    _clk[0] += 15.0  # +35s total
+    check(c.cached_disk("bo_perm_none", 3600, _bo_perm_none) == {"ok": 3} and _pn_calls[0] == 2,
+          "non-transient without saved retries after 30s")
+
+    # 5. "Too Many Requests" and non-429 OECD failures keep 600s quota backoff
+    _tmr_calls = [0]
+    def _bo_tmr():
+        _tmr_calls[0] += 1
+        if _tmr_calls[0] == 1:
+            raise c.CompositeError("HTTP Error: Too Many Requests", transient=True)
+        return {"ok": "tmr"}
+    try:
+        c.cached_disk("bo_tmr", 3600, _bo_tmr)
+    except c.CompositeError:
+        pass
+    _clk[0] += 300.0
+    try:
+        c.cached_disk("bo_tmr", 3600, _bo_tmr)
+    except c.CompositeError:
+        pass
+    check(_tmr_calls[0] == 1, "'Too Many Requests' keeps 600s backoff at 300s")
+    _clk[0] += 305.0
+    check(c.cached_disk("bo_tmr", 3600, _bo_tmr) == {"ok": "tmr"} and _tmr_calls[0] == 2,
+          "'Too Many Requests' retries after 600s")
+
+    _oecd_bo_calls = [0]
+    def _bo_oecd():
+        _oecd_bo_calls[0] += 1
+        if _oecd_bo_calls[0] == 1:
+            raise c.CompositeError("upstream timeout", transient=True)
+        return {"ok": "oecd"}
+    try:
+        c.cached_disk("oecd_rates_long", 3600, _bo_oecd)
+    except c.CompositeError:
+        pass
+    _clk[0] += 300.0
+    try:
+        c.cached_disk("oecd_rates_long", 3600, _bo_oecd)
+    except c.CompositeError:
+        pass
+    check(_oecd_bo_calls[0] == 1, "non-429 OECD error keeps 600s quota protection")
+    _clk[0] += 305.0
+    check(c.cached_disk("oecd_rates_long", 3600, _bo_oecd) == {"ok": "oecd"} and _oecd_bo_calls[0] == 2,
+          "non-429 OECD error retries after 600s")
+finally:
+    _cache_mod.time.time = _saved_time_fn
+    c.CACHE_DIR = _saved_cd
+    c.reset_runtime_caches()
+    _tmp_bo.cleanup()
+
+c._cache[("t", 1)] = (0, 1)
+c._backoff["b"] = (0, "err")
+c._STALE_SINCE["s"] = 0
+_cleared = c.reset_runtime_caches()
+check(_cleared["cache"] >= 1 and _cleared["backoff"] >= 1 and _cleared["stale"] >= 1
+      and not c._cache and not c._backoff and not c._STALE_SINCE, "reset_runtime_caches clears all maps")
 done("test_trust")

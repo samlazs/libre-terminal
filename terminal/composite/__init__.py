@@ -14,12 +14,12 @@ import time as time
 
 from .core.http import (  # noqa: F401
     V5, V4, CompositeError, http_json, _which, api_full, api, src, uniq_sources, YAHOO_URL, yahoo_source,
-    _SSL, _ssl_context, BROWSER_UA, _download,
+    _SSL, _ssl_context, BROWSER_UA, _download, _RETRY_DELAYS,
 )
 from .core.cache import (  # noqa: F401
     CACHE_DIR, _cache, _locks, _guard, cached, _backoff, disk_name, _STALE_SINCE, _STALE_NOTES, _SWR_NOTES, _CtxPool,
     _CfShim, cf, _note_stale, _note_stale_ts, _note_swr_ts, _age_text, stale_text, cached_text, mtl_time, cached_disk,
-    _write_json, cached_complete, _curve_store,
+    _write_json, cached_complete, _curve_store, reset_runtime_caches,
 )
 from .core.dates import (  # noqa: F401
     minus_months, HORIZON_MONTHS, horizon_date, RANGE_YEARS, DAILY_RANGES, MONTHLY_RANGES,

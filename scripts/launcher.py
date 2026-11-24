@@ -154,6 +154,7 @@ def find_uv() -> str | None:
 
 
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_ORIG_URLOPEN = urllib.request.urlopen
 
 
 # ------------------------------------------------------------------ probing
@@ -480,7 +481,8 @@ def wait_for_warm(port: int, timeout: float = WARM_WAIT_TIMEOUT, poll: float = 1
     while True:
         data = None
         try:
-            with urllib.request.urlopen(url, timeout=5) as r:
+            opener = _LOCAL_OPENER.open if urllib.request.urlopen is _ORIG_URLOPEN else urllib.request.urlopen
+            with opener(url, timeout=5) as r:
                 data = json.loads(r.read().decode("utf-8"))
         except (OSError, ValueError, urllib.error.URLError):
             data = None
@@ -678,11 +680,19 @@ def kill_tree(pid: int):
         return
     try:
         target = os.getpgid(pid) == pid
-        (os.killpg if target else os.kill)(pid, signal.SIGTERM)
+        sig = os.killpg if target else os.kill
+        sig(pid, signal.SIGTERM)
         for _ in range(25):
             time.sleep(0.2)
-            os.kill(pid, 0)
-        (os.killpg if target else os.kill)(pid, signal.SIGKILL)
+            try:
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+                if reaped == pid and not target:
+                    break
+            except ChildProcessError:
+                pass
+            sig(pid, 0)
+        else:
+            sig(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
 
@@ -782,6 +792,22 @@ def cmd_restart(a):
     if len(set(p.values())) < 3:
         fail(f"Ports must differ: {p}")
     cmd_stop(argparse.Namespace(service=target, ui_port=a.ui_port, v5_port=a.v5_port, v4_port=a.v4_port))
+    wait_deadline = time.time() + 10.0
+    while time.time() < wait_deadline:
+        all_clear = True
+        for s in targets:
+            st = probe(s, p[s])
+            if st == "down":
+                continue
+            if st == "busy":
+                pids = list(listening_pids_map([p[s]]).get(p[s], ()))
+                if not any(ours(c) for c in command_lines(pids).values()):
+                    continue
+            all_clear = False
+            break
+        if all_clear:
+            break
+        time.sleep(0.25)
     _write_atomic(PORTS_FILE, json.dumps(p))
     if any(s in ("v5", "v4") for s in targets):
         other_up = any(probe(s, p[s]) == "up" for s in ("v5", "v4") if s not in targets)

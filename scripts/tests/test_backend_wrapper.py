@@ -658,14 +658,19 @@ def _test_tvchart_and_warm_route():
         _s1 = _tvdf.yf_symbol_info("SPY")
         _s2 = _tvdf.yf_symbol_info("spy")
         check(_s1 == _s2 and len(_info_calls) == 1, "install_tvchart_fix caches yf_symbol_info case-insensitively")
-        _tvdf.yf_symbol_info("EMPTY")
-        _tvdf.yf_symbol_info("EMPTY")
-        check(_info_calls.count("EMPTY") == 2, "install_tvchart_fix never caches None symbol info")
+        _orig_sleep = rb.time.sleep
+        rb.time.sleep = lambda _s: None
+        try:
+            _tvdf.yf_symbol_info("EMPTY")
+            _tvdf.yf_symbol_info("EMPTY")
+            check(_info_calls.count("EMPTY") == 4, "install_tvchart_fix retries once and never caches None symbol info")
 
-        _b1 = _tvdf.BarCache().get("SPY", "1d")
-        _b2 = _tvdf.BarCache().get("SPY", "1d")
-        check(_b1 == _b2 and len(_b1) == 1 and _fetch_calls.count(("SPY", "1d")) == 1, "BarCache shares bars across instances")
-        check(_tvdf.BarCache().get("EMPTY", "1d") == [] and _tvdf.BarCache().get("EMPTY", "1d") == [] and _fetch_calls.count(("EMPTY", "1d")) == 2, "BarCache never caches empty bars")
+            _b1 = _tvdf.BarCache().get("SPY", "1d")
+            _b2 = _tvdf.BarCache().get("SPY", "1d")
+            check(_b1 == _b2 and len(_b1) == 1 and _fetch_calls.count(("SPY", "1d")) == 1, "BarCache shares bars across instances")
+            check(_tvdf.BarCache().get("EMPTY", "1d") == [] and _tvdf.BarCache().get("EMPTY", "1d") == [] and _fetch_calls.count(("EMPTY", "1d")) == 4, "BarCache retries once and never caches empty bars")
+        finally:
+            rb.time.sleep = _orig_sleep
 
         _tvdf.BarCache().invalidate("SPY", "1d")
         _tvdf.BarCache().get("SPY", "1d")
@@ -848,5 +853,600 @@ def _test_v07_reliability():
 
 
 _test_v07_reliability()
+
+
+def _test_reliability_hardening():
+    import gc as _gc
+    import sys as _sys
+    import threading as _th
+    import types as _types
+    import weakref as _weakref
+
+    # 1. CACHE_POLICY attempts and pool_slot_spec for openbb_yfinance
+    check(rb.CACHE_POLICY["openbb_us_eia"][2] == 1, "CACHE_POLICY: openbb_us_eia attempts == 1")
+    check(rb.CACHE_POLICY["openbb_government_us"][2] == 2, "CACHE_POLICY: openbb_government_us attempts == 2")
+    check(rb.CACHE_POLICY["openbb_oecd"][2] == 1, "CACHE_POLICY: openbb_oecd attempts == 1")
+    check(
+        rb.pool_slot_spec("openbb_yfinance", "ui") == (("openbb_yfinance", "ui"), 5)
+        and rb.pool_slot_spec("openbb_yfinance", "x") == (("openbb_yfinance", "x"), 4),
+        "pool_slot_spec: openbb_yfinance gives 5 slots to ui and 4 to x",
+    )
+
+    # 2. install_yfinance_crumb_fix: poisoned crumbs, 401 recovery, concurrent 401 guard
+    _yf_names = ("yfinance", "yfinance.data", "yfinance.config", "yfinance.exceptions")
+    _saved_yf = {m: _sys.modules.get(m) for m in _yf_names}
+    try:
+        _yf_pkg = _types.ModuleType("yfinance")
+        _yf_data = _types.ModuleType("yfinance.data")
+        _yf_cfg = _types.ModuleType("yfinance.config")
+        _yf_exc = _types.ModuleType("yfinance.exceptions")
+
+        class _FakeRateLimit(Exception):
+            pass
+
+        class _FakeYFException(Exception):
+            pass
+
+        class _FakeNet:
+            retries = 0
+            proxy = None
+
+        class _FakeYfConfig:
+            network = _FakeNet()
+
+        _resp_q = []
+        _crumb_q = []
+        _get_cc_calls = []
+        _cache_clears = []
+        _strategy_calls = []
+        _req_params_seen = []
+
+        class _FakeCookieJar(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.clear_count = 0
+
+            def clear(self):
+                self.clear_count += 1
+                super().clear()
+
+        class _FakeYfData:
+            def __init__(self):
+                self._crumb = "init_crumb"
+                self._cookie = "init_cookie"
+                self._cookie_strategy = "basic"
+                self._cookie_lock = _th.Lock()
+                self._session = _types.SimpleNamespace(cookies=_FakeCookieJar({"init": "1"}), proxies=None)
+
+            def _set_session(self, session):
+                self._session = session
+
+            def _set_cookie_strategy(self, strategy):
+                _strategy_calls.append(strategy)
+                self._cookie_strategy = strategy
+
+            def _get_crumb_basic(self, timeout=30):
+                val = _crumb_q.pop(0)
+                if isinstance(val, BaseException):
+                    self._crumb = "Too Many Requests"
+                    raise val
+                self._crumb = val
+                return val
+
+            def _get_crumb_csrf(self, timeout=30):
+                val = _crumb_q.pop(0)
+                if isinstance(val, BaseException):
+                    self._crumb = "Too Many Requests"
+                    raise val
+                self._crumb = val
+                return val
+
+            def _get_cookie_basic(self, timeout=30):
+                _get_cc_calls.append(("cookie_basic", timeout))
+                return getattr(self, "_fake_cookie_basic_ok", True)
+
+            def _get_cookie_and_crumb(self, timeout=30):
+                with self._cookie_lock:
+                    _get_cc_calls.append(timeout)
+                    if getattr(self, "_fake_cc_exc", None) is not None:
+                        raise self._fake_cc_exc
+                    if self._crumb is None:
+                        if getattr(self, "_fake_cc_none", False):
+                            return None, self._cookie_strategy
+                        self._crumb = "fresh_crumb"
+                        self._cookie = "fresh_cookie"
+                    return self._crumb, self._cookie_strategy
+
+            def cache_get(self, *args, **kwargs):
+                return None
+
+            cache_get.cache_clear = lambda: _cache_clears.append(1)
+
+            def _make_request(self, url, request_method=None, body=None, params=None, timeout=30, data=None, headers=None):
+                raise AssertionError("original _make_request should be replaced")
+
+        def _fake_request_method(url, params=None, timeout=30, **kwargs):
+            _req_params_seen.append(dict(params or {}))
+            item = _resp_q.pop(0)
+            if callable(item):
+                return item(_yd)
+            return item
+
+        _yf_exc.YFRateLimitError = _FakeRateLimit
+        _yf_cfg.YfConfig = _FakeYfConfig
+        _yf_data.YfData = _FakeYfData
+        _yf_data.YFException = _FakeYFException
+        _yf_data._is_transient_error = lambda exc: isinstance(exc, TimeoutError)
+        _yf_data._normalize_proxy = lambda p: p
+        _yf_data.utils = _types.SimpleNamespace()
+        _yf_pkg.data = _yf_data
+        _yf_pkg.config = _yf_cfg
+        _yf_pkg.exceptions = _yf_exc
+
+        for _n, _m in zip(_yf_names, (_yf_pkg, _yf_data, _yf_cfg, _yf_exc)):
+            _sys.modules[_n] = _m
+
+        _ap = []
+        rb.install_yfinance_crumb_fix(_ap)
+        check(bool(_ap) and getattr(_FakeYfData, "_terminal_crumb_fixed", False), "install_yfinance_crumb_fix applies cleanly")
+        check(_FakeYfConfig.network.retries >= 2, "install_yfinance_crumb_fix raises YfConfig.network.retries >= 2")
+
+        _yd = _FakeYfData()
+        for _bad in ("<html>bad</html>", '{"error":"unauthorized"}', "", None, "Too Many Requests", "Unauthorized", "Invalid Crumb",
+                     "abc def", "abc\ndef", " good ", "x" * 65):
+            _crumb_q.append(_bad)
+            _got = _yd._get_crumb_basic()
+            check(_got is None and _yd._crumb is None, f"poisoned basic crumb cleared: {str(_bad)[:20]!r}")
+
+        _crumb_q.append(_FakeRateLimit("429"))
+        _rl_raised = False
+        try:
+            _yd._get_crumb_csrf()
+        except _FakeRateLimit:
+            _rl_raised = True
+        check(_rl_raised and _yd._crumb is None, "YFRateLimitError in _get_crumb_csrf clears _crumb before re-raising")
+
+        _crumb_q.append("good_crumb_123")
+        check(_yd._get_crumb_basic() == "good_crumb_123" and _yd._crumb == "good_crumb_123", "valid crumb is preserved")
+
+        # _get_cookie_basic memoizes _cookie = True in memory and respects False
+        _get_cc_calls.clear()
+        _yd._cookie = None
+        _yd._fake_cookie_basic_ok = False
+        check(
+            _yd._get_cookie_basic(15) is False and _yd._cookie is None and len(_get_cc_calls) == 1,
+            "_get_cookie_basic leaves _cookie=None when orig_cookie_basic returns False",
+        )
+        _yd._fake_cookie_basic_ok = True
+        check(
+            _yd._get_cookie_basic(15) is True
+            and _yd._get_cookie_basic(15) is True
+            and _yd._cookie is True
+            and len(_get_cc_calls) == 2,
+            "_get_cookie_basic memoizes _cookie=True across repeated calls",
+        )
+        _yd._cookie = None
+        check(
+            _yd._get_cookie_basic(15) is True and _yd._cookie is True and len(_get_cc_calls) == 3,
+            "clearing _cookie=None allows _get_cookie_basic to fetch again",
+        )
+
+        # _set_session ignores throwaway empty-cookie sessions when authenticated, but
+        # replaces _session and clears _cookie/_crumb when proxies are provided.
+        _orig_sess = _yd._session
+        _yd._cookie = True
+        _yd._crumb = "keep_crumb"
+        _throwaway_sess = _types.SimpleNamespace(cookies=_FakeCookieJar({}), proxies=None)
+        _yd._set_session(_throwaway_sess)
+        check(
+            _yd._session is _orig_sess and _yd._cookie is True and _yd._crumb == "keep_crumb",
+            "_set_session ignores throwaway empty-cookie session when authenticated",
+        )
+        _proxy_sess = _types.SimpleNamespace(cookies=_FakeCookieJar({}), proxies={"https": "http://127.0.0.1:8080"})
+        _yd._set_session(_proxy_sess)
+        check(
+            _yd._session is _proxy_sess and _yd._cookie is None and _yd._crumb is None,
+            "_set_session replaces session with proxies and resets _cookie/_crumb when new session has empty cookies",
+        )
+        _yd._session = _orig_sess
+
+        # 404 Not Found does NOT call _set_cookie_strategy, clear cookies, wipe _crumb, or retry
+        _yd._crumb = "keep_crumb"
+        _yd._cookie = "keep_cookie"
+        _yd._session.cookies = _FakeCookieJar({"k": "v"})
+        _get_cc_calls.clear()
+        _cache_clears.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.append(_types.SimpleNamespace(status_code=404, text="Not Found"))
+        _r_404 = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        check(
+            _r_404.status_code == 404
+            and _yd._crumb == "keep_crumb"
+            and _yd._cookie == "keep_cookie"
+            and _yd._session.cookies == {"k": "v"}
+            and _yd._session.cookies.clear_count == 0
+            and not _strategy_calls
+            and not _cache_clears
+            and len(_req_params_seen) == 1,
+            "404 Not Found does not wipe crumb/cookies, toggle strategy, or retry",
+        )
+
+        # 401 permanent feature-restriction does NOT call _set_cookie_strategy, wipe _crumb, or retry
+        _get_cc_calls.clear()
+        _cache_clears.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.append(_types.SimpleNamespace(status_code=401, text="User is unable to access this feature"))
+        _r_perm = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        check(
+            _r_perm.status_code == 401
+            and _yd._crumb == "keep_crumb"
+            and _yd._cookie == "keep_cookie"
+            and _yd._session.cookies == {"k": "v"}
+            and _yd._session.cookies.clear_count == 0
+            and not _strategy_calls
+            and not _cache_clears
+            and len(_req_params_seen) == 1,
+            "401 feature-restriction does not wipe crumb/cookies, toggle strategy, or retry",
+        )
+
+        # 401 Invalid Crumb clears crumb/cookie/session.cookies, refreshes without deadlocking on non-reentrant _cookie_lock, and retries once
+        _yd._crumb = "stale_crumb"
+        _yd._cookie = "stale_cookie"
+        _yd._session.cookies = _FakeCookieJar({"stale": "1"})
+        _get_cc_calls.clear()
+        _cache_clears.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.extend([
+            _types.SimpleNamespace(status_code=401, text="Invalid Crumb"),
+            _types.SimpleNamespace(status_code=200, text="ok"),
+        ])
+        _r = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        check(
+            _r.status_code == 200
+            and _get_cc_calls == [30, 15]
+            and len(_cache_clears) == 1
+            and _yd._crumb == "fresh_crumb"
+            and _yd._cookie == "fresh_cookie"
+            and len(_yd._session.cookies) == 0
+            and _yd._session.cookies.clear_count == 1
+            and _req_params_seen == [{"crumb": "stale_crumb"}, {"crumb": "fresh_crumb"}],
+            "401 Invalid Crumb resets crumb/cookie/session.cookies without deadlock, refreshes, and retries",
+        )
+
+        # Concurrent 401 where another thread already updated _crumb reuses new crumb without wiping _session.cookies again
+        _yd._crumb = "thread_a_crumb"
+        _yd._cookie = "thread_a_cookie"
+        _yd._session.cookies = _FakeCookieJar({"live": "1"})
+        _get_cc_calls.clear()
+        _cache_clears.clear()
+        _req_params_seen.clear()
+
+        def _mutate_crumb_during_req(inst):
+            inst._crumb = "thread_b_newer_crumb"
+            inst._cookie = "thread_b_newer_cookie"
+            return _types.SimpleNamespace(status_code=401, text="Invalid Crumb")
+
+        _resp_q.extend([
+            _mutate_crumb_during_req,
+            _types.SimpleNamespace(status_code=200, text="ok"),
+        ])
+        _r2 = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=20)
+        check(
+            _r2.status_code == 200
+            and _yd._crumb == "thread_b_newer_crumb"
+            and _yd._cookie == "thread_b_newer_cookie"
+            and _yd._session.cookies.clear_count == 0
+            and _yd._session.cookies == {"live": "1"}
+            and _req_params_seen == [{"crumb": "thread_a_crumb"}, {"crumb": "thread_b_newer_crumb"}],
+            "concurrent 401 reuses refreshed crumb without re-wiping session.cookies",
+        )
+
+        # 503 retries transiently without touching cookies/crumb
+        _yd._crumb = "steady_crumb"
+        _yd._session.cookies = _FakeCookieJar({"steady": "1"})
+        _get_cc_calls.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.extend([
+            _types.SimpleNamespace(status_code=503, text="Service Unavailable"),
+            _types.SimpleNamespace(status_code=200, text="ok"),
+        ])
+        _r503 = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        check(
+            _r503.status_code == 200
+            and _yd._crumb == "steady_crumb"
+            and _yd._session.cookies == {"steady": "1"}
+            and _yd._session.cookies.clear_count == 0
+            and not _strategy_calls
+            and len(_req_params_seen) == 2,
+            "503 retries transiently without touching cookies or crumb",
+        )
+
+        # 429 raises YFRateLimitError without wiping cookies or toggling strategy
+        _yd._crumb = "steady_crumb"
+        _yd._session.cookies = _FakeCookieJar({"steady": "1"})
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.append(_types.SimpleNamespace(status_code=429, text="Too Many Requests"))
+        _rl429 = False
+        try:
+            _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        except _FakeRateLimit:
+            _rl429 = True
+        check(
+            _rl429
+            and _yd._crumb == "steady_crumb"
+            and _yd._session.cookies == {"steady": "1"}
+            and _yd._session.cookies.clear_count == 0
+            and not _strategy_calls
+            and len(_req_params_seen) == 1,
+            "429 raises YFRateLimitError without wiping cookies or toggling strategy",
+        )
+
+        # If _get_cookie_and_crumb() raised YFRateLimitError and request gets 401, raise YFRateLimitError without re-hitting getcrumb or clearing cookies
+        _yd._crumb = "keep_rl_crumb"
+        _yd._cookie = "keep_rl_cookie"
+        _yd._session.cookies = _FakeCookieJar({"rl": "1"})
+        _yd._fake_cc_exc = _FakeRateLimit("429")
+        _get_cc_calls.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.append(_types.SimpleNamespace(status_code=401, text="Invalid Crumb"))
+        _rl_on_401 = False
+        try:
+            _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        except _FakeRateLimit:
+            _rl_on_401 = True
+        _yd._fake_cc_exc = None
+        check(
+            _rl_on_401
+            and _get_cc_calls == [30]
+            and _yd._session.cookies == {"rl": "1"}
+            and _yd._session.cookies.clear_count == 0
+            and not _strategy_calls
+            and len(_req_params_seen) == 1,
+            "401 after YFRateLimitError in _get_cookie_and_crumb does not wipe cookies or re-hit getcrumb",
+        )
+
+        # 401 Invalid Crumb refresh calls _get_cookie_and_crumb(timeout) once without redundant double strategy toggle
+        _yd._crumb = "stale_once"
+        _yd._cookie = "stale_once_cookie"
+        _yd._session.cookies = _FakeCookieJar({"s": "1"})
+        _yd._fake_cc_none = True
+        _get_cc_calls.clear()
+        _strategy_calls.clear()
+        _req_params_seen.clear()
+        _resp_q.extend([
+            _types.SimpleNamespace(status_code=401, text="Invalid Crumb"),
+            _types.SimpleNamespace(status_code=200, text="ok"),
+        ])
+        _r_notog = _yd._make_request("https://query1.finance.yahoo.com/v7/finance/quote", _fake_request_method, timeout=15)
+        _yd._fake_cc_none = False
+        check(
+            _r_notog.status_code == 200
+            and _get_cc_calls == [30, 15]
+            and not _strategy_calls
+            and _req_params_seen == [{"crumb": "stale_once"}, {}],
+            "401 Invalid Crumb refresh calls _get_cookie_and_crumb(timeout) once without redundant strategy toggle",
+        )
+
+        # install_yfinance_options_fix: patches aextract_data + extract_data, uses locked crumb reset on crumb 401, ignores permanent 401 and 429
+        _opt_names = ("openbb_yfinance", "openbb_yfinance.models", "openbb_yfinance.models.options_chains")
+        _saved_opt = {m: _sys.modules.get(m) for m in _opt_names}
+        try:
+            _opt_pkg = _types.ModuleType("openbb_yfinance")
+            _opt_models = _types.ModuleType("openbb_yfinance.models")
+            _opt_mod = _types.ModuleType("openbb_yfinance.models.options_chains")
+            _opt_outcomes = []
+            _opt_calls = [0]
+
+            class _FakeOptionsFetcher:
+                @staticmethod
+                async def aextract_data(query, credentials=None, **kwargs):
+                    _opt_calls[0] += 1
+                    nxt = _opt_outcomes.pop(0)
+                    if isinstance(nxt, BaseException):
+                        raise nxt
+                    return nxt
+
+            _FakeOptionsFetcher.extract_data = _FakeOptionsFetcher.aextract_data
+            _opt_mod.YFinanceOptionsChainsFetcher = _FakeOptionsFetcher
+            _opt_models.options_chains = _opt_mod
+            _opt_pkg.models = _opt_models
+            for _n, _m in zip(_opt_names, (_opt_pkg, _opt_models, _opt_mod)):
+                _sys.modules[_n] = _m
+
+            # Make YfData() return singleton _yd for options fix test
+            _orig_yfdata_cls = _yf_data.YfData
+            _yf_data.YfData = lambda: _yd
+            try:
+                _opt_ap = []
+                rb.install_yfinance_options_fix(_opt_ap)
+                check(bool(_opt_ap) and _FakeOptionsFetcher.extract_data is _FakeOptionsFetcher.aextract_data,
+                      "install_yfinance_options_fix patches both aextract_data and extract_data")
+
+                _yd._crumb = "old_opt_c"
+                _yd._cookie = "old_opt_k"
+                _yd._session.cookies = _FakeCookieJar({"opt": "1"})
+                _opt_calls[0] = 0
+                _opt_outcomes[:] = [
+                    RuntimeError("HTTP 401 Invalid Crumb"),
+                    {"underlying": {"symbol": "AAPL"}, "chains": [{"strike": 200}]},
+                ]
+                _opt_res = asyncio.run(_FakeOptionsFetcher.extract_data(_types.SimpleNamespace(symbol="AAPL")))
+                check(_opt_res["underlying"]["symbol"] == "AAPL" and _opt_calls[0] == 2
+                      and _yd._crumb is None and _yd._cookie is None and _yd._session.cookies.clear_count == 1,
+                      "options fix resets crumb via _terminal_reset_crumb on crumb 401 and retries once")
+
+                for _perm_msg in ("401 User is unable to access this feature", "429 Too Many Requests"):
+                    _yd._crumb = "keep_opt_c"
+                    _yd._cookie = "keep_opt_k"
+                    _yd._session.cookies = _FakeCookieJar({"opt": "1"})
+                    _opt_calls[0] = 0
+                    _opt_outcomes[:] = [RuntimeError(_perm_msg)]
+                    _raised_perm = False
+                    try:
+                        asyncio.run(_FakeOptionsFetcher.aextract_data(_types.SimpleNamespace(symbol="AAPL")))
+                    except RuntimeError:
+                        _raised_perm = True
+                    check(_raised_perm and _opt_calls[0] == 1 and _yd._crumb == "keep_opt_c"
+                          and _yd._cookie == "keep_opt_k" and _yd._session.cookies.clear_count == 0,
+                          f"options fix never clears crumb/cookies on {_perm_msg!r}")
+            finally:
+                _yf_data.YfData = _orig_yfdata_cls
+        finally:
+            for _n, _old in _saved_opt.items():
+                if _old is None:
+                    _sys.modules.pop(_n, None)
+                else:
+                    _sys.modules[_n] = _old
+    finally:
+        for _n, _old in _saved_yf.items():
+            if _old is None:
+                _sys.modules.pop(_n, None)
+            else:
+                _sys.modules[_n] = _old
+
+    # 3. BarCache.get & yf_symbol_info retry once and fall back to stale cache
+    _tv_names = (
+        "openbb_yfinance",
+        "openbb_yfinance.utils",
+        "openbb_yfinance.utils.tvchart_datafeed",
+        "openbb_yfinance.utils.tvchart_native",
+    )
+    _saved_tv = {m: _sys.modules.get(m) for m in _tv_names}
+    _orig_sleep = rb.time.sleep
+    _orig_mono = rb.time.monotonic
+    try:
+        _pkg = _types.ModuleType("openbb_yfinance")
+        _utils = _types.ModuleType("openbb_yfinance.utils")
+        _tvdf = _types.ModuleType("openbb_yfinance.utils.tvchart_datafeed")
+        _tvn = _types.ModuleType("openbb_yfinance.utils.tvchart_native")
+
+        _now = [100.0]
+        rb.time.sleep = lambda _s: None
+        rb.time.monotonic = lambda: _now[0]
+
+        _info_seq = []
+        _bar_seq = []
+
+        def _yf_info(sym):
+            res = _info_seq.pop(0)
+            if isinstance(res, BaseException):
+                raise res
+            return res
+
+        def _yf_fetch(sym, res):
+            val = _bar_seq.pop(0)
+            if isinstance(val, BaseException):
+                raise val
+            return val
+
+        class _FakeBarCache:
+            def __init__(self):
+                self._lock = _th.Lock()
+                self._cache = {}
+
+            def invalidate(self, symbol, resolution=None):
+                pass
+
+        async def _orig_tv_html(symbol="AAPL", interval="1d", theme="dark"):
+            return "<html><body></body></html>"
+
+        _tvdf.DERIVED_RESOLUTIONS = {}
+        _tvdf.normalize_resolution = lambda r: str(r or "1d").lower()
+        _tvdf.aggregate_bars = lambda bars, _f: bars
+        _tvdf.yf_symbol_info = _yf_info
+        _tvdf.yf_fetch_full_history = _yf_fetch
+        _tvdf.BarCache = _FakeBarCache
+        _tvn.tvchart_widget_html = _orig_tv_html
+        _pkg.utils = _utils
+        _utils.tvchart_datafeed = _tvdf
+        _utils.tvchart_native = _tvn
+
+        for _n, _m in zip(_tv_names, (_pkg, _utils, _tvdf, _tvn)):
+            _sys.modules[_n] = _m
+
+        rb.install_tvchart_fix([])
+
+        # Retry once on transient failure
+        _info_seq.extend([RuntimeError("transient"), {"name": "Apple", "ticker": "AAPL"}])
+        check(_tvdf.yf_symbol_info("AAPL") == {"name": "Apple", "ticker": "AAPL"}, "yf_symbol_info retries once on error")
+
+        _bar_seq.extend([[], [{"time": 1700000000, "close": 190.0}]])
+        _bc = _tvdf.BarCache()
+        check(_bc.get("AAPL", "1d") == [{"time": 1700000000, "close": 190.0}], "BarCache.get retries once on empty")
+
+        # Expire TTL and fail both attempts -> serve stale cache
+        _now[0] += 100000.0
+        _info_seq.extend([None, RuntimeError("still down")])
+        check(_tvdf.yf_symbol_info("AAPL") == {"name": "Apple", "ticker": "AAPL"}, "yf_symbol_info falls back to stale cache")
+
+        _bc._cache.clear()
+        _bar_seq.extend([RuntimeError("err1"), []])
+        check(_bc.get("AAPL", "1d") == [{"time": 1700000000, "close": 190.0}], "BarCache.get falls back to stale cache")
+
+        # Derived-resolution stale fallback when source resolution fails/returns empty after TTL expiry
+        _tvdf.DERIVED_RESOLUTIONS = {"4h": {"source": "1h", "factor": 4}}
+        _tvdf.aggregate_bars = lambda bars, factor: [{"time": bars[0]["time"], "close": bars[0]["close"] * factor}] if bars else []
+        _bar_seq.extend([[{"time": 1700000000, "close": 210.0}]])
+        check(_bc.get("AAPL", "4h") == [{"time": 1700000000, "close": 840.0}],
+              "BarCache.get builds derived resolution from source bars")
+        _bc.invalidate("AAPL", "1h")
+        _now[0] += 100000.0
+        _bc._cache.clear()
+        _bar_seq.extend([RuntimeError("src1"), RuntimeError("src2")])
+        check(_bc.get("AAPL", "4h") == [{"time": 1700000000, "close": 840.0}],
+              "BarCache.get falls back to stale derived-resolution cache when source fails")
+
+        # tvchart_widget_html overlay delays ws:close lockout and lets hide() clear closeTimer
+        _ov_html = asyncio.run(_tvn.tvchart_widget_html("AAPL", "1d", "dark"))
+        check('["ws:close","close"]' in _ov_html and "closeTimer" in _ov_html and "if(hidden)return;hidden=true;" in _ov_html,
+              "tvchart_widget_html overlay gives ws:close reconnect grace window and keeps hide() unlocked")
+    finally:
+        rb.time.sleep = _orig_sleep
+        rb.time.monotonic = _orig_mono
+        for _n, _old in _saved_tv.items():
+            if _old is None:
+                _sys.modules.pop(_n, None)
+            else:
+                _sys.modules[_n] = _old
+
+    # 4. WeakKeyDictionary event-loop GC checks for install_thread_offload and install_imf_arcgis_fix
+    from openbb_core.provider.abstract import fetcher as _abs_fetcher
+    _orig_mc = _abs_fetcher.maybe_coroutine
+    try:
+        rb.install_thread_offload([])
+        _lp1 = asyncio.new_event_loop()
+        _ref1 = _weakref.ref(_lp1)
+        check(_lp1.run_until_complete(_abs_fetcher.maybe_coroutine(lambda: 42)) == 42, "install_thread_offload runs sync callable")
+        _lp1.run_until_complete(_lp1.shutdown_default_executor())
+        _lp1.close()
+        del _lp1
+        _gc.collect()
+        check(_ref1() is None, "install_thread_offload WeakKeyDictionary does not leak closed event loops")
+    finally:
+        _abs_fetcher.maybe_coroutine = _orig_mc
+
+    _saved_get_sess = core_helpers.get_async_requests_session
+    try:
+        async def _ok_sess(**_kw):
+            return _FakeSession(lambda _u: _FakeResp(200, {"features": []}))
+        core_helpers.get_async_requests_session = _ok_sess
+        _lp2 = asyncio.new_event_loop()
+        _ref2 = _weakref.ref(_lp2)
+        check(_lp2.run_until_complete(pwh._arcgis_query("https://example.com/q?")) == [], "install_imf_arcgis_fix _arcgis_query works across loops")
+        _lp2.close()
+        del _lp2
+        _gc.collect()
+        check(_ref2() is None, "install_imf_arcgis_fix WeakKeyDictionary does not leak closed event loops")
+    finally:
+        core_helpers.get_async_requests_session = _saved_get_sess
+
+
+_test_reliability_hardening()
 
 done("test_backend_wrapper")

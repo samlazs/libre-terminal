@@ -1,35 +1,31 @@
 # Architecture and developer notes
 
-This page is for people who change the code. The [README](../README.md) covers installing and using
-the terminal.
+This page is for people who change the code. The [README](../README.md) covers installing and using the terminal.
 
 ## Processes
 
-Two local processes by default (plus an optional third legacy backend via `--with-v4`), all bound to `127.0.0.1`:
+Two local processes by default, plus an optional third (legacy) backend with `--with-v4`. All of them bind to `127.0.0.1`.
 
 | Piece | Default port | What it is |
 |---|---|---|
-| Terminal UI | 6950 | `terminal/server.py` (standard library only) serves the page in `terminal/static/` (plain HTML, CSS and JavaScript, no build step), the dashboards, saved state and the views the terminal computes itself (`/x/*`). |
-| Data backend V5 | 6900 | OpenBB Platform 5 in `.venv-v5`: about 20 data sources (default). |
-| Legacy backend V4 *(opt-in)* | 6901 | OpenBB 4.7 in `.venv-v4`, kept for sources V5 dropped (FMP, EconDB, Finviz, Intrinio, Polygon, Tiingo and others). Opt-in via `install --with-v4` and `start --with-v4` (`--skip-v4` accepted as a backward-compatible alias). |
+| Terminal UI | 6950 | `terminal/server.py` (standard library only) serves the page in `terminal/static/` (plain HTML, CSS and JavaScript, no build step), the built dashboards, saved state and the views the terminal computes itself (`/x/*`). |
+| Data backend V5 | 6900 | OpenBB Platform 5.0 in `.venv-v5`, the default backend. |
+| Legacy backend V4 *(opt-in)* | 6901 | OpenBB 4.7 in `.venv-v4`, kept for sources V5 dropped (FMP, EconDB, Finviz, Intrinio, Polygon, Tiingo and others). Opt-in with `install --with-v4` and `start --with-v4`. `--skip-v4` forces V5-only, even with `--with-v4`. |
 
-**V5-only is the default; V4 is opt-in.** `.venv-v4` adds about 480 MB (~1.5 GB total vs ~1 GB V5-only) and a second backend process for 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ, including the legacy cards on `Segments & KPIs`). S&P 500 valuation multiples (`multpl.com`) are owned directly by `terminal/multpl.py` (`/x/sp500_multiples`), `Screeners & Movers > Screener` uses V5's Yahoo Finance screener, and `ETFs & Mutual Funds > ETF Profile` stays complete with 7 keyless V5 cards. With `--with-v4`, the generator includes the legacy cards and exposes V4 options in source pickers; by default (`V5-only`), it builds without them so nothing shows broken.
+**V5-only is the default; V4 is opt-in.** `.venv-v4` adds about 480 MB (about 1.5 GB in total, against about 1 GB for V5-only) and a second backend process for 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ, including the legacy cards on `Segments & KPIs`). S&P 500 valuation multiples (`multpl.com`) come from `terminal/multpl.py` (`/x/sp500_multiples`). `Screeners & Movers > Screener` uses V5's Yahoo Finance screener, and `ETFs & Mutual Funds > ETF Profile` stays complete with 7 keyless V5 cards. With `--with-v4` the generator includes the legacy cards and exposes V4 options in source pickers. By default it builds without them, so nothing shows broken.
 
-**Platform support.** Windows 10/11 is the officially supported and tested platform. The root `.sh` scripts (`install.sh`, `start.sh`, `stop.sh`, `setup-keys.sh`) share `scripts/launcher.py` and are kept clearly marked experimental/untested.
+**Platform support.** Windows 10/11 is the officially supported and tested platform. The root `.sh` scripts (`install.sh`, `start.sh`, `stop.sh`, `setup-keys.sh`) share `scripts/launcher.py` and are marked experimental and untested.
 
 The browser calls the backends directly for their own widgets and calls the UI server for `/x/*` views.
-`scripts/launcher.py` installs, starts (each service under a supervisor), stops and checks everything;
-the root `.cmd` and `.sh` files are thin wrappers around it. Ports come from `--ui-port/--v5-port/--v4-port`,
-`TERMINAL_UI_PORT/TERMINAL_V5_PORT/TERMINAL_V4_PORT`, or `local/run/ports.json` (the last start).
+`scripts/launcher.py` installs, starts (each service under a supervisor), stops and checks everything. The root `.cmd` and `.sh` files are thin wrappers around it. Ports come from `--ui-port/--v5-port/--v4-port`, the `TERMINAL_UI_PORT/TERMINAL_V5_PORT/TERMINAL_V4_PORT` environment variables, or `local/run/ports.json` (the last start).
 
-**Supervision.** A service that exits abnormally (any exit code other than 0, including the watchdog's 75) is
-restarted, at most 5 times in 10 minutes. `stop` kills only processes this terminal started (pid files in
-`local/run/`), never another program on the same port.
+**Supervision.** A service that exits abnormally (any exit code other than 0, including the watchdog's 75) is restarted after pauses of 2, 5, 15 and 30 seconds. After 5 abnormal exits within 10 minutes the supervisor gives up and writes `local/run/<name>.stopped.json`; `/api/services` reports it and the page stops waiting. `stop` kills only processes this terminal started (pid files in `local/run/`), never another program on the same port. `start` applies `local/api_keys.env` when it has changed since the last apply (`local/run/keys-applied.json`).
 
 ## File map
 
 ```
 scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / check / snapshot / diff / run
+scripts/install.ps1          Windows installer behind Install.cmd: makes sure uv is present, then runs launcher.py install
 scripts/run_backend.py       starts a backend with the runtime patches below and the freeze watchdog
 scripts/build_dashboards.py  compact dashboard generator engine -> local/dashboards.json
 scripts/dashboards/          pure dashboard data & spec DSL (overrides.py, layouts.py)
@@ -39,9 +35,9 @@ scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
-terminal/server.py           UI server: static files (ETag/304, gzip), /api/config, /api/warm, /api/dashboards, /api/state, /x/*
+terminal/server.py           UI server: static page, dashboards, saved state, service status and restart, /x/* views (see UI server)
 terminal/version.py          release version constant (VERSION) shared by server.py, /api/config and project_check.py
-terminal/composite/          the terminal's own views package (boards, curves, policy rates, macro charts, comps, earnings...) and two-phase cache warmer (warm.py)
+terminal/composite/          the terminal's own views, split by topic (core/, markets/, rates/, macro/, geo/, equity/); warm.py is the two-phase cache warmer
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
 terminal/bonds.py            FINRA TRACE corporate bond lookup and yield-by-maturity curve (/x/bond_lookup, /x/bond_curve), bond pricer and debt maturity wall (/x/bond_pricer, /x/debt_maturity_wall)
@@ -71,10 +67,12 @@ ruff.toml                    static bug-check configuration for terminal/ and sc
 
 ## Dashboards and the generator
 
-`scripts/dashboards/` holds the plain structure and override data (`overrides.py`, `layouts.py`) while
-`scripts/build_dashboards.py` is the compact generator engine (re-exporting all public data/DSL symbols) that writes
-`local/dashboards.json` on every start (`launcher.py dashboards` rebuilds it; `--report` prints the layout).
-Current default V5-only build: 28 dashboards, 120 tabs, 786 cards, 30 concept families; every data function placed, none by fallback (`--with-v4` adds 39 legacy cards across the same 120 tabs, 43 concept families, and 1,002 data functions).
+`scripts/dashboards/` holds the plain structure and override data (`overrides.py`, `layouts.py`). `scripts/build_dashboards.py` is the generator engine: it re-exports all public data and DSL symbols and writes `local/dashboards.json` on every start. `launcher.py dashboards` rebuilds it, and `scripts/build_dashboards.py --report` prints the layout and coverage.
+
+Counts from `--report`:
+
+- Default V5-only build: 28 dashboards, 120 tabs, 786 cards, 30 concept families, and 941/941 data functions placed, none by fallback.
+- With `--with-v4`: 825 cards (39 of them legacy) and 43 concept families across the same 120 tabs, with 1,002/1,002 functions placed.
 
 Conventions:
 
@@ -108,6 +106,34 @@ Every `/x/*` answer carries `sources: [{name, detail, url}]` (`composite.src`, `
 menu to switch source and links to the originals; chart footers, PNG and CSV exports carry the same source
 line. `scripts/check_sources.py` checks this live; `scripts/tests/test_sources.py` offline.
 
+## UI server (`terminal/server.py`)
+
+Standard library only. It serves the page and its static files, the built dashboards and saved state. It never proxies market data: the browser calls the two backends directly.
+
+| Method and path | What it returns |
+|---|---|
+| `GET /`, `/index.html` | The page, sent with the Content-Security-Policy described below |
+| `GET /api/config` | The version and settings the page needs |
+| `GET /api/dashboards` | The built dashboards from `local/dashboards.json`; `503` until the first build |
+| `GET /api/state`, `PUT /api/state` | The saved layout (see Saved state below); a `PUT` with a stale `_rev` gets `409` |
+| `GET /x/*` | The terminal's own views, same origin only |
+| `GET /widgets.json` | The terminal's own view definitions (`xwidgets.py`) |
+| `GET /api/services` | Each backend as running, stopped (with the reason) or not started, plus restart progress |
+| `GET /api/warm` | Warm-up status of the composite views |
+| `GET /vendor/plotly.min.js` | The Plotly bundle from the installed `plotly` package |
+| `POST /api/services/restart` | Optional JSON body `{"target": "backends"}`, or `"v5"` / `"v4"`. Answers `202` at once, resets the composite runtime caches, runs `launcher.py restart` in the background and warms the views afterwards. The top-bar **Restart** button (`#btn-restart`) calls it. |
+| `POST /api/clientlog` | A card reports an error; it is written to `local/logs/ui.log` under a reference code |
+
+Static files and the vendor bundle answer with an ETag (`304` when unchanged). `/api/state`, `/api/dashboards` and eligible text responses are gzip-compressed when the browser accepts gzip.
+
+**Security.**
+
+- **Host allow-list.** Only `127.0.0.1` and `localhost` on this port are answered; any other `Host` gets 403. This blocks DNS-rebinding pages.
+- **Same origin for state, views and writes.** `/x/*`, `PUT /api/state`, `POST /api/clientlog` and `POST /api/services/restart` refuse cross-site requests (`Sec-Fetch-Site`) and any `Origin` other than the page's own (403). Requests with neither header, such as scripts or curl, pass.
+- **Content-Security-Policy on the page** (`content_security_policy()` in `server.py`): scripts and styles only from the page's own origin (Plotly is served from `/vendor`), data only from the two local backends, frames from those backends, https pages (provider widgets, SEC documents) and `blob:` (PDFs). Plugins (`object-src`) and base URLs are disabled, and the page can be framed only by its own origin.
+- **Response headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` by default, so the browser always revalidates.
+- **Cache cleanup.** A daemon thread runs `local_paths.prune_local()` every 24 hours. It removes cache files untouched for 30 days (backend entries after 14 days) and freeze dumps after 14 days, then trims `local/cache/` to 150 MB, oldest first.
+
 ## Saved state (`local/state/state.json`)
 
 One JSON document, saved by the page with a revision number (`_rev`): the server refuses a stale write (409),
@@ -130,8 +156,8 @@ Only adding, removing, moving or resizing cards, changing their settings or titl
 built-in tab as edited (orange dot); flips, chart/table switches and the settings bar are view preferences (`cardview`).
 A state.json that cannot be parsed is never overwritten: the server moves it aside as `state.corrupt-<time>.json` and
 restores the newest valid daily copy (the page says so), or answers 503 and the page shows the defaults without saving.
-Writes go through a temporary file and an atomic replace. `/api/state`, `/api/dashboards`, and static/vendor files answer with an ETag (`304`), and eligible HTTP 200 text/JSON responses are gzip-compressed when the client sends `Accept-Encoding: gzip`.
-In-page cleanups must change `T.S.state` and then save; otherwise a pending save overwrites them.
+Writes go through a temporary file and an atomic replace. In-page cleanups must change `T.S.state` and then save;
+otherwise a pending save overwrites them.
 
 ## Routing by ticker
 
@@ -150,10 +176,14 @@ Applied in memory at start; no installed file is modified.
   close, which was real then (`fx_daily_bars`, `test_fx.py`). The TradingView datafeed is routed through the same
   bars, and its header counts from the previous of those closes (`install_fx_chart_fix`).
 - Output streams are guarded (no "I/O operation on closed file" crash), and log records are redacted.
-- Disk cache for slow providers (EIA, FiscalData, Fama-French, CFTC, USDA, BLS, IMF) in `local/cache/backend/`,
-  with a bounded wait and background fill.
+- **Disk cache for slow providers** (`CACHE_POLICY`, the only persistent cache policy; files in `local/cache/backend/`).
+  Time to live: 3 h for FiscalData, CFTC, the Federal Reserve and FRED; 6 h for EIA, BLS and ECB; 12 h for USDA, IMF,
+  JODI and OECD; 24 h for Fama-French. OECD gets one attempt because its hourly quota is strict. A failed refresh
+  serves the last good answer for up to 14 days and marks it stale on the card. A first request waits at most 45 to 55 s
+  (without a limit for BLS, IMF and OECD); after that the card says the data is still loading, and the fill continues in
+  the background. Empty results are not stored. `X-Terminal-Refresh: 1` bypasses the cache.
 - OECD fails fast on HTTP 429 with a readable message.
-- EIA returns the latest 5,000 rows unless a limit is set; at most 4 EIA calls in flight, 3 retries.
+- EIA returns the latest 5,000 rows unless a limit is set; at most 4 EIA calls are in flight, with up to 3 attempts per request.
 - SEC company facts: standalone quarters of year-to-date items (cash flows) are derived per fiscal year, chained by
   period start rather than by the filing's `fy` (which mixes years and dropped most quarters).
 - Yahoo analyst actions: newest first, and no 0.00 price target where a firm published none.
@@ -169,10 +199,13 @@ Applied in memory at start; no installed file is modified.
   snapshots from Yahoo. `note_substitute` sends `X-Terminal-Source` and `X-Terminal-Fallback`, which the card shows
   as its Source and footer note. An async fetcher's `extract_data` must be the coroutine itself: `asyncio.run` inside
   it binds openbb_cboe's shared HTTP cache to a dead event loop.
-- Request guard: Host allow-list (blocks DNS rebinding), Origin must be the UI (any local host name, case-insensitive),
-  requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names that origin only, error
-  bodies redacted, unhandled pre-header exceptions return sanitized HTTP 500 JSON with CORS headers;
-  `/_terminal/warm_chart` pre-warms TradingView bars/symbol metadata inside the guard without altering OpenAPI. The UI page carries a Content-Security-Policy (server.py `content_security_policy`).
+- **Backend request guard** (`install_guard`): Host allow-list (blocks DNS rebinding), Origin must be the UI (any local
+  host name, case-insensitive), requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names
+  that origin only, error bodies redacted, unhandled pre-header exceptions return sanitized HTTP 500 JSON with CORS
+  headers. `/_terminal/warm_chart` pre-warms TradingView bars and symbol metadata inside the guard without altering OpenAPI.
+- Reliability hardening: `install_yfinance_crumb_fix` prevents `yfinance.data.YfData` from persisting error text into
+  `_crumb` on non-200 responses and serializes concurrent-thread 401 recovery; TradingView uses stale-cache fallback and
+  retry; composite endpoints apply HTTP retries, scoped disk-cache backoff, and aligned frontend/backend timeouts and retries.
 - TradingView widget: `install_tvchart_fix` shares bounded LRU caches across `yf_symbol_info` (600 s) and `BarCache`
   (300 s), never caching empty results; strips non-finite `NaN`/`Inf` bars, repairs active-session daily bars from
   Yahoo metadata, forces `allow_nan=False` in `pywry` WebSocket frames, delays WebSocket room teardown across transient
@@ -189,8 +222,10 @@ Applied in memory at start; no installed file is modified.
 
 ## Tests
 
+Examples use `python` for the environment's interpreter: `.venv-v5\Scripts\python.exe` on Windows, `.venv-v5/bin/python` elsewhere.
+
 ```
-python scripts/launcher.py test [pattern...] [--fast]  # parallel offline checks (~5 s; --fast skips headless browser)
+python scripts/launcher.py test [pattern...] [--fast]  # parallel offline checks (~11 s; --fast skips the headless browser)
 python scripts/launcher.py check                       # BOM/LF/CRLF, AST/JSON, ruff, hygiene/secrets, offline sources, state, notes
 python scripts/launcher.py snapshot [--label NAME]     # zip publishable tree to local/snapshots/ (skips if unchanged)
 python scripts/launcher.py diff [--stat]               # diff working tree against the latest snapshot
@@ -201,31 +236,29 @@ python scripts/launcher.py health --dry-run            # paced card health runne
 python scripts/check_sources.py [--offline]            # source-contract check (live or against recorded catalogs)
 ```
 
-Use the environment's Python (`.venv-v5\Scripts\python.exe` on Windows, `.venv-v5/bin/python` elsewhere).
+A full `test` run reports **4,729 checks across 43 test files**, all passing. `test_frontend.py` contributes 315 browser checks.
+The browser checks are skipped with a notice when no headless Edge or Chrome is installed.
 Each `test_*.py` runs in its own process with a temporary `local/` folder cleaned up at exit:
 
 | File | Covers |
 |---|---|
-| `test_numbers.py`, `test_fx.py`, `test_returns.py`, `test_rates.py`, `test_ev.py`, `test_peer_ratios.py`, `test_gauges.py` | FX direction, 17:00 NY FX closes, TradingView FX fix, currency strength, yield changes in bp, total/price returns, EV currency normalization, peer ratios, regional/Fed gauges, `country_monitor`, `_rolling`, `CALCS`, `chokepoint_monitor` |
-| `test_curves.py`, `test_policy_path.py`, `test_cds.py`, `test_bonds.py`, `test_banks.py`, `test_cryptovol.py` | Sovereign curve parsers/store, CFTC OIS policy path, CDS index conventions, FINRA TRACE bond lookup, FDIC/FFIEC bank views, Deribit DVOL vs realised vol |
-| `test_earnings.py`, `test_snapshot.py`, `test_sec_quarters.py`, `test_sec_growth.py`, `test_futures.py`, `test_funds.py`, `test_nasdaq_etf.py` | Earnings model & implied move, snapshot text, SEC YTD-derived quarters & growth units, futures curves, fund multiples/TMX holdings, Nasdaq ETF fallback |
-| `test_columns.py`, `test_sources.py`, `test_trust.py`, `test_timezone.py`, `test_news.py`, `test_fred.py`, `test_links.py`, `test_multpl.py` | Column headers/formats/units, source contract & v4 saved-state check, stale/delayed/fallback trust signals, Montreal timezones, news ranking/dedup, keyless FRED CSV, company jump links, multpl.com S&P 500 valuation multiples |
-| `test_medium.py`, `test_low.py`, `test_p4.py` | FRED cache slicing, weekly YoY, STEO forecast split, BIS daily policy, non-trading-day bases, SWR per-symbol history cache, cache eviction |
-| `test_generator.py` | routing by ticker; full build replayed from the catalogs the last live build recorded in `local/cache/catalog-*.json`: coverage, unique and stable ids, renamed tabs, V5-only default build without V4 |
-| `test_cboe_fallback.py` | Black-76 by hand, parity forward, blank-not-zero, substitute loader and chart builders |
-| `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Point-in-time multiples and percentile bands, ROIC/DuPont, return frequency, beta, drawdown and rate differentials, bond yield/duration/DV01/G-spread and maturity wall, N-PORT overlap matching, GEX, Max Pain, monthly expiry choice and the volatility cone |
-| `test_redact.py`, `test_backend_wrapper.py` | key redaction, stream guard, log redaction, Host/Origin guard and sanitized 500s, TradingView bar sanitizing/daily-bar repair, NaN/Inf JSON scrubbing, TMX gainers fix |
-| `test_launcher_server.py` | restart policy, stop scope, V5-only default / `--with-v4` / `--skip-v4` CLI, UI server Host/Origin/state/config rules, v4 override validation, corrupt state recovery, ETags, CSP, keys applied on start, cache pruning, `VERSION` in `/api/config`, strict finite JSON and NaN `PUT` rejection, port guards |
-| `test_health.py`, `test_workflow.py` | relative NY dates, card/choice URL builder, error classifier, secret redaction, mock OECD-429 health run; publishable manifest, snapshots, snapshot diffs, EOL/BOM/hygiene checks, parallel test filter |
-| `test_frontend.py` | runs `frontend_checks.js` (288 browser checks) in headless Edge (or Chrome) against a temporary UI server; skipped with a notice when no such browser is installed |
+| `test_numbers.py`, `test_fx.py`, `test_returns.py`, `test_rates.py`, `test_ev.py`, `test_peer_ratios.py`, `test_gauges.py` | Number formats, FX direction and closes, returns, rate changes, EV normalization, peer ratios, gauges and country monitor |
+| `test_curves.py`, `test_policy_path.py`, `test_cds.py`, `test_bonds.py`, `test_banks.py`, `test_cryptovol.py` | Sovereign curve parsers, policy paths, CDS conventions, TRACE bonds, FDIC/FFIEC banks, Deribit DVOL |
+| `test_earnings.py`, `test_snapshot.py`, `test_sec_quarters.py`, `test_sec_growth.py`, `test_futures.py`, `test_funds.py`, `test_nasdaq_etf.py` | Earnings model, snapshot text, SEC quarters and growth, futures curves, fund multiples, Nasdaq ETF fallback |
+| `test_columns.py`, `test_sources.py`, `test_trust.py`, `test_timezone.py`, `test_news.py`, `test_fred.py`, `test_links.py`, `test_multpl.py` | Column formats and units, source contract, trust signals, Montreal time, news ranking, FRED CSV, jump links, multpl |
+| `test_medium.py`, `test_low.py`, `test_p4.py` | Cache slicing and eviction, weekly YoY, forecast split, policy history, non-trading-day bases |
+| `test_generator.py` | Routing by ticker, and a full build replayed from the recorded catalogs (coverage, stable ids, V5-only default) |
+| `test_cboe_fallback.py` | Black-76, parity forward, substitute loader and charts |
+| `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Valuation bands, ROIC/DuPont, risk statistics, bond math, N-PORT overlap, GEX, Max Pain, volatility cone |
+| `test_redact.py`, `test_backend_wrapper.py` | Key redaction, backend guard and sanitized 500s, TradingView bar repair, NaN/Inf scrubbing |
+| `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
+| `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
+| `test_frontend.py` | Runs `frontend_checks.js` (315 browser checks) headless against a temporary UI server |
 
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,
-request slot queuing): `test_frontend.py` runs it headless; it can also be pasted into the developer console of an
+request slot queuing). `test_frontend.py` runs it headless; it can also be pasted into the developer console of an
 open Libre Terminal page.
-
-`launcher.py start` applies `local/api_keys.env` when it changed since the last apply (`local/run/keys-applied.json`).
-A supervisor that gives up writes `local/run/<name>.stopped.json`; `/api/services` reports it and the page stops waiting.
 
 ## Conventions
 
@@ -235,53 +268,13 @@ A supervisor that gives up writes `local/run/<name>.stopped.json`; `/api/service
 - **Frozen OpenBB policy:** `config/requirements-*.lock.txt` stay pinned; OpenBB packages are treated as a frozen
   catalogue. Critical-path views get thin, tested fetchers under `terminal/`, while broken long-tail OpenBB endpoints
   are parked in `terminal/health.json` rather than growing `scripts/run_backend.py`.
+- **Composite imports:** the `terminal/composite/` submodules import `composite as C` and look up cross-module calls and
+  patchable globals through `C.<name>` at runtime, so offline tests can monkey-patch `composite` attributes directly.
 - **Encoding & line endings:** Files are UTF-8 without BOM. `.py`, `.js`, `.css`, `.html`, `.json`, `.md`, `.sh`,
   `.toml`, `.in`, `.env`, `.txt` use LF; `.cmd` and `.ps1` use CRLF (enforced by `.gitattributes` and `launcher.py check`).
 - **Runtime isolation:** Never write outside `local/` at run time; never commit `local/` (git-ignored).
 - **Restart scope:** After editing `terminal/*.py`, run `launcher.py restart ui` (~2 s); after editing `scripts/run_backend.py`,
   run `launcher.py restart backends` (or `stop` then `start`).
-
-## Completed refactors
-
-`terminal/composite/` (split from the 5,095-line `terminal/composite.py` alongside `news.py`, `banks.py`, `bonds.py`,
-`cds.py`, `policy_path.py`, `cryptovol.py`, `links.py`, `multpl.py`, `fred_public.py`, and the later `valuation.py`, `risk.py`,
-`bond_math.py`, `etfs.py`, `optionsx.py`) is the terminal's composite
-views package, keeping the exact import name `composite` with zero behaviour change. `terminal/composite/__init__.py`
-re-exports `dispatch`, `warm`, `CompositeError`, `ROUTES` (all 54 routes), the 9 option lists `xwidgets.py` imports by
-reference, `time`, and 317 re-exported symbols (plus `dispatch`, wrappers, and `ROUTES`). Submodules import `composite as C` and look up cross-module calls
-and patchable globals through `C.<name>` at runtime so offline tests can monkey-patch `composite` attributes directly.
-
-```
-terminal/composite/
-  __init__.py          re-exports; dispatch, static_sources, sibling wrappers, consolidated ROUTES (54 routes)
-  core/   http.py      backend URLs (one port reader), http_json, api, _download, SSL context, source helpers
-          cache.py     cached, cached_disk, backoff, _curve_store, context-propagating pool, stale notes
-          dates.py     horizons, range windows, period and quarter helpers
-          series.py    returns, yoy, rolling, interpolation, number helpers
-          figures.py   palette, layout, _note, NBER recession shading
-  markets/ prices.py   history, per-symbol SWR disk cache, ohlc, FX conversion
-           boards.py   BOARDS, quote rows, performance, style box, watchlist, FX matrix
-           fx.py       currency strength: pair as quoted / vs USD / own strength (vs the other seven majors)
-           chart.py    compare chart
-  rates/   curve_sources.py  Bundesbank, MoF, BoC, Riksbank, BoE, Tesouro, OECD fetchers
-           curves.py   countries, curves, curve table, global yields
-           policy.py   BIS policy rates and history
-           oecd.py     OECD series, rate history, rates by country
-  macro/   sets.py     MACRO_SETS, categories, and MACRO_OPTIONS
-           sources.py  FRED (backend + public CSV), EIA, calculated series
-           views.py    macro chart, seasonal, CPI history, country monitor
-  geo/     gpr.py, shipping.py
-  equity/  lookup.py (search, snapshot), comps.py, earnings.py, filings.py (SEC facts, compare)
-  status.py, warm.py
-```
-
-Phase 2B (W9 + W8) is also complete: `scripts/build_dashboards.py` data tables and spec DSL moved into
-`scripts/dashboards/{overrides.py,layouts.py}` with the compact generator engine re-exporting all public symbols;
-`scripts/run_backend.py` `CACHE_POLICY` is now the sole authoritative persistent cache (covering EIA, Fama-French,
-FiscalData, CFTC, BLS, USDA, IMF, OECD 12 h / `attempts=1`, ECB 6 h, Federal Reserve 3 h, FRED 3 h, JODI 12 h with
-`_is_cacheable_result()` and `X-Terminal-Refresh: 1` manual bypass), legacy browser Cache API `obb-slow-v1` is
-retired (one-time `caches.delete("obb-slow-v1")` on boot), and `terminal/server.py` runs `local_paths.prune_local()`
-every 24 h in a daemon thread (audit B9).
 
 ## Using the data from Python or MCP
 

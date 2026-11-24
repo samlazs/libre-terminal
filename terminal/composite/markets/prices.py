@@ -152,8 +152,14 @@ def _bg_refresh_history(syms, start_iso, interval):
                     for s, rows in (part or {}).items():
                         if rows:
                             C._sym_hist_save(s, interval, start_iso, rows, divs.get(s))
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            import sys
+            try:
+                from redact import redact
+                msg = redact(str(e))
+            except Exception:  # noqa: BLE001
+                msg = type(e).__name__
+            print(f"[prices] bg refresh failed: {msg}", file=sys.stderr)
         finally:
             with C._guard:
                 for s in todo:

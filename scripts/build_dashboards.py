@@ -1,7 +1,8 @@
 """Generate local/dashboards.json: the Terminal's asset-class dashboards.
 
-Reads the live widget lists of both OpenBB backends plus the Terminal's own
-composite views, then lays every data function out under a logical dashboard
+Reads the live widget lists of the OpenBB Platform backend (and optional legacy
+V4 backend with --with-v4) plus the Terminal's own composite views, then lays
+every data function out under a logical dashboard
 and tab (asset class / topic) instead of by data provider. A function offered
 by several providers is placed once, using the best provider that needs no key;
 the UI lets you switch source on the card.

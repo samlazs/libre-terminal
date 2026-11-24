@@ -20,6 +20,8 @@ import json
 import math
 import mimetypes
 import os
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -202,13 +204,72 @@ def _dash_build(raw: bytes):
     return raw, '"' + hashlib.sha1(raw).hexdigest()[:20] + '"'
 
 
+_restart_lock = threading.Lock()
+_restart_thread: threading.Thread | None = None
+_restart_state = {
+    "restarting": False,
+    "seq": 0,
+    "target": "",
+    "last_ok": None,
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "error": "",
+}
+
+
+def _port_open(port: int, timeout: float = 0.15) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError):
+        return False
+
+
+def _run_restart_command(target: str, ui_port: int) -> tuple[int, str]:
+    cmd = [
+        sys.executable,
+        str(ROOT.parent / "scripts" / "launcher.py"),
+        "restart",
+        target,
+        "--ui-port",
+        str(ui_port),
+        "--v5-port",
+        str(V5_PORT),
+        "--v4-port",
+        str(V4_PORT),
+    ]
+    if v4_active():
+        cmd.append("--with-v4")
+    kwargs: dict = {"capture_output": True, "text": True, "timeout": 120}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        r = subprocess.run(cmd, **kwargs)
+        tail = (r.stderr or r.stdout or "").strip()[-500:]
+        return r.returncode, tail
+    except (OSError, subprocess.SubprocessError) as e:
+        return 1, str(e)
+
+
 def service_status() -> dict:
     """Per backend: running (its supervisor's pid file is there), stopped (the supervisor gave up: why), or not started."""
-    out = {}
+    with _restart_lock:
+        restart_snap = dict(_restart_state)
+    out: dict = {}
+    v4_on = v4_active()
     for name in ("v5", "v4"):
+        if restart_snap["restarting"] and (
+            restart_snap["target"] == name
+            or (restart_snap["target"] in ("backends", "all") and (name == "v5" or v4_on))
+        ):
+            out[name] = {"state": "restarting"}
+            continue
         stopped = local_paths.RUN_DIR / f"{name}.stopped.json"
         if (local_paths.RUN_DIR / f"{name}.json").exists():
-            out[name] = {"state": "running"}
+            port = int(V5_PORT if name == "v5" else V4_PORT)
+            out[name] = {"state": "running", "reachable": _port_open(port)}
         elif stopped.exists():
             try:
                 out[name] = {"state": "stopped", "why": str(json.loads(stopped.read_text(encoding="utf-8")).get("why", ""))[:300]}
@@ -216,6 +277,7 @@ def service_status() -> dict:
                 out[name] = {"state": "stopped", "why": ""}
         else:
             out[name] = {"state": "not started"}
+    out["restart"] = restart_snap
     return out
 
 
@@ -535,10 +597,89 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length)
 
     def do_POST(self):
-        """/api/clientlog: the page reports a card error it could not classify (written to local/logs/ui.log, redacted)."""
+        """Handle /api/clientlog and /api/services/restart."""
         if not self._guard():
             return None
-        if self.path.split("?", 1)[0] != "/api/clientlog":
+        path = self.path.split("?", 1)[0]
+        if path == "/api/services/restart":
+            if not self._same_origin():
+                return self._json(403, {"detail": "cross-origin request refused"})
+            raw = self._body(4096)
+            if raw is None:
+                return self._json(413, {"detail": "too large"})
+            target = "backends"
+            if raw.strip():
+                try:
+                    j = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    return self._json(400, {"detail": "Invalid JSON body."})
+                if not isinstance(j, dict):
+                    return self._json(400, {"detail": "Request body must be a JSON object."})
+                target = j.get("target", "backends")
+            if target not in {"backends", "v5", "v4"}:
+                return self._json(400, {"detail": "Invalid restart target."})
+            if target == "v4" and not v4_active():
+                return self._json(400, {"detail": "Legacy V4 backend is not active."})
+            global _restart_thread
+            with _restart_lock:
+                worker_alive = _restart_thread is not None and _restart_thread.is_alive()
+                if _restart_state["restarting"] and (worker_alive or (time.time() - _restart_state["started_at"] < 120)):
+                    return self._json(202, {
+                        "ok": True,
+                        "already_running": True,
+                        "target": _restart_state["target"],
+                        "restart_seq": _restart_state["seq"],
+                    })
+                _restart_state["seq"] += 1
+                seq = _restart_state["seq"]
+                _restart_state["restarting"] = True
+                _restart_state["target"] = target
+                _restart_state["last_ok"] = None
+                _restart_state["started_at"] = time.time()
+                _restart_state["finished_at"] = 0.0
+                _restart_state["error"] = ""
+            reset_fn = getattr(composite, "reset_runtime_caches", None)
+            if callable(reset_fn):
+                reset_fn()
+            ui_port = int(getattr(self.server, "server_port", 6950) or 6950)
+
+            def _worker():
+                rc = 1
+                err = ""
+                is_current = False
+                try:
+                    log(f"restarting data services (target={target})")
+                    rc, err = _run_restart_command(target, ui_port)
+                    if rc == 0 and callable(reset_fn):
+                        reset_fn()
+                except Exception as exc:  # noqa: BLE001
+                    rc = 1
+                    err = str(exc) or type(exc).__name__
+                finally:
+                    with _restart_lock:
+                        if _restart_state["seq"] == seq:
+                            is_current = True
+                            _restart_state["restarting"] = False
+                            _restart_state["last_ok"] = (rc == 0)
+                            _restart_state["finished_at"] = time.time()
+                            _restart_state["error"] = "" if rc == 0 else redact(err)[:240]
+                if is_current:
+                    if rc == 0:
+                        log(f"data services restart completed (target={target})")
+                        try:
+                            composite.warm(force=True)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    else:
+                        log(f"data services restart failed (target={target}, rc={rc}): {redact(err)[:240]}")
+
+            t = threading.Thread(target=_worker, daemon=True, name="service-restart")
+            with _restart_lock:
+                if _restart_state["seq"] == seq:
+                    _restart_thread = t
+            t.start()
+            return self._json(202, {"ok": True, "target": target, "restart_seq": seq})
+        if path != "/api/clientlog":
             return self._json(404, {"detail": "not found"})
         if not self._same_origin():
             return self._json(403, {"detail": "cross-origin request refused"})
@@ -662,6 +803,7 @@ def main():
         pass
     finally:
         prune_stop.set()
+        httpd.server_close()
 
 
 if __name__ == "__main__":

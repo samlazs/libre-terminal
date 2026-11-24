@@ -138,39 +138,113 @@ def cached_disk(name, ttl, fn):
 
     Used for sources that change slowly and limit how often they may be called (OECD, BIS).
     """
+    mem_ttl = min(ttl, 1800)
+    key = ("disk", name)
+
     def run():
         path = C.CACHE_DIR / f"{name}.json"
         saved = None
+        now = time.time()
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))
-            if time.time() - saved["t"] < ttl:
-                return saved["v"]
+            if now - saved["t"] < ttl:
+                with C._guard:
+                    C._STALE_SINCE.pop(name, None)
+                return saved["v"], min(mem_ttl, max(1.0, ttl - (now - saved["t"])))
         except (OSError, ValueError, KeyError):
             saved = None
         with C._guard:
             blocked = C._backoff.get(name)
-        if blocked and time.time() < blocked[0]:
+        if blocked and now < blocked[0]:
             if saved is not None:
-                C._STALE_SINCE[name] = saved["t"]
-                return saved["v"]
+                with C._guard:
+                    C._STALE_SINCE[name] = saved["t"]
+                return saved["v"], min(mem_ttl, max(0.0, blocked[0] - now))
             raise C.CompositeError(blocked[1])
         try:
             val = fn()
         except C.CompositeError as e:
+            msg = str(e)
+            low = msg.lower()
+            if (
+                "429" in msg
+                or "rate limit" in low
+                or "too many requests" in low
+                or "quota" in low
+                or "oecd" in name.lower()
+                or "oecd" in low
+            ):
+                wait = 600
+            elif getattr(e, "transient", False):
+                wait = 30 if saved is not None else 10
+            else:
+                wait = 120 if saved is not None else 30
+            until = time.time() + wait
             with C._guard:
-                C._backoff[name] = (time.time() + 600, str(e))      # be polite to a source that is refusing us
+                C._backoff[name] = (until, msg)
+                if saved is not None:
+                    C._STALE_SINCE[name] = saved["t"]
             if saved is not None:
-                C._STALE_SINCE[name] = saved["t"]
-                return saved["v"]
+                return saved["v"], min(mem_ttl, float(wait))
             raise
         with C._guard:
             C._backoff.pop(name, None)
-        C._STALE_SINCE.pop(name, None)
+            C._STALE_SINCE.pop(name, None)
         C._write_json(path, {"t": time.time(), "v": val})
+        return val, float(mem_ttl)
+
+    now = time.time()
+    with C._guard:
+        hit = C._cache.get(key)
+        if hit and now - hit[0] < mem_ttl:
+            val = hit[1]
+            hit_ok = True
+        else:
+            hit_ok = False
+            lock = C._locks.setdefault(key, threading.Lock())
+    if hit_ok:
+        C._note_stale(name)
         return val
-    val = C.cached(("disk", name), min(ttl, 1800), run)
-    C._note_stale(name)
-    return val
+
+    with lock:
+        now = time.time()
+        with C._guard:
+            hit = C._cache.get(key)
+            if hit and now - hit[0] < mem_ttl:
+                val = hit[1]
+                hit_ok = True
+            else:
+                hit_ok = False
+        if hit_ok:
+            C._note_stale(name)
+            return val
+        val, eff_ttl = run()
+        stored_at = time.time() - max(0.0, float(mem_ttl) - float(eff_ttl))
+        with C._guard:
+            C._cache[key] = (stored_at, val)
+            if len(C._cache) > 1200:
+                for k in sorted(C._cache, key=lambda k: C._cache[k][0])[:200]:
+                    held = C._locks.get(k)
+                    if held is not None and held.locked():
+                        continue                 # someone is refreshing it: dropping its lock would allow a second fetch
+                    C._cache.pop(k, None)
+                    C._locks.pop(k, None)
+        C._note_stale(name)
+        return val
+
+
+def reset_runtime_caches() -> dict:
+    """Clear in-memory caches, backoff timers, and stale markers; return cleared counts."""
+    with C._guard:
+        counts = {
+            "cache": len(C._cache),
+            "backoff": len(C._backoff),
+            "stale": len(C._STALE_SINCE),
+        }
+        C._cache.clear()
+        C._backoff.clear()
+        C._STALE_SINCE.clear()
+        return counts
 
 
 def _clean_json(v):

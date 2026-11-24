@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +27,12 @@ class CompositeError(Exception):
 
 _ORIG_URLOPEN = urllib.request.urlopen
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_RETRY_DELAYS = (0.4, 1.0)
+_NO_RETRY_RE = re.compile(r"(?:[?&]provider=oecd(?:&|$)|/oecd/|sdmx\.oecd\.org|stats\.oecd\.org)", re.I)
+
+
+def _no_retry(url: str) -> bool:
+    return bool(_NO_RETRY_RE.search(str(url or "")))
 
 
 def http_json(url, timeout=45):
@@ -33,23 +41,38 @@ def http_json(url, timeout=45):
     if is_local:
         headers["X-Terminal-Pool"] = "x"
     req = urllib.request.Request(url, headers=headers)
-    try:
-        # Bypass corporate/system HTTP proxies on loopback requests unless tests monkeypatched urlopen.
-        opener = _LOCAL_OPENER.open if (is_local and urllib.request.urlopen is _ORIG_URLOPEN) else urllib.request.urlopen
-        with opener(req, timeout=timeout) as r:
-            body = r.read()
-            return json.loads(body) if body.strip() else {"results": []}      # 204 / empty body means "no data"
-    except urllib.error.HTTPError as e:
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    max_attempts = 1 if _no_retry(url) else len(_RETRY_DELAYS) + 1
+    for attempt in range(max_attempts):
+        rem = max(1.0, deadline - time.monotonic())
         try:
-            detail = json.loads(e.read()).get("detail")
-        except Exception:
-            detail = None
-        raise C.CompositeError(str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}",
-                               transient=e.code in (429, 502, 503, 504)) from None
-    except urllib.error.URLError as e:
-        raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", transient=True) from None
-    except (TimeoutError, OSError) as e:                 # read timeouts are not URLErrors
-        raise C.CompositeError(f"{C._which(url)} did not answer in time ({type(e).__name__}).", transient=True) from None
+            # Bypass corporate/system HTTP proxies on loopback requests unless tests monkeypatched urlopen.
+            opener = _LOCAL_OPENER.open if (is_local and urllib.request.urlopen is _ORIG_URLOPEN) else urllib.request.urlopen
+            with opener(req, timeout=rem) as r:
+                body = r.read()
+                return json.loads(body) if body.strip() else {"results": []}      # 204 / empty body means "no data"
+        except urllib.error.HTTPError as e:
+            try:
+                detail = json.loads(e.read()).get("detail")
+            except Exception:
+                detail = None
+            msg = str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}"
+            if e.code == 429:
+                raise C.CompositeError(msg, transient=True) from None
+            if e.code in (502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
+                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
+                continue
+            raise C.CompositeError(msg, transient=e.code in (502, 503, 504)) from None
+        except urllib.error.URLError as e:
+            if attempt + 1 < max_attempts and time.monotonic() < deadline:
+                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
+                continue
+            raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", transient=True) from None
+        except (TimeoutError, OSError) as e:                 # read timeouts are not URLErrors
+            if attempt + 1 < max_attempts and time.monotonic() < deadline:
+                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
+                continue
+            raise C.CompositeError(f"{C._which(url)} did not answer in time ({type(e).__name__}).", transient=True) from None
 
 
 def _which(url):
@@ -115,8 +138,28 @@ BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 
 def _download(url, timeout=60, data=None, ua="Mozilla/5.0 (compatible; terminal-ui)"):
     req = urllib.request.Request(url, data=data, headers={"User-Agent": ua, "Accept": "*/*"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout, context=C._ssl_context()) as r:
-            return r.read()
-    except Exception as e:  # noqa: BLE001
-        raise C.CompositeError(f"{url.split('/')[2]} is not reachable ({e}).") from None
+    host = url.split("/")[2]
+    deadline = time.monotonic() + max(1.0, float(timeout))
+    max_attempts = 1 if _no_retry(url) else 2
+    for attempt in range(max_attempts):
+        rem = max(1.0, deadline - time.monotonic())
+        try:
+            with urllib.request.urlopen(req, timeout=rem, context=C._ssl_context()) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            transient = e.code in (408, 429, 502, 503, 504)
+            if e.code in (408, 502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
+                delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
+                if delay > 0:
+                    time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+                continue
+            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=transient) from None
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt + 1 < max_attempts and time.monotonic() < deadline:
+                delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
+                if delay > 0:
+                    time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+                continue
+            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=True) from None
+        except Exception as e:  # noqa: BLE001
+            raise C.CompositeError(f"{host} is not reachable ({e}).", transient=False) from None

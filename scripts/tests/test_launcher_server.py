@@ -421,6 +421,18 @@ def _test_warm_and_install():
             and all(s["state"] == "done" for s in _st["steps"]),
             "composite.warm() finishes landing + background phases cleanly",
         )
+        _calls.clear()
+        _t3 = _cw.warm(force=True)
+        check(_t3 is not None and _t3 is not _t1, "composite.warm(force=True) starts a fresh warm pass after prior warm finished")
+        _t3.join(timeout=10)
+        _st2 = _cw.warm_status()
+        check(
+            _st2["phase"] == "ready"
+            and _st2["done"] == _st2["total"] == 4
+            and _st2["bg_done"] == _st2["bg_total"] == 4
+            and any(c[0] == "http_json" and "/_terminal/warm_chart?symbol=%5EGSPC" in c[1] for c in _calls),
+            "composite.warm(force=True) actually re-runs landing + background warming",
+        )
         check(
             any(c[0] == "http_json" and "/_terminal/warm_chart?symbol=%5EGSPC" in c[1] for c in _calls)
             and any(c[0] == "performance" for c in _calls)
@@ -507,15 +519,28 @@ check(strict_bytes == b'{"a": null, "b": [1.5, null, null]}', "Handler._dumps_st
 st_nan, _ = req("PUT", "/api/state", {"Content-Type": "application/json"}, b'{"v": 2, "dashboards": {}, "bad": NaN}')
 check(st_nan == 400, "PUT /api/state rejects non-standard NaN JSON with 400")
 
-_orig_hist = _comp.history
+_orig_ohlc = _comp._ohlc
 try:
-    _comp.history = lambda syms, start, *_a, **_kw: {s: [("2026-11-20", 100.0), ("2026-11-21", 101.0)] for s in syms if s == "AAPL"}
+    def _fake_ohlc(sym, *_a, **_kw):
+        if sym == "AAPL":
+            return [["2026-11-20", 99.0, 101.0, 98.5, 100.0, 1000], ["2026-11-21", 100.0, 102.0, 99.5, 101.0, 1100]]
+        if sym == "SECRET_URL_SYM":
+            raise _comp.CompositeError("HTTP 500 from https://secret.example/x?apikey=supersecret123 " + ("z" * 120))
+        raise _comp.CompositeError(f"No price history for {sym}.")
+
+    _comp._ohlc = _fake_ohlc
     st_ratio, body_ratio = req("GET", "/x/chart?symbol=AAPL&compare=ZZZZZZZ_BAD&view=ratio")
     j_ratio = json.loads(body_ratio)
     check(st_ratio == 502 and j_ratio.get("user_message") is True and "comparison" in j_ratio.get("detail", "").lower(),
           "chart ratio raises clean 502 CompositeError when comparison symbol has no data")
+    st_cmp_err, body_cmp_err = req("GET", "/x/chart?symbol=AAPL&compare=SECRET_URL_SYM&view=price")
+    j_cmp_err = json.loads(body_cmp_err)
+    _ann_txt = (((j_cmp_err.get("layout") or {}).get("annotations") or [{}])[0]).get("text", "")
+    check(st_cmp_err == 200 and "Could not load comparison:" in _ann_txt
+          and "https://" not in _ann_txt and "supersecret123" not in _ann_txt and len(_ann_txt) <= 185,
+          "chart comparison annotation strips URLs, redacts secrets, and caps length")
 finally:
-    _comp.history = _orig_hist
+    _comp._ohlc = _orig_ohlc
 
 check(_comp._num_or_none("inf") is None and _comp._num_or_none("nan") is None, "_num_or_none rejects inf and nan")
 check(_comp._ret([("2026-11-20", float("nan")), ("2026-11-21", 10.0)], "1D") is None, "_ret rejects NaN values")
@@ -529,6 +554,222 @@ try:
     check(False, "resolve_ports rejects out-of-range port")
 except SystemExit:
     check(True, "resolve_ports rejects out-of-range port")
+
+# POST /api/services/restart
+st_xo, _ = req("POST", "/api/services/restart", headers={"Origin": "http://evil.example"}, body=b"{}")
+check(st_xo == 403, "POST /api/services/restart rejects cross-origin")
+st_badj, _ = req("POST", "/api/services/restart", body=b"{bad")
+check(st_badj == 400, "POST /api/services/restart rejects invalid JSON")
+st_badt, _ = req("POST", "/api/services/restart", body=json.dumps({"target": "nope"}).encode("utf-8"))
+check(st_badt == 400, "POST /api/services/restart rejects invalid target")
+st_big, _ = req("POST", "/api/services/restart", body=b"{" + b" " * 5000 + b"}")
+check(st_big == 413, "POST /api/services/restart rejects bodies > 4096 bytes with 413")
+_saved_v4_env_r = os.environ.get("TERMINAL_WITH_V4")
+os.environ["TERMINAL_WITH_V4"] = "0"
+try:
+    st_v4_off, _ = req("POST", "/api/services/restart", body=json.dumps({"target": "v4"}).encode("utf-8"))
+    check(st_v4_off == 400, "POST /api/services/restart rejects target='v4' when v4 is inactive")
+finally:
+    if _saved_v4_env_r is None:
+        os.environ.pop("TERMINAL_WITH_V4", None)
+    else:
+        os.environ["TERMINAL_WITH_V4"] = _saved_v4_env_r
+
+_orig_run_restart = server._run_restart_command
+_orig_reset_caches = getattr(_comp, "reset_runtime_caches", None)
+_orig_warm = _comp.warm
+_reset_calls = []
+_warm_calls = []
+
+
+def _fake_reset_caches():
+    _reset_calls.append(1)
+    if _orig_reset_caches is not None:
+        return _orig_reset_caches()
+    return {}
+
+
+_comp.reset_runtime_caches = _fake_reset_caches
+_comp.warm = lambda force=False: _warm_calls.append(force) or None
+_restart_gate = threading.Event()
+_restart_result = [0, ""]
+_restart_raise = [None]
+
+
+def _fake_run_restart(target, ui_port):
+    _restart_gate.wait(timeout=5)
+    if _restart_raise[0] is not None:
+        raise _restart_raise[0]
+    return tuple(_restart_result)
+
+
+server._run_restart_command = _fake_run_restart
+try:
+    with server._restart_lock:
+        server._restart_state.update({"restarting": False, "seq": 0, "target": "", "last_ok": None, "started_at": 0.0, "finished_at": 0.0, "error": ""})
+        server._restart_thread = None
+    st_r1, body_r1 = req("POST", "/api/services/restart", body=b"")
+    j_r1 = json.loads(body_r1)
+    check(st_r1 == 202 and j_r1.get("ok") is True and j_r1.get("target") == "backends" and j_r1.get("restart_seq") == 1,
+          "POST /api/services/restart accepts empty body as backends")
+    check(len(_reset_calls) == 1, "POST /api/services/restart calls composite.reset_runtime_caches() on start")
+    # Simulate an error during the restart window poisoning _backoff; rc == 0 must clear it before marking ready
+    _comp._backoff["restart_window_err"] = (time.time() + 600, "restarting")
+    st_r2, body_r2 = req("POST", "/api/services/restart", body=json.dumps({"target": "v5"}).encode("utf-8"))
+    j_r2 = json.loads(body_r2)
+    check(st_r2 == 202 and j_r2.get("already_running") is True and j_r2.get("restart_seq") == 1,
+          "POST /api/services/restart deduplicates concurrent requests")
+    # Even past 120s timestamp, live worker thread prevents overlapping restart
+    with server._restart_lock:
+        server._restart_state["started_at"] = time.time() - 200
+    st_r2b, body_r2b = req("POST", "/api/services/restart", body=json.dumps({"target": "v5"}).encode("utf-8"))
+    check(st_r2b == 202 and json.loads(body_r2b).get("already_running") is True,
+          "POST /api/services/restart prevents overlapping worker past 120s while thread is alive")
+    _saved_v4_mid = os.environ.get("TERMINAL_WITH_V4")
+    os.environ["TERMINAL_WITH_V4"] = "0"
+    svc_mid = json.loads(req("GET", "/api/services")[1])
+    check(svc_mid["v5"]["state"] == "restarting" and svc_mid["v4"]["state"] != "restarting" and svc_mid["restart"]["restarting"] is True,
+          "/api/services marks v5 restarting without falsely marking inactive v4 restarting")
+    os.environ["TERMINAL_WITH_V4"] = "1"
+    svc_mid_v4 = json.loads(req("GET", "/api/services")[1])
+    check(svc_mid_v4["v4"]["state"] == "restarting", "/api/services marks v4 restarting when active")
+    if _saved_v4_mid is None:
+        os.environ.pop("TERMINAL_WITH_V4", None)
+    else:
+        os.environ["TERMINAL_WITH_V4"] = _saved_v4_mid
+    _restart_gate.set()
+    for _ in range(40):
+        svc_done = json.loads(req("GET", "/api/services")[1])
+        if not svc_done["restart"]["restarting"]:
+            break
+        time.sleep(0.05)
+    check(svc_done["restart"]["restarting"] is False and svc_done["restart"]["last_ok"] is True and svc_done["restart"]["error"] == "",
+          "/api/services updates restart state on worker completion")
+    check(len(_reset_calls) == 2 and "restart_window_err" not in _comp._backoff and _warm_calls == [True],
+          "POST /api/services/restart resets caches after rc==0 and calls composite.warm(force=True)")
+
+    # Next restart resets last_ok=None while running and catches worker exceptions via try/finally
+    _restart_gate.clear()
+    _restart_raise[0] = RuntimeError("worker crash")
+    st_r3, _ = req("POST", "/api/services/restart", body=json.dumps({"target": "v5"}).encode("utf-8"))
+    svc_r3_mid = json.loads(req("GET", "/api/services")[1])
+    check(st_r3 == 202 and svc_r3_mid["restart"]["last_ok"] is None and svc_r3_mid["restart"]["restarting"] is True,
+          "new restart resets last_ok to None while running")
+    _restart_gate.set()
+    for _ in range(40):
+        svc_exc = json.loads(req("GET", "/api/services")[1])
+        if not svc_exc["restart"]["restarting"]:
+            break
+        time.sleep(0.05)
+    check(svc_exc["restart"]["restarting"] is False and svc_exc["restart"]["last_ok"] is False and "worker crash" in svc_exc["restart"]["error"],
+          "restart worker exception clears restarting=False and records error via try/finally")
+
+    _restart_raise[0] = None
+    _restart_gate.clear()
+    _restart_result[:] = [1, "boom stderr"]
+    st_r4, _ = req("POST", "/api/services/restart", body=json.dumps({"target": "v5"}).encode("utf-8"))
+    check(st_r4 == 202, "POST /api/services/restart accepts next request after worker exception")
+    _restart_gate.set()
+    for _ in range(40):
+        svc_fail = json.loads(req("GET", "/api/services")[1])
+        if not svc_fail["restart"]["restarting"]:
+            break
+        time.sleep(0.05)
+    check(svc_fail["restart"]["last_ok"] is False and "boom stderr" in svc_fail["restart"]["error"],
+          "/api/services records failure in restart state")
+finally:
+    _restart_gate.set()
+    server._run_restart_command = _orig_run_restart
+    if _orig_reset_caches is not None:
+        _comp.reset_runtime_caches = _orig_reset_caches
+    _comp.warm = _orig_warm
+    with server._restart_lock:
+        server._restart_thread = None
+
+# POSIX kill_tree: reaping process-group leader must not skip SIGKILL for surviving grandchildren
+_orig_win = launcher.WIN
+_orig_getpgid = getattr(os, "getpgid", None)
+_orig_killpg = getattr(os, "killpg", None)
+_orig_wnohang = getattr(os, "WNOHANG", None)
+_orig_sigkill = getattr(launcher.signal, "SIGKILL", None)
+_orig_kill = os.kill
+_orig_waitpid = os.waitpid
+_orig_l_sleep = launcher.time.sleep
+_kill_events = []
+try:
+    launcher.WIN = False
+    launcher.time.sleep = lambda _s: None
+    os.getpgid = lambda p: p
+    os.killpg = lambda pg, sig: _kill_events.append(("killpg", pg, sig))
+    os.WNOHANG = 1
+    launcher.signal.SIGKILL = 9
+    os.kill = lambda p, sig: _kill_events.append(("kill", p, sig))
+    os.waitpid = lambda p, flags: (p, 0)
+    launcher.kill_tree(4242)
+    check(_kill_events[0] == ("killpg", 4242, launcher.signal.SIGTERM)
+          and any(e == ("killpg", 4242, 0) for e in _kill_events)
+          and _kill_events[-1] == ("killpg", 4242, launcher.signal.SIGKILL),
+          "POSIX kill_tree probes process group and sends SIGKILL to surviving grandchildren after leader exits")
+finally:
+    launcher.WIN = _orig_win
+    launcher.time.sleep = _orig_l_sleep
+    if _orig_getpgid is not None:
+        os.getpgid = _orig_getpgid
+    elif hasattr(os, "getpgid"):
+        delattr(os, "getpgid")
+    if _orig_killpg is not None:
+        os.killpg = _orig_killpg
+    elif hasattr(os, "killpg"):
+        delattr(os, "killpg")
+    if _orig_wnohang is not None:
+        os.WNOHANG = _orig_wnohang
+    elif hasattr(os, "WNOHANG"):
+        delattr(os, "WNOHANG")
+    if _orig_sigkill is not None:
+        launcher.signal.SIGKILL = _orig_sigkill
+    elif hasattr(launcher.signal, "SIGKILL"):
+        delattr(launcher.signal, "SIGKILL")
+    os.kill = _orig_kill
+    os.waitpid = _orig_waitpid
+
+# cmd_restart: waits for port release when probe transiently returns "up" before calling spawn()
+_orig_probe = launcher.probe
+_orig_cmd_stop = launcher.cmd_stop
+_orig_spawn = launcher.spawn
+_orig_wait_svc = launcher._wait_for_service
+_orig_apply_keys = launcher.apply_keys_if_changed
+_orig_rebuild = launcher.rebuild_dashboards
+_orig_venv_py = launcher.venv_python
+_probe_calls = [0]
+_spawn_calls = []
+
+
+def _fake_probe(name, port):
+    if name == "v5":
+        _probe_calls[0] += 1
+        return "up" if _probe_calls[0] < 3 else "down"
+    return "down"
+
+
+launcher.probe = _fake_probe
+launcher.cmd_stop = lambda _a: 0
+launcher.spawn = lambda s, _p: _spawn_calls.append((s, _probe_calls[0]))
+launcher._wait_for_service = lambda *_a, **_kw: True
+launcher.apply_keys_if_changed = lambda **_kw: None
+launcher.rebuild_dashboards = lambda *_a, **_kw: None
+launcher.venv_python = lambda _s: launcher.Path(sys.executable)
+try:
+    rc_cmd = launcher.cmd_restart(types.SimpleNamespace(service="v5", ui_port=6950, v5_port=6900, v4_port=6901, with_v4=False, dashboards=False))
+    check(rc_cmd == 0 and _spawn_calls == [("v5", 4)],
+          "cmd_restart waits for port release when probe transiently returns up before calling spawn()")
+finally:
+    launcher.probe = _orig_probe
+    launcher.cmd_stop = _orig_cmd_stop
+    launcher.spawn = _orig_spawn
+    launcher._wait_for_service = _orig_wait_svc
+    launcher.apply_keys_if_changed = _orig_apply_keys
+    launcher.rebuild_dashboards = _orig_rebuild
+    launcher.venv_python = _orig_venv_py
 
 httpd.shutdown()
 

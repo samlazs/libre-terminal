@@ -102,6 +102,7 @@ a:hover { text-decoration: underline; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.1); }
 .btn.danger:hover { background: #4a1d1d; border-color: var(--crit); }
+#btn-restart.busy, #btn-restart:disabled { opacity: .65; cursor: wait; border-color: var(--accent); }
 .icon-btn { background: transparent; border: none; color: var(--muted); cursor: pointer; padding: 2px 6px; border-radius: 4px; font-size: 13px; line-height: 1.2; }
 .icon-btn:hover { background: var(--surface-3); color: var(--text); }
 .icon-btn.on { color: var(--accent); }
