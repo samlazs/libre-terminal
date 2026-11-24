@@ -100,18 +100,29 @@ def apply(env_file: Path = None, settings_path: Path = None, quiet: bool = False
             print(f"Keys NOT applied: {settings_path} cannot be read ({type(e).__name__}: {str(e)[:120]}).")
             print("  It is OpenBB's own settings file and is left as it is. Fix it or move it away, then run this again.")
             return 2
+        orig_snapshot = json.dumps(loaded, sort_keys=True)
         settings = loaded
-        shutil.copy2(settings_path, settings_path.with_suffix(f".json.bak-{time.strftime('%Y%m%d-%H%M%S')}"))
+    else:
+        orig_snapshot = None
     try:
         settings, names, removed = merge(settings, keys)
     except ValueError as e:
         print(f"Keys NOT applied: {e}.")
         return 2
-    write_atomic(settings_path, json.dumps(settings, indent=4))
-    prune_backups(settings_path)
+    changed = orig_snapshot is None or json.dumps(settings, sort_keys=True) != orig_snapshot
+    if changed:
+        if settings_path.exists():
+            shutil.copy2(settings_path, settings_path.with_suffix(f".json.bak-{time.strftime('%Y%m%d-%H%M%S')}"))
+        write_atomic(settings_path, json.dumps(settings, indent=4))
+        if os.name != "nt":
+            try:
+                os.chmod(settings_path, 0o600)
+            except OSError:
+                pass
+        prune_backups(settings_path)
     try:                                                    # remember which version of the env file this was
         STAMP.parent.mkdir(parents=True, exist_ok=True)
-        STAMP.write_text(json.dumps({"env_mtime": env_file.stat().st_mtime if env_file.exists() else 0, "time": time.time()}), encoding="utf-8")
+        write_atomic(STAMP, json.dumps({"env_mtime": env_file.stat().st_mtime if env_file.exists() else 0, "time": time.time()}))
     except OSError:
         pass
     for n in removed:

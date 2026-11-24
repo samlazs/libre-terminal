@@ -17,9 +17,9 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import math
 import mimetypes
 import os
-import shutil
 import sys
 import threading
 import time
@@ -33,6 +33,7 @@ import composite  # noqa: E402
 import local_paths  # noqa: E402
 import xwidgets  # noqa: E402
 from redact import redact  # noqa: E402
+from version import VERSION  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -49,6 +50,7 @@ V5_PORT = os.environ.get("TERMINAL_V5_PORT") or "6900"
 V4_PORT = os.environ.get("TERMINAL_V4_PORT") or "6901"
 CONFIG = {
     "product": PRODUCT_NAME,
+    "version": VERSION,
     "backends": [
         {"id": "v5", "name": "Main data service", "url": f"http://127.0.0.1:{V5_PORT}"},
         {"id": "v4", "name": "Legacy data service", "url": f"http://127.0.0.1:{V4_PORT}"},
@@ -306,7 +308,7 @@ def log(msg: str):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TerminalUI/1.0"
+    server_version = f"TerminalUI/{VERSION}"
     protocol_version = "HTTP/1.1"
     timeout = 120                   # a half-sent request must not hold a thread forever
 
@@ -361,8 +363,25 @@ class Handler(BaseHTTPRequestHandler):
         except ABORTS:                  # the browser closed the connection (tab switch, reload): nothing to report
             self.close_connection = True
 
+    @staticmethod
+    def _clean_json(v):
+        if isinstance(v, float):
+            return v if math.isfinite(v) else None
+        if isinstance(v, dict):
+            return {k: Handler._clean_json(val) for k, val in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [Handler._clean_json(val) for val in v]
+        return v
+
+    @classmethod
+    def _dumps_strict(cls, obj) -> bytes:
+        try:
+            return json.dumps(obj, allow_nan=False).encode("utf-8")
+        except (TypeError, ValueError):
+            return json.dumps(cls._clean_json(obj), allow_nan=False).encode("utf-8")
+
     def _json(self, code: int, obj, headers: dict | None = None):
-        self._send(code, json.dumps(obj).encode("utf-8"), "application/json; charset=utf-8", headers=headers)
+        self._send(code, self._dumps_strict(obj), "application/json; charset=utf-8", headers=headers)
 
     def _frame_answer(self, result: dict):
         """A frame card's answer from a view (earnings release), as JSON: {"frame": the main backend's SEC filing viewer URL,
@@ -489,7 +508,7 @@ class Handler(BaseHTTPRequestHandler):
                     log(f"state.json could not be restored: {e}")
                     return self._json(503, {"detail": f"Your saved layout could not be read or restored ({e.strerror or e}). Nothing is saved "
                                             "until this is fixed.", "state_unreadable": True})
-            raw = json.dumps(obj).encode("utf-8")
+            raw = self._dumps_strict(obj)
             if notice:                                      # said once, with the restored copy
                 return self._send(200, raw, "application/json; charset=utf-8", headers={"X-State-Notice": urllib.parse.quote(notice)})
             return self._cached_json(raw, '"' + hashlib.sha1(raw).hexdigest()[:20] + '"')
@@ -546,8 +565,11 @@ class Handler(BaseHTTPRequestHandler):
         raw = self._body(MAX_STATE_BYTES)
         if raw is None:
             return self._json(413, {"detail": "state too large"})
+        def _reject_const(c: str):
+            raise ValueError(f"Non-standard JSON constant {c!r}")
+
         try:
-            obj = json.loads(raw.decode("utf-8"))
+            obj = json.loads(raw.decode("utf-8"), parse_constant=_reject_const)
         except (ValueError, UnicodeDecodeError) as e:
             return self._json(400, {"detail": f"invalid JSON: {e}"})
         problem = validate_state(obj)
@@ -555,28 +577,32 @@ class Handler(BaseHTTPRequestHandler):
             log(f"refused a state save: {problem}")
             return self._json(400, {"detail": f"Layout not saved: {problem}."})
         with _state_lock:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            old = {}
-            if STATE_FILE.exists():
-                old, problem = _parse_state(STATE_FILE)
-                if old is None:
-                    # never overwrite a file we cannot read: the page that sent this was built without it
-                    log(f"refused a state save: state.json {problem}")
-                    return self._json(503, {"detail": f"Not saved: the saved layout file {problem}. Reload the page.", "state_unreadable": True})
-                # keep one rolling backup per day (only of a file that is valid, so a backup can always restore)
-                bak = STATE_DIR / f"state.{time.strftime('%Y%m%d')}.bak.json"
-                if not bak.exists():
-                    shutil.copy2(STATE_FILE, bak)
-                    prune_backups()
-            # Two open pages (two browser tabs, or a tab left open since yesterday) must not overwrite each other:
-            # each save carries the revision it was based on, and a stale one gets the current state back instead.
-            rev = old.get("_rev", 0) if isinstance(old.get("_rev"), int) else 0
-            if old and obj.get("_rev", 0) != rev:
-                return self._json(409, {"detail": "The saved layout changed in another window.", "state": old})
-            # A page from before a section existed (watchlists, peers, recent tickers...) keeps the saved one.
-            obj = dict({k: v for k, v in old.items() if k not in obj}, **obj)
-            obj["_rev"] = rev + 1
-            atomic_write(STATE_FILE, json.dumps(obj))
+            try:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                old = {}
+                if STATE_FILE.exists():
+                    old, problem = _parse_state(STATE_FILE)
+                    if old is None:
+                        # never overwrite a file we cannot read: the page that sent this was built without it
+                        log(f"refused a state save: state.json {problem}")
+                        return self._json(503, {"detail": f"Not saved: the saved layout file {problem}. Reload the page.", "state_unreadable": True})
+                    # keep one rolling backup per day (only of a file that is valid, so a backup can always restore)
+                    bak = STATE_DIR / f"state.{time.strftime('%Y%m%d')}.bak.json"
+                    if not bak.exists():
+                        atomic_write(bak, STATE_FILE.read_text(encoding="utf-8"))
+                        prune_backups()
+                # Two open pages (two browser tabs, or a tab left open since yesterday) must not overwrite each other:
+                # each save carries the revision it was based on, and a stale one gets the current state back instead.
+                rev = old.get("_rev", 0) if isinstance(old.get("_rev"), int) else 0
+                if old and obj.get("_rev", 0) != rev:
+                    return self._json(409, {"detail": "The saved layout changed in another window.", "state": old})
+                # A page from before a section existed (watchlists, peers, recent tickers...) keeps the saved one.
+                obj = dict({k: v for k, v in old.items() if k not in obj}, **obj)
+                obj["_rev"] = rev + 1
+                atomic_write(STATE_FILE, json.dumps(self._clean_json(obj), allow_nan=False))
+            except OSError as e:
+                log(f"state.json write failed: {e}")
+                return self._json(503, {"detail": f"Not saved: could not write layout file ({e.strerror or e})."})
         return self._json(200, {"ok": True, "rev": obj["_rev"]})
 
 
@@ -614,6 +640,7 @@ def main():
     local_paths.ensure()
     class Server(ThreadingHTTPServer):
         daemon_threads = True
+        request_queue_size = 64
 
         def handle_error(self, request, client_address):
             exc = sys.exc_info()[1]

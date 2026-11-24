@@ -23,13 +23,20 @@ class CompositeError(Exception):
         self.transient = bool(transient)
 
 
+_ORIG_URLOPEN = urllib.request.urlopen
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def http_json(url, timeout=45):
     headers = {"User-Agent": "openbb-terminal-ui", "Accept": "application/json"}
-    if url.startswith((C.V5, C.V4)):
+    is_local = url.startswith((C.V5, C.V4))
+    if is_local:
         headers["X-Terminal-Pool"] = "x"
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        # Bypass corporate/system HTTP proxies on loopback requests unless tests monkeypatched urlopen.
+        opener = _LOCAL_OPENER.open if (is_local and urllib.request.urlopen is _ORIG_URLOPEN) else urllib.request.urlopen
+        with opener(req, timeout=timeout) as r:
             body = r.read()
             return json.loads(body) if body.strip() else {"results": []}      # 204 / empty body means "no data"
     except urllib.error.HTTPError as e:

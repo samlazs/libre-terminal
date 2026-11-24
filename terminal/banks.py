@@ -8,6 +8,7 @@
 
 import datetime as dt
 import json
+import math
 import urllib.parse
 
 import composite as C
@@ -53,7 +54,7 @@ def failure_rows(raw):
     for r in raw:
         def mn(k):
             v = r.get(k)
-            return round(float(v) / 1000, 1) if isinstance(v, (int, float)) else None
+            return round(float(v) / 1000, 1) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
         out.append({"failed": _date_us(r.get("FAILDATE")), "bank": _title(r.get("NAME")),
                     "location": ", ".join(x for x in (str(r.get("CITY") or "").title(), r.get("PSTALP")) if x),
                     "assets_mn": mn("QBFASSET"), "deposits_mn": mn("QBFDEP"), "est_loss_mn": mn("COST"),
@@ -93,7 +94,7 @@ def quality_series(raw):
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}"
         for k in FIELDS:
             v = r.get(k)
-            if isinstance(v, (int, float)):
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
                 out[k].append([iso, round(float(v), 3)])
     return out
 

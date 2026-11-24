@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
+import math
 
 import composite as C
+
+
+def _is_finite_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 def _at_or_before(series, iso):
     # series items may be tuples (fresh) or lists (read back from the disk cache)
@@ -23,16 +28,22 @@ def _base(series, key):
 def _ret(series, key):
     if len(series) < 2:
         return None
+    last = series[-1][1]
     base = C._base(series, key)
-    return None if not base else series[-1][1] / base - 1
+    if not (_is_finite_num(last) and _is_finite_num(base)) or base == 0:
+        return None
+    return last / base - 1
 
 
 def _diff_bp(series, key):
     """Change of a yield or rate over the horizon, in basis points (a yield's move is never quoted in percent of itself)."""
     if len(series) < 2:
         return None
+    last = series[-1][1]
     base = C._base(series, key)
-    return None if base is None else round((series[-1][1] - base) * 100, 1)
+    if not (_is_finite_num(last) and _is_finite_num(base)):
+        return None
+    return round((last - base) * 100, 1)
 
 
 def total_return(series, divs):
@@ -44,8 +55,10 @@ def total_return(series, divs):
         return series
     out, factor, prev = [], 1.0, None
     for d, c in series:
+        if not _is_finite_num(c):
+            continue
         x = divs.get(d)
-        if x and prev:
+        if _is_finite_num(x) and _is_finite_num(prev) and prev > 0 and x >= 0:
             factor *= 1 + x / prev
         out.append((d, c * factor))
         prev = c
@@ -55,7 +68,7 @@ def total_return(series, divs):
 def _num_or_none(s):
     try:
         v = float(str(s).strip().replace(",", "."))
-        return v if v == v else None
+        return v if math.isfinite(v) else None
     except ValueError:
         return None
 
@@ -89,7 +102,7 @@ def _interp(points, years):
     if exact is not None or len(points) < 2:
         return exact
     for (a, ra), (b, rb) in zip(points, points[1:]):
-        if a < years < b:
+        if a < years < b and b != a and _is_finite_num(ra) and _is_finite_num(rb):
             return round(ra + (rb - ra) * (years - a) / (b - a), 4)
     return None
 
@@ -121,6 +134,8 @@ def _yoy(points, diff_bp=False, diff=None):
         near = [(abs((dt.date.fromisoformat(dates[j]) - target).days), j) for j in (k - 1, k) if 0 <= j < i]
         gap, j = min(near) if near else (None, None)
         if j is None or gap > 20:
+            continue
+        if not _is_finite_num(v) or not _is_finite_num(points[j][1]):
             continue
         if diff or diff_bp:
             out.append([d, (v - points[j][1]) * (diff or 100)])
@@ -191,13 +206,16 @@ def drawdown(values):
     """Percent below the running high, for each value (0 at a new high). Values must be positive prices."""
     out, peak = [], None
     for v in values:
+        if not _is_finite_num(v) or v <= 0:
+            out.append(None)
+            continue
         peak = v if peak is None or v > peak else peak
         out.append((v / peak - 1) * 100 if peak else None)
     return out
 
 
 def _big(v, ccy=""):
-    if not isinstance(v, (int, float)):
+    if not _is_finite_num(v):
         return "–"
     a = abs(v)
     s = f"{v / 1e12:,.2f}T" if a >= 1e12 else f"{v / 1e9:,.1f}B" if a >= 1e9 else f"{v / 1e6:,.0f}M" if a >= 1e6 else f"{v:,.0f}"
@@ -205,8 +223,8 @@ def _big(v, ccy=""):
 
 
 def _num(v, fmt="{:,.2f}", suffix=""):
-    return fmt.format(v) + suffix if isinstance(v, (int, float)) else "–"
+    return fmt.format(v) + suffix if _is_finite_num(v) else "–"
 
 
 def _pc(v, signed=False):
-    return (f"{v * 100:+.1f}%" if signed else f"{v * 100:.1f}%") if isinstance(v, (int, float)) else "–"
+    return (f"{v * 100:+.1f}%" if signed else f"{v * 100:.1f}%") if _is_finite_num(v) else "–"

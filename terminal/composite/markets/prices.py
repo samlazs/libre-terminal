@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import datetime as dt
 import json
+import math
 import re
 import threading
 import time
@@ -47,11 +48,12 @@ def _fetch_history(symbols, start, interval, _retry=True):
     for r in rows or []:
         sym = r.get("symbol") or single
         c = r.get("close")
-        if sym in out and c is not None:
-            d = str(r.get("date"))[:10]
+        d = str(r.get("date") or "")[:10]
+        if sym in out and isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and len(d) == 10:
             out[sym].append((d, float(c)))
-            if r.get("dividend"):                       # cash distribution on its ex-date (Yahoo row field)
-                out.divs.setdefault(sym, {})[d] = float(r["dividend"])
+            div = r.get("dividend")
+            if isinstance(div, (int, float)) and not isinstance(div, bool) and math.isfinite(div) and div > 0:
+                out.divs.setdefault(sym, {})[d] = float(div)
     for s in out:
         out[s].sort()
     missing = [s for s, v in out.items() if not v]
@@ -276,9 +278,13 @@ def fx_pair_label(symbol):
     return f"{p[0]}/{p[1]}" if p else None
 
 
+def _opt_num(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
 def _invert(series):
     """A USD/XXX series as the value of XXX in dollars (same dates), so that up = currency stronger."""
-    return [(d, 1.0 / c) for d, c in series if c]
+    return [(d, 1.0 / c) for d, c in series if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c > 0]
 
 
 def _usd_rates(currencies):
@@ -315,7 +321,12 @@ def _ohlc(symbol, start, interval):
             if rows:
                 break
             time.sleep(0.8)
-        out = [[str(r.get("date"))[:10], r.get("open"), r.get("high"), r.get("low"), float(r["close"]), r.get("volume")] for r in rows or [] if r.get("close") is not None]
+        out = []
+        for r in rows or []:
+            d = str(r.get("date") or "")[:10]
+            c = _opt_num(r.get("close"))
+            if len(d) == 10 and c is not None:
+                out.append([d, _opt_num(r.get("open")), _opt_num(r.get("high")), _opt_num(r.get("low")), c, _opt_num(r.get("volume"))])
         out.sort(key=lambda x: x[0])
         if not out:
             raise C.CompositeError(f"Yahoo Finance has no price history for {symbol}. Non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE).")

@@ -84,11 +84,17 @@
       handle.addEventListener("pointerdown", function (ev) {
         if (ev.button !== 0 || entry.node.classList.contains("max") || flowCols()) return;     // no layout edits while reflowed
         if (ev.target.closest("button, input, select, a, .w-tools, .dd-btn")) return;
-        var sx = ev.clientX, sy = ev.clientY, started = false;
+        var sx = ev.clientX, sy = ev.clientY, started = false, done = false;
         var o = rect(entry.item), st0 = scroller.scrollTop, target = null;
+        function begin() {
+          started = true;
+          entry.node.classList.add("dragging");
+          document.body.classList.add("grid-dragging");
+          try { if (handle.setPointerCapture) handle.setPointerCapture(ev.pointerId); } catch (e) {}
+        }
         function move(e) {
           var dx = e.clientX - sx, dy = e.clientY - sy + (scroller.scrollTop - st0);
-          if (!started) { if (Math.abs(dx) + Math.abs(dy) < 5) return; started = true; entry.node.classList.add("dragging"); }
+          if (!started) { if (Math.abs(dx) + Math.abs(dy) < 5) return; begin(); }
           entry.node.style.left = o.left + dx + "px"; entry.node.style.top = o.top + dy + "px";
           var u = unit();
           target = {
@@ -101,14 +107,24 @@
           else if (e.clientY < sr.top + 40) scroller.scrollTop -= 14;
         }
         function up() {
-          document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up);
+          if (done) return;
+          done = true;
+          document.removeEventListener("pointermove", move);
+          document.removeEventListener("pointerup", up);
+          document.removeEventListener("pointercancel", up);
+          window.removeEventListener("blur", up);
+          try { if (handle.releasePointerCapture) handle.releasePointerCapture(ev.pointerId); } catch (e) {}
+          document.body.classList.remove("grid-dragging");
           hideGhost();
           if (!started) return;
           entry.node.classList.remove("dragging");
           if (target) { entry.item.x = target.x; entry.item.y = target.y; }
           commit(entry.item);
         }
-        document.addEventListener("pointermove", move); document.addEventListener("pointerup", up);
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", up);
+        document.addEventListener("pointercancel", up);
+        window.addEventListener("blur", up);
       });
     }
 
@@ -116,8 +132,10 @@
       handle.addEventListener("pointerdown", function (ev) {
         if (ev.button !== 0 || flowCols()) return;
         ev.preventDefault(); ev.stopPropagation();
-        var sx = ev.clientX, sy = ev.clientY, o = rect(entry.item), target = null;
+        var sx = ev.clientX, sy = ev.clientY, o = rect(entry.item), target = null, done = false;
         entry.node.classList.add("dragging");
+        document.body.classList.add("grid-dragging");
+        try { if (handle.setPointerCapture) handle.setPointerCapture(ev.pointerId); } catch (e) {}
         function move(e) {
           var u = unit();
           var w = Math.max(MIN_W, Math.min(COLS - entry.item.x, Math.round((o.width + GAP + e.clientX - sx) / u)));
@@ -128,12 +146,22 @@
           showGhost(target);
         }
         function up() {
-          document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up);
+          if (done) return;
+          done = true;
+          document.removeEventListener("pointermove", move);
+          document.removeEventListener("pointerup", up);
+          document.removeEventListener("pointercancel", up);
+          window.removeEventListener("blur", up);
+          try { if (handle.releasePointerCapture) handle.releasePointerCapture(ev.pointerId); } catch (e) {}
+          document.body.classList.remove("grid-dragging");
           hideGhost(); entry.node.classList.remove("dragging");
           if (target) { entry.item.w = target.w; entry.item.h = target.h; }
           commit(entry.item);
         }
-        document.addEventListener("pointermove", move); document.addEventListener("pointerup", up);
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", up);
+        document.addEventListener("pointercancel", up);
+        window.addEventListener("blur", up);
       });
     }
 

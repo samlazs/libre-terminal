@@ -99,6 +99,15 @@ def venv_python(env: str) -> Path:
     return ROOT / ENVS[env] / ("Scripts/python.exe" if WIN else "bin/python")
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+        f.flush()
+    os.replace(tmp, path)
+
+
 def resolve_ports(a) -> dict:
     """Command-line flag > environment variable > ports remembered by the last start > default."""
     saved = local_paths.saved_ports()
@@ -106,9 +115,12 @@ def resolve_ports(a) -> dict:
     for k, default in DEFAULT_PORTS.items():
         v = getattr(a, f"{k}_port", None) or os.environ.get(ENV_PORT[k]) or saved.get(k) or default
         try:
-            out[k] = int(v)
-        except ValueError:
+            port = int(v)
+        except (ValueError, TypeError):
             fail(f"{ENV_PORT[k]}={v!r} is not a port number.")
+        if not 1 <= port <= 65535:
+            fail(f"{ENV_PORT[k]}={port} must be between 1 and 65535.")
+        out[k] = port
     return out
 
 
@@ -141,6 +153,9 @@ def find_uv() -> str | None:
     return None
 
 
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 # ------------------------------------------------------------------ probing
 def probe(name: str, port: int) -> str:
     """'up' (answers like this service), 'busy' (something else holds the port) or 'down'."""
@@ -150,7 +165,7 @@ def probe(name: str, port: int) -> str:
     except OSError:
         return "down"
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{port}{PROBE[name]}", timeout=5) as r:
+        with _LOCAL_OPENER.open(f"http://{HOST}:{port}{PROBE[name]}", timeout=5) as r:
             body = r.read(4096)
         if name == "ui":
             return "up" if b"backends" in body else "busy"
@@ -182,14 +197,14 @@ def env_works(py: Path) -> bool:
 def write_lock(uv, env):
     src = ROOT / "config" / f"requirements-{env}.in"
     lock = ROOT / "config" / f"requirements-{env}.lock.txt"
-    tmp = lock.with_suffix(".tmp")
+    tmp = lock.with_name(f"{lock.name}.{os.getpid()}.tmp")
     run_step([uv, "pip", "compile", src, "--universal", "--python-version", PY_VERSION, "--upgrade", "--no-header", "--no-annotate", "--quiet", "-o", tmp],
              f"Resolving the latest versions for {env}", "Check your internet connection and try again.")
     header = (f"# Exact, tested versions for the {env} environment ({ENVS[env]}), all platforms (Windows, macOS, Linux).\n"
               f"# Regenerate with: python scripts/launcher.py install --upgrade   (resolves config/requirements-{env}.in)\n"
               "# Install uses this file as-is (uv pip sync), so every machine gets the same versions.\n")
-    lock.write_text(header + tmp.read_text(encoding="utf-8").replace("\r\n", "\n"), encoding="utf-8", newline="\n")
-    tmp.unlink()
+    _write_atomic(lock, header + tmp.read_text(encoding="utf-8").replace("\r\n", "\n"))
+    tmp.unlink(missing_ok=True)
 
 
 def cmd_install(a):
@@ -279,7 +294,7 @@ def cmd_run(a):
     while True:
         say(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {NAMES[name]} -> http://{HOST}:{p[name]}")
         proc = subprocess.Popen(cmd, cwd=ROOT, env=child_env(p))
-        pidfile(name).write_text(json.dumps({"supervisor": os.getpid(), "child": proc.pid, "port": p[name], "root": str(ROOT)}), encoding="utf-8")
+        _write_atomic(pidfile(name), json.dumps({"supervisor": os.getpid(), "child": proc.pid, "port": p[name], "root": str(ROOT)}))
         try:
             code = proc.wait()
         except KeyboardInterrupt:
@@ -364,7 +379,7 @@ def spawn(name: str, p: dict):
 
 def supervisor_alive(name: str) -> bool:
     try:
-        pid = json.loads(pidfile(name).read_text(encoding="utf-8"))["supervisor"]
+        pid = int(json.loads(pidfile(name).read_text(encoding="utf-8"))["supervisor"])
     except (OSError, ValueError, KeyError):
         return False
     return pid_alive(pid) and "launcher.py" in command_line(pid)     # a stale file whose PID was reused does not count
@@ -372,6 +387,19 @@ def supervisor_alive(name: str) -> bool:
 
 def pid_alive(pid: int) -> bool:
     if WIN:
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))     # PROCESS_QUERY_LIMITED_INFORMATION
+            if handle:
+                try:
+                    code = ctypes.c_ulong()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                        return code.value == 259                        # STILL_ACTIVE
+                finally:
+                    kernel32.CloseHandle(handle)
+        except Exception:  # noqa: BLE001
+            pass
         r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"], capture_output=True, text=True)
         return f'"{pid}"' in r.stdout
     try:
@@ -498,7 +526,7 @@ def cmd_start(a):
     apply_keys_if_changed(running=any(probe(s, p[s]) == "up" for s in services if s != "ui"))
     if len(set(p.values())) < 3:
         fail(f"Ports must differ: {p}")
-    PORTS_FILE.write_text(json.dumps(p), encoding="utf-8")
+    _write_atomic(PORTS_FILE, json.dumps(p))
     port_msg = "" if p == DEFAULT_PORTS else f" on ports UI {p['ui']}, V5 {p['v5']}" + (f", V4 {p['v4']}" if use_v4 else "")
     say(f"Starting the terminal{port_msg} ...")
     blocked = []
@@ -559,6 +587,31 @@ def cmd_start(a):
     return 0 if all(up.values()) else 1
 
 
+def listening_pids_map(ports: list[int]) -> dict[int, set[int]]:
+    """Query listening PIDs across *ports* in one shot (avoids per-port subprocess storms on Windows)."""
+    want = {int(port) for port in ports}
+    out: dict[int, set[int]] = {port: set() for port in want}
+    if not want:
+        return out
+    if WIN:
+        port_list = ",".join(str(port) for port in sorted(want))
+        cmd = (
+            f"Get-NetTCPConnection -LocalPort {port_list} -State Listen -ErrorAction SilentlyContinue "
+            "| ForEach-Object { \"$($_.LocalPort) $($_.OwningProcess)\" }"
+        )
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                lp, pid = int(parts[0]), int(parts[1])
+                if lp in out and pid not in (0, 4, os.getpid()):
+                    out[lp].add(pid)
+        return out
+    for port in want:
+        out[port] = listening_pids(port)
+    return out
+
+
 def listening_pids(port: int) -> set:
     pids = set()
     if WIN:
@@ -575,13 +628,39 @@ def listening_pids(port: int) -> set:
     return {x for x in pids if x not in (0, 4, os.getpid())}
 
 
-def command_line(pid: int) -> str:
+def command_lines(pids: list[int]) -> dict[int, str]:
+    """Batch process command-line lookups into one subprocess call."""
+    unique = sorted({int(pid) for pid in pids if int(pid) > 0})
+    out: dict[int, str] = {}
+    if not unique:
+        return out
     if WIN:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
-                           capture_output=True, text=True)
-    else:
+        id_list = ",".join(str(pid) for pid in unique)
+        cmd = (
+            f"$ids = @({id_list}); "
+            "Get-CimInstance Win32_Process -Filter (\"ProcessId=\" + ($ids -join \" OR ProcessId=\")) -ErrorAction SilentlyContinue "
+            "| ForEach-Object { [PSCustomObject]@{p=$_.ProcessId;c=$_.CommandLine} } | ConvertTo-Json -Compress"
+        )
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True)
+        raw = (r.stdout or "").strip()
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                items = parsed if isinstance(parsed, list) else [parsed]
+                for item in items:
+                    if isinstance(item, dict) and item.get("p") is not None:
+                        out[int(item["p"])] = str(item.get("c") or "").strip()
+            except ValueError:
+                pass
+        return out
+    for pid in unique:
         r = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True)
-    return r.stdout.strip()
+        out[pid] = r.stdout.strip()
+    return out
+
+
+def command_line(pid: int) -> str:
+    return command_lines([pid]).get(int(pid), "")
 
 
 OUR_SCRIPTS = ("run_backend.py", "server.py", "launcher.py", "openbb-api")
@@ -618,6 +697,7 @@ def cmd_stop(a):
         run_files = sorted(RUN.glob("*.json")) if RUN.exists() else []
     else:
         run_files = [pidfile(t) for t in targets if pidfile(t).exists()]
+    sups: list[tuple[Path, int]] = []
     for f in run_files:
         if f == PORTS_FILE or f.name.endswith(".stopped.json"):
             continue
@@ -625,7 +705,14 @@ def cmd_stop(a):
             sup = int(json.loads(f.read_text(encoding="utf-8"))["supervisor"])
         except (OSError, ValueError, KeyError):
             sup = None
-        if sup and pid_alive(sup) and "launcher.py" in command_line(sup) and ours(command_line(sup)):
+        if sup and pid_alive(sup):
+            sups.append((f, sup))
+        else:
+            f.unlink(missing_ok=True)
+    sup_cmds = command_lines([sup for _, sup in sups])
+    for f, sup in sups:
+        cmd = sup_cmds.get(sup, "")
+        if "launcher.py" in cmd and ours(cmd):
             kill_tree(sup)
             say(f"  stopped {NAMES.get(f.stem, f.stem)} (PID {sup})")
             stopped += 1
@@ -634,9 +721,12 @@ def cmd_stop(a):
         (RUN / f"{t}.stopped.json").unlink(missing_ok=True)
     # 2. a service of this terminal still listening on its port (e.g. started by an older version of the scripts or by
     #    `run` in a console). Anything else on these ports belongs to another program and is left alone.
+    listeners = listening_pids_map([p[name] for name in targets])
+    all_lpids = sorted({pid for pids in listeners.values() for pid in pids})
+    l_cmds = command_lines(all_lpids)
     for name in targets:
-        for pid in listening_pids(p[name]):
-            cmdline = command_line(pid)
+        for pid in listeners.get(p[name], ()):
+            cmdline = l_cmds.get(pid, "")
             if ours(cmdline):
                 kill_tree(pid)
                 say(f"  stopped PID {pid} on :{p[name]} ({NAMES[name]})")
@@ -689,10 +779,13 @@ def cmd_restart(a):
     if not targets:
         warn("Nothing to restart.")
         return 0
+    if len(set(p.values())) < 3:
+        fail(f"Ports must differ: {p}")
     cmd_stop(argparse.Namespace(service=target, ui_port=a.ui_port, v5_port=a.v5_port, v4_port=a.v4_port))
-    PORTS_FILE.write_text(json.dumps(p), encoding="utf-8")
+    _write_atomic(PORTS_FILE, json.dumps(p))
     if any(s in ("v5", "v4") for s in targets):
-        apply_keys_if_changed(running=False)
+        other_up = any(probe(s, p[s]) == "up" for s in ("v5", "v4") if s not in targets)
+        apply_keys_if_changed(running=other_up)
     v4_up_now = probe("v4", p["v4"]) == "up"
     if target == "ui" and getattr(a, "dashboards", False):
         rebuild_dashboards(p, quiet=True, with_v4=v4_up_now)

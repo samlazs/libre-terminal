@@ -49,11 +49,21 @@
    * Enter picks the highlighted match; if the search has not answered yet it waits for it.
    */
   T.sec.suggest = function (input, opts) {
-    var shown = [], shownFor = null, hl = 0, seq = 0, open = false, wantPick = false;
-    function close() { if (open) { T.closePop(); open = false; } }
+    var shown = [], shownFor = null, hl = 0, seq = 0, open = false, wantPick = false, popBox = null;
+    function close() { if (open) { T.closePop(); open = false; popBox = null; } }
     function rowsFor(q) {
       if (q) return null;
       return opts.recents ? T.sec.recent().map(function (r) { return { symbol: r.s, name: r.n, type: r.t, type_label: "Recent", exchange: "" }; }) : [];
+    }
+    function paintHl(next) {
+      var listEl = popBox && popBox.querySelector(".pop-list");
+      if (!listEl) return;
+      if (listEl.children[hl]) listEl.children[hl].classList.remove("hl");
+      hl = next;
+      if (listEl.children[hl]) {
+        listEl.children[hl].classList.add("hl");
+        if (listEl.children[hl].scrollIntoView) listEl.children[hl].scrollIntoView({ block: "nearest" });
+      }
     }
     function draw(rows) {
       shown = rows;
@@ -65,7 +75,8 @@
         row.addEventListener("mousedown", function (e) { e.preventDefault(); pick(r); });
         list.appendChild(row);
       });
-      T.popover(input, el("div", null, [list, el("div", { class: "pop-foot" }, "↑↓ move · Enter picks · type a ticker or a company name (toyota, rheinmetall, shell)")]), { width: opts.width || 560, onClose: function () { open = false; } });
+      popBox = el("div", null, [list, el("div", { class: "pop-foot" }, "↑↓ move · Enter picks · type a ticker or a company name (toyota, rheinmetall, shell)")]);
+      T.popover(input, popBox, { width: opts.width || 560, onClose: function () { open = false; popBox = null; } });
       open = true;
     }
     function pick(r) { close(); wantPick = false; opts.onPick(r); }
@@ -83,11 +94,11 @@
     var later = T.debounce(run, 150);
     input.addEventListener("input", function () { wantPick = false; later(); });
     input.addEventListener("focus", function () { if (!input.value.trim() && opts.recents) run(); });
-    input.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== input) close(); }, 120); });
+    input.addEventListener("blur", function () { setTimeout(function () { if (document.activeElement !== input) { wantPick = false; close(); } }, 120); });
     input.addEventListener("keydown", function (e) {
       if ((e.key === "ArrowDown" || e.key === "ArrowUp") && open && shown.length) {
-        hl = e.key === "ArrowDown" ? Math.min(hl + 1, shown.length - 1) : Math.max(hl - 1, 0);
-        draw(shown); e.preventDefault(); e.stopImmediatePropagation();
+        var next = e.key === "ArrowDown" ? Math.min(hl + 1, shown.length - 1) : Math.max(hl - 1, 0);
+        paintHl(next); e.preventDefault(); e.stopImmediatePropagation();
       } else if (e.key === "Enter") {
         var q = input.value.trim();
         if (!q) return;
@@ -180,10 +191,10 @@
 
   /** Watchlist editor: pick, create, rename, delete lists; add and remove symbols. onDone(listId) when closed. */
   T.lists.editWatchlist = function (listId, onDone) {
-    var cur = T.lists.get(listId).id, m;
+    var cur = T.lists.get(listId).id, m, dirty = false;
     var pickBox = el("div", { class: "le-bar" });
     function list() { return T.lists.get(cur); }
-    function commit() { save(); T.lists.changed(); }
+    function commit() { save(); dirty = true; }
     var ed = listEditor(function () { return list().symbols; }, function (syms) { own(); var l = own().filter(function (x) { return x.id === cur; })[0] || own()[0]; l.symbols = syms; commit(); paintBar(); });
     function paintBar() {
       pickBox.textContent = "";
@@ -229,26 +240,26 @@
     paintBar();
     m = dialog(el("b", null, "Watchlists"), { head: [pickBox, ed.input], body: ed.rows },
       [el("span", { class: "muted small" }, "Saved automatically. Click a name on the board to chart it, a ticker to open it."), el("button", { class: "btn primary", type: "button", onclick: function () { m.close(); } }, "Done")],
-      function () { if (onDone) onDone(cur); });
+      function () { if (dirty) T.lists.changed(); if (onDone) onDone(cur); });
     ed.input.focus();
   };
 
   /** Peer-list editor for one company. auto: the peers found automatically (shown until the user changes them). */
   T.lists.editPeers = function (sym, auto, onDone) {
     sym = String(sym || "").toUpperCase();
-    var m, mine = function () { return (st().peers || {})[sym]; };
+    var m, dirty = false, mine = function () { return (st().peers || {})[sym]; };
     var note = el("div", { class: "muted small" });
     function paintNote() { note.textContent = mine() ? "Your own peer list for " + sym + "." : "Found automatically: same industry, similar size, stocks investors also watch. Any change makes it your list for " + sym + "."; }
     var ed = listEditor(function () { return mine() || auto || []; }, function (syms) {
       st().peers = st().peers || {};
       st().peers[sym] = syms.filter(function (s) { return s !== sym; });
-      save(); paintNote(); T.lists.changed();
+      save(); dirty = true; paintNote();
     }, "No peers. Add some above.");
     paintNote();
     m = dialog(el("b", null, "Peers of " + sym), { head: [note, ed.input], body: ed.rows },
-      [el("button", { class: "btn", type: "button", onclick: function () { if (st().peers) delete st().peers[sym]; save(); paintNote(); ed.paint(); T.lists.changed(); } }, "Reset to automatic"),
+      [el("button", { class: "btn", type: "button", onclick: function () { if (st().peers) delete st().peers[sym]; save(); dirty = true; paintNote(); ed.paint(); } }, "Reset to automatic"),
        el("button", { class: "btn primary", type: "button", onclick: function () { m.close(); } }, "Done")],
-      function () { if (onDone) onDone(); });
+      function () { if (dirty) T.lists.changed(); if (onDone) onDone(); });
     ed.input.focus();
   };
 })(window.T);

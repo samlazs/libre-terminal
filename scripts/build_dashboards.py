@@ -712,8 +712,11 @@ def build(report=False):
     result = {"generated": stamp, "sections": [{"id": s, "name": n} for s, n in SECTIONS], "dashboards": out, "concepts": concepts, "columns": colspecs, "titles": titles,
               "status": {"generated": stamp, "broken": broken_rows, "keys": keys}}
     local_paths.ensure()
-    tmp = OUT.with_suffix(".tmp")
-    tmp.write_text(json.dumps(result), encoding="utf-8")
+    tmp = OUT.with_name(f"{OUT.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(result, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, OUT)                    # the UI server may be reading the previous file right now
 
     n_items = sum(len(t["items"]) for d in out for t in d["tabs"])

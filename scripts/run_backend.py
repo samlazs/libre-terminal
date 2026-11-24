@@ -163,6 +163,20 @@ def guard_output():
 
     be.BaseEventLoop.call_exception_handler = call_exception_handler
 
+    orig_thread_hook = getattr(threading, "excepthook", None)
+
+    def _redacted_thread_hook(args):
+        try:
+            import traceback
+            msg = "".join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback)).rstrip("\n")
+            REAL.get("stderr", sys.stderr).write(f"Exception in thread {getattr(args.thread, 'name', '?')}:\n{redact(msg)}\n")
+        except Exception:  # noqa: BLE001
+            if orig_thread_hook is not None:
+                orig_thread_hook(args)
+
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _redacted_thread_hook
+
 
 def say(msg: str):
     try:
@@ -173,23 +187,30 @@ def say(msg: str):
 
 
 def watchdog(name: str, host: str, port: str):
-    url = f"http://{host}:{port}/"
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "[::]", "") else host
+    url = f"http://{probe_host}:{port}/"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     # wait until the server has answered once (startup builds the API and can take a minute)
     while True:
         time.sleep(3)
         try:
-            urllib.request.urlopen(url, timeout=5).read(1)
+            opener.open(url, timeout=5).read(1)
             break
         except Exception:  # noqa: BLE001
             continue
     last_ok = time.time()
+    misses = 0
     while True:
         time.sleep(5)
         try:
-            urllib.request.urlopen(url, timeout=5).read(1)
+            opener.open(url, timeout=5).read(1)
             last_ok = time.time()
+            misses = 0
         except Exception:  # noqa: BLE001
             if time.time() - last_ok < FROZEN_AFTER:
+                continue
+            misses += 1
+            if misses < 2:
                 continue
             try:
                 LOGS.mkdir(parents=True, exist_ok=True)
@@ -372,16 +393,19 @@ def install_fetch_cache(applied: list):
             return None, None
 
     def write(p, value):
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         try:
             blob = gzip.compress(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL), compresslevel=5)
             if len(blob) > 60 * 1024 * 1024:
                 return
             p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".tmp")
             tmp.write_bytes(blob)
             os.replace(tmp, p)
         except Exception:  # noqa: BLE001  (unpicklable result: just not cached)
-            pass
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     async def fetch_data(cls, params, credentials=None, **kwargs):
         prov = (cls.__module__ or "").split(".")[0]
@@ -527,28 +551,37 @@ def install_futures_curve_fix(applied: list):
     event loop. Run it in its own thread and event loop (at most two at a time), so it neither interleaves
     redirects with other requests nor blocks them."""
     import asyncio
+    import collections
     import functools
+    import zlib
 
     from openbb_yfinance.utils import helpers as yfh
 
     gate = threading.BoundedSemaphore(2)
     orig = yfh.get_futures_curve
-    kept, locks, meta = {}, {}, threading.Lock()
+    kept = collections.OrderedDict()
+    locks = [threading.Lock() for _ in range(64)]
+    meta = threading.Lock()
 
     def _sync(*a, **k):
         # P4 slow cards: a curve is one quote per listed month (Henry Hub: 38, about 18 s). The same curve asked again
         # within CURVE_TTL (a second card, a tab switch) is served from memory; concurrent asks wait for one fetch.
         key = repr((a, sorted(k.items())))
-        with meta:
-            lk = locks.setdefault(key, threading.Lock())
+        lk = locks[zlib.crc32(key.encode("utf-8")) & 63]
         with lk:
-            hit = kept.get(key)
-            if hit and time.time() - hit[0] < CURVE_TTL:
-                return hit[1].copy()
+            with meta:
+                hit = kept.get(key)
+                if hit and time.time() - hit[0] < CURVE_TTL:
+                    kept.move_to_end(key)
+                    return hit[1].copy()
             with gate:
                 res = asyncio.run(orig(*a, **k))
             if res is not None and len(res):                 # an empty or failed curve is never kept
-                kept[key] = (time.time(), res.copy())
+                with meta:
+                    kept[key] = (time.time(), res.copy())
+                    kept.move_to_end(key)
+                    while len(kept) > 128:
+                        kept.popitem(last=False)
             return res
 
     @functools.wraps(orig)
@@ -1644,14 +1677,24 @@ def install_fx_chart_fix(applied: list, tvdf=None, tvn=None):
         except Exception as e:  # noqa: BLE001  (no data is shown as no data, never as the uncorrected bars)
             print(f"fx chart: no {interval} bars for {symbol} ({type(e).__name__})", flush=True)
             return []
-        return [{"time": int(dt.datetime.fromisoformat(str(day)[:10]).replace(tzinfo=london).timestamp()),
-                 "open": round(float(o), 6), "high": round(float(h), 6), "low": round(float(lo), 6), "close": round(float(c), 6), "volume": 0}
-                for day, o, h, lo, c in df[["date", "open", "high", "low", "close"]].itertuples(index=False, name=None)]
+        raw_bars = []
+        for day, o, h, lo, c in df[["date", "open", "high", "low", "close"]].itertuples(index=False, name=None):
+            raw_bars.append({
+                "time": int(dt.datetime.fromisoformat(str(day)[:10]).replace(tzinfo=london).timestamp()),
+                "open": o,
+                "high": h,
+                "low": lo,
+                "close": c,
+                "volume": 0,
+            })
+        return _sanitize_tv_bars(raw_bars)
 
     def emit_header(app, s):
         def put(slot, text, color=None):
             app.emit("toolbar:marquee-set-item", {"ticker": slot, "text": text, **({"styles": {"color": color}} if color else {})})
 
+        if not (s.get("prev") and _safe_finite_float(s.get("last"))):
+            return
         chg, dp = s["last"] - s["prev"], fx_decimals(s["last"])
         color = "#26a69a" if chg >= 0 else "#ef5350"
         put("ws-price", f"{s['last']:,.{dp}f}", color)
@@ -2301,8 +2344,9 @@ def install_tmx_movers_fix(applied: list):
 def tmx_asset_info_cached(orig, ttl: float = 180.0):
     """Short in-memory cache + in-flight coalescing for TMX Asset Info HTML; complete answers only."""
     import asyncio
+    import collections
 
-    cache: dict[tuple[str, str], tuple[float, str]] = {}
+    cache: collections.OrderedDict[tuple[str, str], tuple[float, str]] = collections.OrderedDict()
     inflight: dict[tuple[str, str], asyncio.Future] = {}
 
     async def wrapped(symbol: str = "AC", theme: str = "dark"):
@@ -2310,6 +2354,7 @@ def tmx_asset_info_cached(orig, ttl: float = 180.0):
         now = time.monotonic()
         hit = cache.get(key)
         if hit and now - hit[0] < ttl:
+            cache.move_to_end(key)
             return hit[1]
         fut = inflight.get(key)
         if fut is not None:
@@ -2321,6 +2366,9 @@ def tmx_asset_info_cached(orig, ttl: float = 180.0):
             html = await orig(symbol, theme)
             if isinstance(html, str) and 'class="ai-wrap"' in html:
                 cache[key] = (time.monotonic(), html)
+                cache.move_to_end(key)
+                while len(cache) > 128:
+                    cache.popitem(last=False)
             if not fut.done():
                 fut.set_result(html)
             return html
@@ -2345,47 +2393,403 @@ def install_tmx_asset_info_cache(applied: list):
 
 _TV_INFO_TTL = 600.0
 _TV_BAR_TTL = 300.0
+_TV_MAX_CACHE = 256
+
+
+def _clean_json_val(obj):
+    """Recursively replace NaN/Inf floats and numpy scalars with strict JSON-safe primitives."""
+    import math
+
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {str(k): _clean_json_val(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_clean_json_val(v) for v in obj]
+    if hasattr(obj, "item") and not isinstance(obj, (bytes, bytearray)):
+        try:
+            return _clean_json_val(obj.item())
+        except Exception:  # noqa: BLE001
+            return None
+    return obj
+
+
+def _safe_finite_float(val):
+    import math
+
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        num = float(val)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _safe_nonneg_int(val) -> int:
+    num = _safe_finite_float(val)
+    if num is None or num < 0:
+        return 0
+    return int(num)
+
+
+def _sanitize_tv_bars(bars) -> list[dict]:
+    """Keep only TradingView bars with valid timestamp and finite prices (dropping any NaN/Inf bar)."""
+    out: list[dict] = []
+    for b in bars or ():
+        if not isinstance(b, dict):
+            continue
+        t = _safe_finite_float(b.get("time"))
+        c = _safe_finite_float(b.get("close"))
+        if t is None or c is None:
+            continue
+        ohlc = {}
+        bad = False
+        for k in ("open", "high", "low"):
+            if k in b and b[k] is not None:
+                fv = _safe_finite_float(b[k])
+                if fv is None:
+                    bad = True
+                    break
+                ohlc[k] = round(fv, 6)
+        if bad:
+            continue
+        item = {"time": int(t), **ohlc, "close": round(c, 6)}
+        if "open" in ohlc and "high" in ohlc and "low" in ohlc:
+            item["high"] = round(max(ohlc["high"], ohlc["open"], item["close"]), 6)
+            item["low"] = round(min(ohlc["low"], ohlc["open"], item["close"]), 6)
+        if "volume" in b:
+            item["volume"] = _safe_nonneg_int(b.get("volume", 0))
+        out.append(item)
+    return out
+
+
+def _repair_daily_bar_from_meta(bars: list[dict], md: dict | None) -> list[dict]:
+    """Repair or append today's daily bar when Yahoo returns NaN OHLC on an active/post-market bar."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    if not isinstance(md, dict) or not md:
+        return bars
+    price = _safe_finite_float(md.get("regularMarketPrice"))
+    mkt_ts = _safe_finite_float(md.get("regularMarketTime"))
+    if price is None or price <= 0 or mkt_ts is None:
+        return bars
+    tz_name = md.get("exchangeTimezoneName") or "America/New_York"
+    try:
+        zi = ZoneInfo(tz_name)
+    except Exception:  # noqa: BLE001
+        zi = ZoneInfo("UTC")
+    mkt_dt = dt.datetime.fromtimestamp(int(mkt_ts), tz=zi)
+    inst = str(md.get("instrumentType") or md.get("quoteType") or "").upper()
+    if inst != "CRYPTOCURRENCY" and mkt_dt.weekday() >= 5:
+        return bars
+    mkt_date = mkt_dt.date()
+    if bars:
+        last_date = dt.datetime.fromtimestamp(int(bars[-1]["time"]), tz=zi).date()
+        if last_date >= mkt_date:
+            return bars
+        prev_close = bars[-1]["close"]
+    else:
+        prev_close = _safe_finite_float(md.get("previousClose") or md.get("chartPreviousClose"))
+    o = _safe_finite_float(md.get("regularMarketOpen")) or prev_close or price
+    h = _safe_finite_float(md.get("regularMarketDayHigh")) or max(o, price)
+    lo = _safe_finite_float(md.get("regularMarketDayLow")) or min(o, price)
+    vol = _safe_nonneg_int(md.get("regularMarketVolume") or md.get("volume") or 0)
+    day_ts = int(dt.datetime(mkt_dt.year, mkt_dt.month, mkt_dt.day, tzinfo=zi).timestamp())
+    return list(bars) + [{
+        "time": day_ts,
+        "open": round(o, 6),
+        "high": round(max(h, o, price), 6),
+        "low": round(min(lo, o, price), 6),
+        "close": round(price, 6),
+        "volume": vol,
+    }]
 
 
 def install_tvchart_fix(applied: list):
-    """Share TradingView symbol metadata and history bars across iframe renders, and show a loading overlay until
-    the WebSocket datafeed finishes delivering bars."""
+    """Sanitize TradingView bars & WS JSON (prevents NaN crashes), bound/evict live chart streamers, parallel-enable
+    PyWry callbacks, share cached bars/metadata, and show a loading/retry status overlay."""
+    import collections
+    import contextlib
     import functools
+    import zlib
 
     try:
         from openbb_yfinance.utils import tvchart_datafeed as tvdf, tvchart_native as tvn
+        from pywry import inline as pywry_inline
     except ImportError:
         return
     if getattr(tvdf, "_terminal_tvchart_patched", False):
         return
 
     meta_lock = threading.Lock()
-    info_cache: dict = {}
-    info_locks: dict = {}
-    bar_cache: dict = {}
-    bar_locks: dict = {}
+    info_cache: collections.OrderedDict = collections.OrderedDict()
+    bar_cache: collections.OrderedDict = collections.OrderedDict()
+    info_locks = [threading.RLock() for _ in range(64)]
+    bar_locks = [threading.RLock() for _ in range(64)]
+    widget_streamers: dict = {}
+    cleanup_timers: dict = {}
+
+    def _bound_aux_caches(sym_key: str) -> None:
+        for attr in ("info_cache", "tz_cache", "delay_cache", "reg_close_cache", "session_bounds_cache"):
+            d = getattr(tvdf, attr, None)
+            if isinstance(d, dict) and len(d) > 512:
+                excess = len(d) - 256
+                for k in list(d.keys()):
+                    if k != sym_key:
+                        d.pop(k, None)
+                        excess -= 1
+                        if excess <= 0:
+                            break
+
+    def _stop_streamer(streamer) -> None:
+        if streamer is None:
+            return
+        with contextlib.suppress(Exception):
+            streamer.stop()
+
+    def _register_streamer(wid: str, streamer) -> None:
+        if not wid or streamer is None:
+            return
+        with meta_lock:
+            old_timer = cleanup_timers.pop(wid, None)
+            if old_timer is not None:
+                old_timer.cancel()
+            widget_streamers[wid] = streamer
+            active_widgets = getattr(pywry_inline._state, "widgets", {})
+            connections = getattr(pywry_inline._state, "connections", {})
+            wid_by_streamer = {id(st): w for w, st in widget_streamers.items()}
+            lst = tvn._LIVE_CHARTS
+            idx = 0
+            while len(lst) > 12 and idx < len(lst):
+                _app_old, st_old = lst[idx]
+                old_wid = wid_by_streamer.get(id(st_old), "")
+                if old_wid and old_wid in active_widgets and old_wid in connections:
+                    idx += 1  # still on screen: keep streaming, evict the next oldest instead
+                    continue
+                lst.pop(idx)
+                if old_wid and widget_streamers.get(old_wid) is st_old:
+                    widget_streamers.pop(old_wid, None)
+                _stop_streamer(st_old)
+            try:
+                from openbb_yfinance.utils import asset_info as yf_ai
+                while len(yf_ai._LIVE_ASSET_INFO) > 12:
+                    _, st_old = yf_ai._LIVE_ASSET_INFO.pop(0)
+                    _stop_streamer(st_old)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _finalize_disconnect(wid: str) -> None:
+        streamer = None
+        with meta_lock:
+            cleanup_timers.pop(wid, None)
+            if wid in getattr(pywry_inline._state, "connections", {}):
+                return
+            streamer = widget_streamers.pop(wid, None)
+        _stop_streamer(streamer)
+        orig_disconnect(wid, "client")
+
+    orig_disconnect = getattr(pywry_inline, "_handle_widget_disconnect", None)
+    if callable(orig_disconnect):
+        def _handle_widget_disconnect(widget_id: str, reason: str = "unknown") -> None:
+            if reason == "websocket_close":
+                orig_disconnect(widget_id, reason)
+                with meta_lock:
+                    if widget_id in widget_streamers and widget_id not in cleanup_timers:
+                        t = threading.Timer(20.0, _finalize_disconnect, args=(widget_id,))
+                        t.daemon = True
+                        cleanup_timers[widget_id] = t
+                        t.start()
+                return
+            streamer = None
+            with meta_lock:
+                t = cleanup_timers.pop(widget_id, None)
+                if t is not None:
+                    t.cancel()
+                streamer = widget_streamers.pop(widget_id, None)
+            _stop_streamer(streamer)
+            orig_disconnect(widget_id, reason)
+
+        pywry_inline._handle_widget_disconnect = _handle_widget_disconnect
+
+    if hasattr(pywry_inline, "_ws_sender_loop"):
+        async def _ws_sender_loop(event_queue, websocket, widget_id: str) -> None:
+            import asyncio
+
+            try:
+                while True:
+                    event = await event_queue.get()
+                    try:
+                        payload = json.dumps(_clean_json_val(event), allow_nan=False, default=str)
+                        await websocket.send_text(payload)
+                    finally:
+                        event_queue.task_done()
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        pywry_inline._ws_sender_loop = _ws_sender_loop
+
+    orig_process = getattr(pywry_inline, "_process_callbacks", None)
+    if callable(orig_process) and hasattr(pywry_inline, "_invoke_callback"):
+        import io as _io
+        import queue as _queue
+
+        cb_workers = 4
+        cb_queues = [_queue.Queue() for _ in range(cb_workers)]
+        cb_started = threading.Event()
+        cb_stdio_lock = threading.Lock()
+
+        def _run_callback(item) -> None:
+            callback, data, event_type, widget_id = item
+            output_widget = None
+            try:
+                from pywry.state import is_deploy_mode
+
+                store = pywry_inline._state.local_widgets if is_deploy_mode() else pywry_inline._state.widgets
+                output_widget = (store.get(widget_id) or {}).get("output")
+                if output_widget is None:
+                    pywry_inline._invoke_callback(callback, data, event_type, widget_id)
+                    return
+                with cb_stdio_lock:
+                    old_out, old_err = sys.stdout, sys.stderr
+                    cap_out, cap_err = _io.StringIO(), _io.StringIO()
+                    try:
+                        sys.stdout, sys.stderr = cap_out, cap_err
+                        pywry_inline._invoke_callback(callback, data, event_type, widget_id)
+                    finally:
+                        sys.stdout, sys.stderr = old_out, old_err
+                if cap_out.getvalue():
+                    output_widget.append_stdout(cap_out.getvalue())
+                if cap_err.getvalue():
+                    output_widget.append_stderr(cap_err.getvalue())
+            except Exception as e:  # noqa: BLE001
+                with contextlib.suppress(Exception):
+                    if output_widget is not None:
+                        output_widget.append_stderr(f"[PyWry] Callback error: {e}\n")
+                    else:
+                        say(f"[tvchart] callback error ({event_type}): {type(e).__name__}: {redact(str(e))[:160]}")
+
+        def _callback_worker(q) -> None:
+            while True:
+                item = q.get()
+                try:
+                    _run_callback(item)
+                finally:
+                    q.task_done()
+
+        def _process_callbacks() -> None:
+            # Single dispatcher; callbacks of one widget always go to the same worker, so they run in order,
+            # while different widgets run in parallel. A second start (re-mount) is a no-op.
+            if cb_started.is_set():
+                return
+            cb_started.set()
+            for idx, q in enumerate(cb_queues):
+                threading.Thread(target=_callback_worker, args=(q,), daemon=True, name=f"pywry-cb-{idx}").start()
+            src = pywry_inline._state.callback_queue
+            while True:
+                try:
+                    item = src.get(timeout=0.5)
+                except _queue.Empty:
+                    continue
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
+                    wid = str(item[3] or "")
+                except Exception:  # noqa: BLE001
+                    wid = ""
+                cb_queues[zlib.crc32(wid.encode("utf-8")) % cb_workers].put(item)
+
+        pywry_inline._process_callbacks = _process_callbacks
+    else:
+        _not_applied("TradingView callback worker pool", RuntimeError("pywry callback internals not found"))
+
+    orig_df_to_bars = getattr(tvdf, "_df_to_bars", None)
+    if callable(orig_df_to_bars):
+        def _df_to_bars(df) -> list[dict]:
+            bars: list[dict] = []
+            for ts, row in df.iterrows():
+                t = _safe_finite_float(ts.timestamp())
+                o = _safe_finite_float(row.get("Open") if hasattr(row, "get") else row["Open"])
+                h = _safe_finite_float(row.get("High") if hasattr(row, "get") else row["High"])
+                lo = _safe_finite_float(row.get("Low") if hasattr(row, "get") else row["Low"])
+                c = _safe_finite_float(row.get("Close") if hasattr(row, "get") else row["Close"])
+                if t is None or o is None or h is None or lo is None or c is None:
+                    continue
+                v = row.get("Volume", 0) if hasattr(row, "get") else row["Volume"]
+                bars.append({
+                    "time": int(t),
+                    "open": round(o, 6),
+                    "high": round(max(h, o, c), 6),
+                    "low": round(min(lo, o, c), 6),
+                    "close": round(c, 6),
+                    "volume": _safe_nonneg_int(v),
+                })
+            return bars
+
+        tvdf._df_to_bars = _df_to_bars
+        tvdf._orig_df_to_bars = orig_df_to_bars
+
+    orig_history = tvdf.yf_fetch_full_history
+
+    @functools.wraps(orig_history)
+    def yf_fetch_full_history(symbol: str, resolution: str) -> list[dict]:
+        bars = _sanitize_tv_bars(orig_history(symbol, resolution))
+        res = tvdf.normalize_resolution(resolution)
+        if res == "1d" and getattr(tvdf, "_orig_df_to_bars", None) is not None:
+            sym_key = str(symbol or "").upper()
+            cached_info = getattr(tvdf, "info_cache", {}).get(sym_key)
+            md = None
+            if (
+                isinstance(cached_info, dict)
+                and _safe_finite_float(cached_info.get("regularMarketTime")) is not None
+                and _safe_finite_float(cached_info.get("regularMarketPrice")) is not None
+            ):
+                md = cached_info
+            else:
+                with contextlib.suppress(Exception):
+                    import yfinance as yf
+                    fetched_md = yf.Ticker(symbol).get_history_metadata()
+                    if isinstance(fetched_md, dict):
+                        md = dict(fetched_md)
+                        if isinstance(cached_info, dict) and cached_info.get("regularMarketOpen") is not None:
+                            md.setdefault("regularMarketOpen", cached_info.get("regularMarketOpen"))
+            bars = _repair_daily_bar_from_meta(bars, md)
+        return bars
+
+    tvdf.yf_fetch_full_history = yf_fetch_full_history
 
     orig_info = tvdf.yf_symbol_info
 
     @functools.wraps(orig_info)
     def yf_symbol_info(symbol: str):
         key = str(symbol or "").upper()
+        lk = info_locks[zlib.crc32(key.encode("utf-8")) & 63]
         now = time.monotonic()
         with meta_lock:
             hit = info_cache.get(key)
             if hit and now - hit[0] < _TV_INFO_TTL:
+                info_cache.move_to_end(key)
                 return dict(hit[1])
-            lk = info_locks.setdefault(key, threading.Lock())
         with lk:
             now = time.monotonic()
             with meta_lock:
                 hit = info_cache.get(key)
                 if hit and now - hit[0] < _TV_INFO_TTL:
+                    info_cache.move_to_end(key)
                     return dict(hit[1])
             val = orig_info(symbol)
             if val is not None:
                 with meta_lock:
                     info_cache[key] = (time.monotonic(), dict(val))
+                    info_cache.move_to_end(key)
+                    while len(info_cache) > _TV_MAX_CACHE:
+                        info_cache.popitem(last=False)
+                    _bound_aux_caches(key)
                 return dict(val)
             return None
 
@@ -2401,33 +2805,55 @@ def install_tvchart_fix(applied: list):
         with meta_lock:
             hit = bar_cache.get(key)
             if hit and now - hit[0] < _TV_BAR_TTL:
+                bar_cache.move_to_end(key)
                 bars = list(hit[1])
                 with self._lock:
                     self._cache[key] = list(bars)
+                    while len(self._cache) > 64:
+                        self._cache.pop(next(iter(self._cache)), None)
                 return bars
-            lk = bar_locks.setdefault(key, threading.Lock())
+        derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
+        derived = derived_map.get(res)
+        source_bars = None
+        if derived:
+            # Fetch the source resolution before taking this key's lock: holding one stripe while waiting
+            # on another can deadlock two threads loading crossed derived/source keys.
+            try:
+                source_bars = self.get(symbol, derived["source"])
+            except Exception as e:  # noqa: BLE001
+                say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                return []
+        lk = bar_locks[zlib.crc32(f"{key[0]}|{key[1]}".encode("utf-8")) & 63]
         with lk:
             now = time.monotonic()
             with meta_lock:
                 hit = bar_cache.get(key)
                 if hit and now - hit[0] < _TV_BAR_TTL:
+                    bar_cache.move_to_end(key)
                     bars = list(hit[1])
                     with self._lock:
                         self._cache[key] = list(bars)
                     return bars
-            derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
-            if res in derived_map:
-                derived = derived_map[res]
-                source_bars = self.get(symbol, derived["source"])
-                bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
-            else:
-                bars = tvdf.yf_fetch_full_history(symbol, resolution)
+            try:
+                if derived:
+                    bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
+                else:
+                    bars = tvdf.yf_fetch_full_history(symbol, resolution)
+            except Exception as e:  # noqa: BLE001
+                say(f"[tvchart] {symbol} ({res}) fetch failed: {type(e).__name__}: {redact(str(e))[:160]}")
+                return []
+            bars = _sanitize_tv_bars(bars)
             if bars:
                 copied = list(bars)
                 with meta_lock:
                     bar_cache[key] = (time.monotonic(), copied)
+                    bar_cache.move_to_end(key)
+                    while len(bar_cache) > _TV_MAX_CACHE:
+                        bar_cache.popitem(last=False)
                 with self._lock:
                     self._cache[key] = list(copied)
+                    while len(self._cache) > 64:
+                        self._cache.pop(next(iter(self._cache)), None)
                 return list(copied)
             return []
 
@@ -2435,16 +2861,24 @@ def install_tvchart_fix(applied: list):
         res = tvdf.normalize_resolution(resolution)
         key = (str(symbol or "").upper(), res)
         derived_map = getattr(tvdf, "DERIVED_RESOLUTIONS", {})
-        if res in derived_map:
-            derived = derived_map[res]
-            source_bars = self.refresh(symbol, derived["source"])
-            bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
-        else:
-            bars = tvdf.yf_fetch_full_history(symbol, res)
+        try:
+            if res in derived_map:
+                derived = derived_map[res]
+                source_bars = self.refresh(symbol, derived["source"])
+                bars = tvdf.aggregate_bars(source_bars, derived["factor"]) if source_bars else []
+            else:
+                bars = tvdf.yf_fetch_full_history(symbol, res)
+        except Exception as e:  # noqa: BLE001
+            say(f"[tvchart] {symbol} ({res}) refresh failed: {type(e).__name__}: {redact(str(e))[:160]}")
+            return []
+        bars = _sanitize_tv_bars(bars)
         if bars:
             copied = list(bars)
             with meta_lock:
                 bar_cache[key] = (time.monotonic(), copied)
+                bar_cache.move_to_end(key)
+                while len(bar_cache) > _TV_MAX_CACHE:
+                    bar_cache.popitem(last=False)
             with self._lock:
                 self._cache[key] = list(copied)
             return list(copied)
@@ -2460,6 +2894,37 @@ def install_tvchart_fix(applied: list):
                 for k in [k for k in bar_cache if k[0] == sym]:
                     bar_cache.pop(k, None)
 
+    orig_show = getattr(tvn, "_show", None)
+    if callable(orig_show):
+        @functools.wraps(orig_show)
+        def _tracked_show(app, symbol: str, resolution: str, **show_kwargs):
+            before = len(tvn._LIVE_CHARTS)
+            widget = orig_show(app, symbol, resolution, **show_kwargs)
+            streamer = tvn._LIVE_CHARTS[-1][1] if len(tvn._LIVE_CHARTS) > before else None
+            wid = str(getattr(widget, "label", "") or getattr(app, "label", "") or "")
+            _register_streamer(wid, streamer)
+            return widget
+
+        tvn._show = _tracked_show
+
+    try:
+        from openbb_yfinance.utils import asset_info as yf_ai
+
+        orig_ai_quotes = yf_ai._start_live_quotes
+
+        @functools.wraps(orig_ai_quotes)
+        def _tracked_ai_quotes(widget, symbol: str, info: dict):
+            before = len(yf_ai._LIVE_ASSET_INFO)
+            res = orig_ai_quotes(widget, symbol, info)
+            streamer = yf_ai._LIVE_ASSET_INFO[-1][1] if len(yf_ai._LIVE_ASSET_INFO) > before else None
+            wid = str(getattr(widget, "widget_id", "") or getattr(widget, "label", "") or "")
+            _register_streamer(wid, streamer)
+            return res
+
+        yf_ai._start_live_quotes = _tracked_ai_quotes
+    except ImportError as e:
+        _not_applied("YFinance asset info stream cleanup", e)
+
     orig_html = tvn.tvchart_widget_html
 
     @functools.wraps(orig_html)
@@ -2469,29 +2934,39 @@ def install_tvchart_fix(applied: list):
         bg = "#ffffff" if is_light else "#1a1a19"
         fg = "#4b5563" if is_light else "#c3c2b7"
         ring = "#e5e7eb" if is_light else "#2c2c2a"
+        btn_bg = "#f3f4f6" if is_light else "#252523"
+        btn_bd = "#d1d5db" if is_light else "#3f3f3c"
         overlay = (
             f'<div id="obb-tv-loading" style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;'
             f'align-items:center;justify-content:center;gap:10px;background:{bg};color:{fg};'
             f'font:13px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;transition:opacity .15s ease">'
-            f'<div style="width:20px;height:20px;border:2px solid {ring};border-top-color:#3987e5;border-radius:50%;'
+            f'<div id="obb-tv-spin" style="width:20px;height:20px;border:2px solid {ring};border-top-color:#3987e5;border-radius:50%;'
             f'animation:obbSpin .8s linear infinite"></div>'
-            f'<span>Loading chart data…</span></div>'
+            f'<span id="obb-tv-msg">Loading chart data…</span>'
+            f'<button id="obb-tv-retry" type="button" style="display:none;margin-top:4px;padding:5px 12px;border-radius:4px;'
+            f'border:1px solid {btn_bd};background:{btn_bg};color:inherit;font:inherit;cursor:pointer">Retry</button>'
+            f'</div>'
             f'<style>@keyframes obbSpin{{to{{transform:rotate(360deg)}}}}</style>'
             '<script>(function(){'
-            'var el=document.getElementById("obb-tv-loading"),done=false;'
-            'function hide(){if(done)return;done=true;if(el){el.style.opacity="0";setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},160);}'
-            'try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:"openbb-chart-ready"},"*");}catch(e){}}'
+            'var el=document.getElementById("obb-tv-loading"),sp=document.getElementById("obb-tv-spin"),'
+            'msgEl=document.getElementById("obb-tv-msg"),btn=document.getElementById("obb-tv-retry"),done=false;'
+            'if(btn){btn.addEventListener("click",function(){location.reload();});}'
+            'function postReady(){try{if(window.parent&&window.parent!==window)window.parent.postMessage({type:"openbb-chart-ready"},"*");}catch(e){}}'
+            'function hide(){if(done)return;done=true;if(el){el.style.opacity="0";setTimeout(function(){if(el&&el.parentNode)el.parentNode.removeChild(el);},160);}postReady();}'
+            'function showErr(text){if(done)return;done=true;if(sp)sp.style.display="none";if(msgEl)msgEl.textContent=text||"Chart data unavailable.";if(btn)btn.style.display="inline-block";postReady();}'
             'function hasBars(){var reg=window.__PYWRY_TVCHARTS__;if(!reg)return false;for(var k in reg){var e=reg[k];'
             'if(e&&(e._seriesRawData&&e._seriesRawData.main&&e._seriesRawData.main.length||e._rawData&&e._rawData.length))return true;}return false;}'
             'var hooked=false,ticks=0;'
             'function wire(){if(hooked)return;if(hasBars()){requestAnimationFrame(hide);return;}'
             'var w=window.pywry,ready=(window.__obbTvBridgePatched||(ticks>25&&w&&typeof w.on==="function"));'
             'if(ready&&w&&typeof w.on==="function"){hooked=true;'
-            '["tvchart:datafeed-history-response","tvchart:data-response"].forEach(function(ev){w.on(ev,function(){requestAnimationFrame(hide);});});'
-            'w.on("tvchart:datafeed-resolve-response",function(d){if(d&&d.error)requestAnimationFrame(hide);});'
+            '["tvchart:datafeed-history-response","tvchart:data-response"].forEach(function(ev){w.on(ev,function(d){'
+            'if(hasBars()||(d&&d.bars&&d.bars.length)){requestAnimationFrame(hide);return;}'
+            'if(d&&(d.error||d.noData||d.status==="no_data"||d.status==="error")){showErr(d.error||"No chart data available for this symbol.");}});});'
+            'w.on("tvchart:datafeed-resolve-response",function(d){if(d&&d.error&&!hasBars())showErr(d.error);});'
             'if(hasBars())requestAnimationFrame(hide);return;}'
             'ticks++;setTimeout(wire,20);}'
-            'wire();setTimeout(hide,25000);'
+            'wire();setTimeout(function(){if(hasBars())hide();else showErr("Chart data request timed out.");},25000);'
             '})();</script>'
         )
         return html.replace("</body>", f"{overlay}</body>", 1) if "</body>" in html else html + overlay
@@ -2502,7 +2977,7 @@ def install_tvchart_fix(applied: list):
     tvdf.BarCache.invalidate = invalidate
     tvn.tvchart_widget_html = tvchart_widget_html
     tvdf._terminal_tvchart_patched = True
-    applied.append("TradingView charts share cached bars/metadata and show loading status")
+    applied.append("TradingView charts sanitize NaN bars, clean up streams, and show loading/retry status")
 
 
 async def warm_tvchart(symbol: str = "^GSPC") -> dict:
@@ -3176,6 +3651,34 @@ def apply_fixes():
     except Exception as e:  # noqa: BLE001
         _not_applied("unit rescales (Nasdaq ratios, TMX short interest)", e)
     try:
+        install_blocking_route_offload(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("blocking route event-loop offload", e)
+    try:
+        install_session_leak_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("WeakSet ClientSession cleanup", e)
+    try:
+        install_disable_mcp_subprocesses(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("disable background MCP subprocesses", e)
+    try:
+        install_yfinance_options_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("YFinance options chains recovery", e)
+    try:
+        install_tmx_gainers_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("TMX gainers missing longName fix", e)
+    try:
+        install_nasdaq_empty_json_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Nasdaq empty JSON recovery", e)
+    try:
+        install_user_settings_cache(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("user_settings.json mtime cache", e)
+    try:
         install_tmx_movers_fix(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("TMX market movers ranking", e)
@@ -3197,6 +3700,561 @@ def apply_fixes():
         _not_applied("COT Canadian dollar", e)
     say("[fixes] " + ("; ".join(applied) if applied else "none applied"))
     return applied
+
+
+def install_blocking_route_offload(applied: list):
+    """Offload synchronous blocking work inside FastAPI async handlers so slow filings/PDFs/SDMX fetches cannot
+    freeze the Uvicorn event loop (seen in v5-freeze dumps)."""
+    import asyncio
+    import functools
+
+    offloaded: list[str] = []
+
+    def _rebind_routes(router_obj, mapping: dict):
+        for route in getattr(router_obj, "routes", ()) or ():
+            ep = getattr(route, "endpoint", None)
+            if ep in mapping:
+                new_fn = mapping[ep]
+                route.endpoint = new_fn
+                dep = getattr(route, "dependant", None)
+                if dep is not None and getattr(dep, "call", None) is ep:
+                    dep.call = new_fn
+
+    def _wrap_sync_coro(fn, *, empty_on_empty_error: bool = False):
+        @functools.wraps(fn)
+        async def _offloaded(*args, **kwargs):
+            def _run_sync():
+                coro = fn(*args, **kwargs)
+                try:
+                    val = coro.send(None)
+                except StopIteration as stop:
+                    return stop.value
+                # Safety fallback if a future upstream version yields an awaitable inside one of these routes.
+                coro.close()
+                raise RuntimeError(f"Expected synchronous coroutine body in {fn.__name__}, got {type(val).__name__}")
+
+            try:
+                return await asyncio.to_thread(_run_sync)
+            except Exception as exc:  # noqa: BLE001
+                if empty_on_empty_error and type(exc).__name__ == "EmptyDataError":
+                    return []
+                raise
+
+        return _offloaded
+
+    # 1. SEC FinancialStatements thread-safety + blocking section_markdown / as_filed_widget offload
+    try:
+        from openbb_sec.models import sec_financials as sf
+        from openbb_sec.utils import as_filed_widget as afw, section_markdown as sm
+
+        fs_meta = threading.Lock()
+
+        def _fs_lock(self):
+            lk = getattr(self, "_terminal_fs_lock", None)
+            if lk is None:
+                with fs_meta:
+                    lk = getattr(self, "_terminal_fs_lock", None)
+                    if lk is None:
+                        lk = threading.RLock()
+                        self._terminal_fs_lock = lk
+            return lk
+
+        for mname in ("_ensure_xbrl", "get_statement", "get_item_sections"):
+            orig_m = getattr(sf.FinancialStatements, mname, None)
+            if callable(orig_m) and not getattr(orig_m, "_terminal_locked", False):
+                @functools.wraps(orig_m)
+                def _locked(self, *a, _orig=orig_m, **kw):
+                    with _fs_lock(self):
+                        return _orig(self, *a, **kw)
+
+                _locked._terminal_locked = True
+                setattr(sf.FinancialStatements, mname, _locked)
+
+        if not getattr(sm.get_section_markdown, "_terminal_offloaded", False):
+            async def get_section_markdown(
+                symbol: str,
+                section: str,
+                calendar_year: str | None = None,
+                calendar_period: str | None = None,
+                use_cache: bool = True,
+            ) -> str:
+                from types import SimpleNamespace
+                from openbb_sec.models.sec_financials import FinancialStatements, no_filing_message, resolve_section_url
+
+                query = SimpleNamespace(
+                    symbol=symbol, url=None, calendar_year=calendar_year, calendar_period=calendar_period, use_cache=use_cache,
+                )
+                annual_sections = {"company_overview", "risk_factors", "legal_proceedings"}
+                url = await resolve_section_url(query, annual_default=section in annual_sections)
+                if not url:
+                    return no_filing_message(symbol)
+
+                def _extract() -> str:
+                    statements = FinancialStatements.from_url(url, use_cache)
+                    with _fs_lock(statements):
+                        if section == "company_overview":
+                            return statements.business() or (
+                                "No Business (Item 1) section was found in this filing. It is present"
+                                " in annual reports (10-K) but not in quarterly reports (10-Q)."
+                            )
+                        if section == "risk_factors":
+                            rendered = sm._join([(f.get("risk_factor"), f.get("text")) for f in statements.risk_factors()])
+                            return rendered or (
+                                "No Risk Factors (Item 1A) section was found in this filing. Item 1A"
+                                " was not required before 2005, and some filings incorporate it by"
+                                " reference to other sections."
+                            )
+                        if section == "segment_revenue":
+                            return sm._join([(s.get("name"), sm._split_year_tables(s.get("text") or "")) for s in statements.segment_revenue()])
+                        if section == "legal_proceedings":
+                            item = statements.legal_proceedings()
+                            return (item.get("text") or "") if item else ""
+                        if section == "disclosures":
+                            from openbb_sec.utils.filing_sections import reflow_plain_text
+                            disclosures = statements.disclosures
+                            is_xbrl = statements.is_xbrl
+                            pairs = []
+                            for key in disclosures:
+                                info = disclosures[key]
+                                if not (isinstance(info, dict) and (info.get("text") or "").strip()):
+                                    continue
+                                text_value = info["text"] if is_xbrl else reflow_plain_text(info["text"], force=True)
+                                pairs.append((info.get("name") or key, text_value))
+                            return sm._join(pairs)
+                    return ""
+
+                return await asyncio.to_thread(_extract)
+
+            get_section_markdown._terminal_offloaded = True
+            sm.get_section_markdown = get_section_markdown
+
+        if not getattr(afw.get_as_filed_widget_rows, "_terminal_offloaded", False):
+            orig_afw = afw.get_as_filed_widget_rows
+
+            async def get_as_filed_widget_rows(
+                symbol: str,
+                statement_type: str,
+                calendar_year: str | None = None,
+                calendar_period: str | None = None,
+                use_cache: bool = True,
+            ) -> list[dict]:
+                from types import SimpleNamespace
+                from openbb_sec.models.sec_financials import FinancialStatements, resolve_section_url
+
+                query = SimpleNamespace(
+                    symbol=symbol, url=None, calendar_year=calendar_year, calendar_period=calendar_period, use_cache=use_cache,
+                )
+                url = await resolve_section_url(query, annual_default=False)
+                if not url:
+                    return []
+
+                def _pivot_sync() -> list[dict]:
+                    statements = FinancialStatements.from_url(url, use_cache)
+                    with _fs_lock(statements):
+                        data, _ = statements.get_statement(statement_type)
+                    if data is None or data.empty:
+                        return []
+                    if {"label", "period_ending", "value"}.issubset(data.columns):
+                        id_columns = ["order", "label"]
+                        if "unit" in data.columns:
+                            id_columns.append("unit")
+                        df = data[
+                            ~(data["label"].isna() & data.groupby("order")["value"].transform(lambda s: s.isna().all()))
+                        ]
+                        period_order = list(dict.fromkeys(df["period_ending"].astype(str).tolist()))
+                        df = df.drop_duplicates(subset=[*id_columns, "period_ending"], keep="first")
+                        df = df.pivot(index=id_columns, columns="period_ending", values="value").reset_index()
+                        ordered_periods = [p for p in period_order if p in df.columns]
+                        df = df[[*id_columns, *ordered_periods]].fillna("--")
+                    else:
+                        drop_columns = {
+                            "tag", "parent_tag", "preferred_label", "balance", "weight", "decimals", "context_ref",
+                            "period_beginning", "period_ending", "value", "taxonomy", "data_type", "period_type",
+                            "description", "name",
+                        }
+                        df = data[[c for c in data.columns if str(c) not in drop_columns]]
+                    # Same row shape as upstream get_as_filed_widget_rows: order index, "label" key, str keys, NaN -> None.
+                    from pandas import isna
+
+                    source_columns = list(df.columns)
+                    if not source_columns:
+                        return []
+                    label_column = "label" if "label" in source_columns else source_columns[0]
+                    rows: list[dict] = []
+                    for idx, row in enumerate(df.itertuples(index=False), start=1):
+                        out: dict = {"order": idx}
+                        for column_name, value in zip(source_columns, list(row)):
+                            if str(column_name) == "order":
+                                out["order"] = value
+                                continue
+                            key = "label" if column_name == label_column else str(column_name)
+                            if isinstance(value, str) and value == "--":
+                                out[key] = "--"
+                            else:
+                                try:
+                                    out[key] = None if isna(value) else value
+                                except (TypeError, ValueError):
+                                    out[key] = value
+                        rows.append(out)
+                    return rows
+
+                return await asyncio.to_thread(_pivot_sync)
+
+            get_as_filed_widget_rows._terminal_offloaded = True
+            afw._orig_get_as_filed_widget_rows = orig_afw
+            afw.get_as_filed_widget_rows = get_as_filed_widget_rows
+        offloaded.append("SEC")
+    except ImportError as e:
+        _not_applied("event-loop offload (SEC)", e)
+
+    # 2. YFinance Asset Info HTML builder (runs sync yf.get_info + 10y history)
+    try:
+        from openbb_yfinance.utils import asset_info as yf_ai
+
+        if not getattr(yf_ai.asset_info_widget_html, "_terminal_offloaded", False):
+            async def asset_info_widget_html(symbol: str = "AAPL", theme: str = "dark") -> str:
+                import contextlib
+                import uuid
+                from pywry.inline import InlineWidget, _generate_widget_token
+                from openbb_yfinance.utils.pywry_server import bind_loop, ensure_pywry_mounted
+
+                ensure_pywry_mounted()
+                bind_loop()
+
+                def _build_sync():
+                    payload = yf_ai._fetch(symbol)
+                    fragment = yf_ai._render_fragment(symbol, payload)
+                    widget_id = uuid.uuid4().hex
+                    token = _generate_widget_token(widget_id)
+                    doc = yf_ai._build_live_document(fragment, widget_id, token, theme, symbol, payload.get("info") or {})
+                    return payload, widget_id, token, doc
+
+                payload, widget_id, token, document = await asyncio.to_thread(_build_sync)
+                widget = InlineWidget(html=document, widget_id=widget_id, browser_only=True, token=token)
+                info = payload.get("info")
+                if info:
+                    with contextlib.suppress(Exception):
+                        yf_ai._start_live_quotes(widget, symbol, info)
+                return document
+
+            asset_info_widget_html._terminal_offloaded = True
+            yf_ai.asset_info_widget_html = asset_info_widget_html
+        offloaded.append("YFinance asset_info")
+    except ImportError as e:
+        _not_applied("event-loop offload (YFinance asset_info)", e)
+
+    # 3. Federal Reserve FOMC / regional publication download & choice routes + HTTP 204 fix
+    try:
+        from openbb_federal_reserve import federal_reserve_router as frr
+
+        fr_map = {}
+        for attr, empty_ok in (
+            ("fomc_documents_download", False),
+            ("fomc_documents_choices", True),
+            ("regional_publications_download", False),
+            ("regional_publications_choices", True),
+            ("regional_reports_choices", True),
+            ("market_probability_meetings", False),
+        ):
+            orig_ep = getattr(frr, attr, None)
+            if orig_ep is not None and not getattr(orig_ep, "_terminal_offloaded", False):
+                wrapped_ep = _wrap_sync_coro(orig_ep, empty_on_empty_error=empty_ok)
+                wrapped_ep._terminal_offloaded = True
+                setattr(frr, attr, wrapped_ep)
+                fr_map[orig_ep] = wrapped_ep
+        if fr_map:
+            _rebind_routes(frr.router._api_router, fr_map)
+            for _dr, *_ in getattr(frr, "_REGIONAL_DISTRICTS", ()):
+                _rebind_routes(_dr.api_router, fr_map)
+            offloaded.append("Fed")
+    except ImportError as e:
+        _not_applied("event-loop offload (Fed)", e)
+
+    # 4. BLS CPI document routes
+    try:
+        from openbb_bls.routers import cpi as bls_cpi
+
+        bls_map = {}
+        for attr, empty_ok in (("document_choices", True), ("document_download", False)):
+            orig_ep = getattr(bls_cpi, attr, None)
+            if orig_ep is not None and not getattr(orig_ep, "_terminal_offloaded", False):
+                wrapped_ep = _wrap_sync_coro(orig_ep, empty_on_empty_error=empty_ok)
+                wrapped_ep._terminal_offloaded = True
+                setattr(bls_cpi, attr, wrapped_ep)
+                bls_map[orig_ep] = wrapped_ep
+        if bls_map:
+            _rebind_routes(bls_cpi.router.api_router, bls_map)
+            offloaded.append("BLS CPI")
+    except ImportError as e:
+        _not_applied("event-loop offload (BLS CPI)", e)
+
+    # 5. OECD custom SDMX/metadata routes (run sync inside async def)
+    try:
+        from openbb_oecd import oecd_router as oer
+
+        oecd_map = {}
+        for attr in (
+            "list_topic_choices",
+            "list_subtopic_choices",
+            "list_dataflows",
+            "list_dataflow_choices",
+            "list_topics",
+            "get_dataflow_parameters",
+            "list_tables",
+            "get_table_detail",
+            "list_table_choices",
+            "indicator_choices",
+            "presentation_table_choices",
+            "presentation_table_dim_choices",
+            "presentation_table",
+        ):
+            orig_ep = getattr(oer, attr, None)
+            if orig_ep is not None and not getattr(orig_ep, "_terminal_offloaded", False):
+                wrapped_ep = _wrap_sync_coro(orig_ep)
+                wrapped_ep._terminal_offloaded = True
+                setattr(oer, attr, wrapped_ep)
+                oecd_map[orig_ep] = wrapped_ep
+        if oecd_map:
+            _rebind_routes(oer.router.api_router, oecd_map)
+            offloaded.append("OECD")
+    except ImportError as e:
+        _not_applied("event-loop offload (OECD)", e)
+
+    if offloaded:
+        applied.append("blocking async routes offloaded to worker threads (" + ", ".join(offloaded) + ")")
+
+
+def install_session_leak_fix(applied: list):
+    """Replace per-session atexit closures with one WeakSet cleanup handler (stops unbounded aiohttp session buildup)."""
+    import atexit
+    import functools
+    import weakref
+
+    try:
+        from openbb_core.provider.utils import helpers as core_helpers
+    except ImportError:
+        return
+    orig_get_session = getattr(core_helpers, "get_async_requests_session", None)
+    if orig_get_session is None or getattr(orig_get_session, "_terminal_weak_sessions", False):
+        return
+
+    open_sessions: weakref.WeakSet = weakref.WeakSet()
+    skip_atexit = threading.local()
+    real_atexit_register = atexit.register
+
+    def _cleanup_sessions():
+        for sess in list(open_sessions):
+            try:
+                if not sess.closed:
+                    core_helpers.run_async(sess.close)
+            except Exception:  # noqa: BLE001
+                pass
+
+    real_atexit_register(_cleanup_sessions)
+
+    def _guarded_register(fn, *args, **kwargs):
+        if getattr(skip_atexit, "active", False) and getattr(fn, "__name__", "") == "at_exit":
+            if args and args[0] is not None:
+                open_sessions.add(args[0])
+            return fn
+        return real_atexit_register(fn, *args, **kwargs)
+
+    atexit.register = _guarded_register
+
+    @functools.wraps(orig_get_session)
+    async def get_async_requests_session(*args, **kwargs):
+        prev = getattr(skip_atexit, "active", False)
+        skip_atexit.active = True
+        try:
+            sess = await orig_get_session(*args, **kwargs)
+        finally:
+            skip_atexit.active = prev
+        if sess is not None:
+            open_sessions.add(sess)
+        return sess
+
+    get_async_requests_session._terminal_weak_sessions = True
+    core_helpers.get_async_requests_session = get_async_requests_session
+    applied.append("provider ClientSessions tracked with WeakSet (no per-request atexit leak)")
+
+
+def install_disable_mcp_subprocesses(applied: list):
+    """Do not spawn orphaned FastMCP uvicorn subprocesses (e.g. port 7769) on /widgets.json unless opted in."""
+    if os.environ.get("OPENBB_ENABLE_MCP", "").strip().lower() in ("1", "true", "yes"):
+        return
+    disabled = []
+    for mod_name, label in (
+        ("openbb_sec.utils.filing_viewer_mcp", "SEC"),
+        ("openbb_yfinance.utils.mcp_app", "YFinance"),
+    ):
+        try:
+            mod = __import__(mod_name, fromlist=["ensure_mcp_subprocess"])
+        except ImportError:
+            continue
+        if hasattr(mod, "ensure_mcp_subprocess"):
+            mod.ensure_mcp_subprocess = lambda: None
+            disabled.append(label)
+    if disabled:
+        applied.append("background MCP subprocess spawning disabled (" + ", ".join(disabled) + ")")
+
+
+def install_yfinance_options_fix(applied: list):
+    """Turn Yahoo crumb 401 errors into a crumb refresh + single retry, and missing/empty chains into EmptyDataError."""
+    import functools
+
+    try:
+        from openbb_core.provider.utils.errors import EmptyDataError
+        from openbb_yfinance.models import options_chains as yf_opt
+    except ImportError:
+        return
+    orig = yf_opt.YFinanceOptionsChainsFetcher.aextract_data
+    if getattr(orig, "_terminal_opt_fixed", False):
+        return
+
+    @functools.wraps(orig)
+    async def aextract_data(query, credentials=None, **kwargs):
+        sym = str(getattr(query, "symbol", "") or "").upper()
+        for attempt in range(2):
+            try:
+                res = await orig(query, credentials, **kwargs)
+                if not res or not res.get("chains") or res.get("underlying") is None:
+                    raise EmptyDataError(f"No options found for {sym}")
+                return res
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                if attempt == 0 and ("401" in msg or "crumb" in msg.lower() or "Unauthorized" in msg):
+                    try:
+                        import yfinance.data as yf_data
+                        yd = yf_data.YfData()
+                        yd._crumb = None
+                        yd._cookie = None
+                    except Exception:  # noqa: BLE001
+                        pass
+                    continue
+                if isinstance(exc, (KeyError, AttributeError, TypeError)):
+                    raise EmptyDataError(f"No options found for {sym}") from exc
+                raise
+
+    aextract_data._terminal_opt_fixed = True
+    yf_opt.YFinanceOptionsChainsFetcher.aextract_data = staticmethod(aextract_data)
+    applied.append("Yahoo options chains recover from stale crumb 401 and empty chains")
+
+
+def install_tmx_gainers_fix(applied: list):
+    """Pop missing string fields (longName, etc.) instead of letting check_metric coerce None to 0."""
+    try:
+        from openbb_tmx.models import gainers as tg
+    except ImportError:
+        return
+    orig_transform = tg.TmxGainersFetcher.transform_data
+    if getattr(orig_transform, "_terminal_tmx_gainers_fixed", False):
+        return
+
+    def transform_data(query, data: list[dict], **kwargs):
+        cleaned = []
+        for raw in data or ():
+            if not isinstance(raw, dict):
+                continue
+            sym = raw.get("symbol")
+            if not isinstance(sym, str) or not sym.strip():
+                continue
+            row = dict(raw)
+            for str_key in ("longName", "name", "exchange", "currency"):
+                if str_key in row and (row[str_key] is None or row[str_key] == "-"):
+                    row.pop(str_key, None)
+            try:
+                cleaned.append(tg.TmxGainersData.model_validate(row))
+            except Exception:  # noqa: BLE001
+                continue
+        return cleaned
+
+    transform_data._terminal_tmx_gainers_fixed = True
+    tg.TmxGainersFetcher.transform_data = staticmethod(transform_data)
+    applied.append("TMX gainers tolerate missing longName without HTTP 500 ValidationError")
+
+
+def install_nasdaq_empty_json_fix(applied: list):
+    """Treat HTTP 204 / empty JSON bodies from Nasdaq cached requests as {} instead of raising JSONDecodeError."""
+    import functools
+
+    try:
+        from openbb_nasdaq.utils import helpers as nh
+    except ImportError:
+        return
+    orig_cached = getattr(nh, "_cached_request", None)
+    if orig_cached is None or getattr(orig_cached, "_terminal_nasdaq_empty_fixed", False):
+        return
+
+    @functools.wraps(orig_cached)
+    async def _cached_request(url: str, **kwargs):
+        from aiohttp_client_cache.session import CachedSession
+
+        async with CachedSession(cache=nh.get_cache_backend()) as session:
+            response = await session.get(url, headers=nh.get_headers("json"), **kwargs)
+            try:
+                if getattr(response, "status", 200) == 204:
+                    return {}
+                raw = await response.read()
+                if not raw or not raw.strip():
+                    return {}
+                return json.loads(raw.decode("utf-8", errors="replace"))
+            except (json.JSONDecodeError, ValueError):
+                return {}
+            finally:
+                release = getattr(response, "release", None)
+                if callable(release):
+                    release()
+
+    _cached_request._terminal_nasdaq_empty_fixed = True
+    nh._cached_request = _cached_request
+    applied.append("Nasdaq cached requests treat HTTP 204 / empty JSON responses as empty")
+
+
+def install_user_settings_cache(applied: list):
+    """Cache UserService.read_from_file by (path, mtime_ns, size) to eliminate repeated disk reads."""
+    try:
+        from openbb_core.app.service import user_service as us
+    except ImportError:
+        return
+    orig_read = us.UserService.read_from_file.__func__
+    if getattr(orig_read, "_terminal_cached", False):
+        return
+
+    lock = threading.Lock()
+    cached_entries: dict = {}
+
+    @classmethod
+    def read_from_file(cls, path=None):
+        p = path or cls.USER_SETTINGS_PATH
+        key = str(p)
+        try:
+            st = p.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = None
+        with lock:
+            hit = cached_entries.get(key)
+            if hit is not None and hit[0] == sig and sig is not None:
+                return hit[1].model_copy(deep=True)
+        val = orig_read(cls, path=path)
+        if sig is not None:
+            with lock:
+                cached_entries[key] = (sig, val.model_copy(deep=True))
+        return val
+
+    orig_write = us.UserService.write_to_file.__func__
+
+    @classmethod
+    def write_to_file(cls, user_settings, path=None):
+        orig_write(cls, user_settings, path=path)
+        key = str(path or cls.USER_SETTINGS_PATH)
+        with lock:
+            cached_entries.pop(key, None)
+
+    read_from_file._terminal_cached = True
+    us.UserService.read_from_file = read_from_file
+    us.UserService.write_to_file = write_to_file
+    applied.append("OpenBB user_settings.json reads memoized by file mtime")
 
 
 def install_imf_arcgis_fix(applied: list):
@@ -3446,6 +4504,7 @@ def install_guard(port: str):
     """
     import uvicorn.config as uc
 
+    port = str(port)
     hosts = {"127.0.0.1", "localhost", "[::1]"}
     origins = origins_for(port)
 
@@ -3584,12 +4643,26 @@ def install_guard(port: str):
             try:
                 return await self.app(scope, receive, send2)
             except Exception as e:  # noqa: BLE001
-                if not state["sent"]:
+                import asyncio as _asyncio
+
+                if isinstance(e, _asyncio.CancelledError):
                     raise
-                # OpenBB already answered with its error response and Starlette re-raises the exception: one line, not a
-                # 60-line traceback per failed request.
-                say(f"ERROR:    {scope.get('path')} -> {type(e).__name__}: {redact(str(e))[:300]}")
-                return None
+                detail = sanitize_error_body(redact(f"{type(e).__name__}: {e}"))[:500]
+                say(f"ERROR:    {scope.get('path')} -> {detail}")
+                if state["sent"]:
+                    return None
+                raw_json = json.dumps({"detail": detail}).encode("utf-8")
+                if to_frame:
+                    raw = frame_error_page(raw_json.decode("utf-8"), 500).encode("utf-8")
+                    ctype = b"text/html; charset=utf-8"
+                else:
+                    raw = raw_json
+                    ctype = b"application/json; charset=utf-8"
+                hs = [(b"content-type", ctype), (b"content-length", str(len(raw)).encode())]
+                if origin:
+                    hs.extend([(b"vary", b"Origin"), (b"access-control-allow-origin", origin.encode("latin-1"))])
+                await send({"type": "http.response.start", "status": 500, "headers": hs})
+                return await send({"type": "http.response.body", "body": raw})
             finally:
                 SUBSTITUTE.reset(sub_tok)
                 STALE_NOTES.reset(stale_tok)

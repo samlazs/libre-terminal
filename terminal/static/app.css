@@ -109,12 +109,16 @@ input[type=text], input[type=search], input[type=number], input[type=date], sele
   background: var(--page); border: 1px solid var(--border); border-radius: 4px; padding: 4px 7px; color: var(--text); min-width: 0;
 }
 input:focus, select:focus { outline: 1px solid var(--accent); outline-offset: -1px; }
+button:focus-visible, .icon-btn:focus-visible, .dd-btn:focus-visible, .chip:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 input[type=date] { color-scheme: dark; }
 
 /* ---------- widget card ---------- */
 .w { position: absolute; background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); display: flex; flex-direction: column; overflow: hidden; }
 .w.dragging { opacity: .85; z-index: 50; box-shadow: 0 8px 30px rgba(0,0,0,.6); transition: none; }
 .w.max { position: fixed !important; inset: 8px !important; width: auto !important; height: auto !important; z-index: 200; box-shadow: 0 0 0 100vmax rgba(0,0,0,.7); }
+.w.max .w-resize { display: none; }
+body.grid-dragging { user-select: none; }
+body.grid-dragging iframe { pointer-events: none !important; }
 .ghost { position: absolute; border: 1px dashed var(--accent); border-radius: var(--radius); background: rgba(57,135,229,.08); pointer-events: none; z-index: 40; }
 .w-head { display: flex; align-items: center; gap: 4px; padding: 5px 6px 5px 10px; cursor: grab; user-select: none; flex: none; min-height: 30px; }
 .w.max .w-head { cursor: default; }

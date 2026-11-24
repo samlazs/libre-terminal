@@ -6,7 +6,9 @@ import hashlib
 import json
 import math
 import re
+import threading
 import time
+from collections import OrderedDict
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -141,7 +143,9 @@ def _peers(sym):
 COMP_FIELDS = ["mcap_usd", "ev_usd", "pe", "fwd_pe", "ev_ebitda", "ev_sales", "pb", "gross_margin", "ebitda_margin", "op_margin", "net_margin",
                "rev_growth", "eps_growth", "roe", "nd_ebitda", "div_yield", "beta", "ret_1y"]
 
-_METRICS = {}                                        # symbol -> (time fetched, Yahoo key metrics); see comps()
+_METRICS: OrderedDict = OrderedDict()                 # symbol -> (time fetched, Yahoo key metrics); bounded in comps()
+_METRICS_LOCK = threading.Lock()
+_METRICS_MAX = 512
 
 
 def _ev_parts(m, ccy, fx):
@@ -153,7 +157,7 @@ def _ev_parts(m, ccy, fx):
     fx: USD per unit, keyed by currency code as quoted (minor units such as GBp included). Amounts returned in USD billions.
     """
     def pos(v):
-        return v if isinstance(v, (int, float)) and v > 0 else None
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
     q = C.MINOR_UNITS.get(ccy, (ccy,))[0]
     rq = fx.get(ccy)
     if rq and ccy in C.MINOR_UNITS:
@@ -161,7 +165,7 @@ def _ev_parts(m, ccy, fx):
     f = m.get("currency")
     f = C.MINOR_UNITS.get(f, (f,))[0] if f else None
     mc, ev = pos(m.get("market_cap")), m.get("enterprise_value")
-    ev = ev if isinstance(ev, (int, float)) else None
+    ev = float(ev) if isinstance(ev, (int, float)) and not isinstance(ev, bool) and math.isfinite(ev) else None
     eve, evs, pb = pos(m.get("enterprise_to_ebitda")), pos(m.get("enterprise_to_revenue")), pos(m.get("price_to_book"))
     out = {"mcap_usd": mc * rq / 1e9 if mc and rq else None, "ev_usd": None, "ev_ebitda": None, "ev_sales": None, "pb": None,
            "nd_ebitda": None, "note": None, "ev_q": None}
@@ -213,7 +217,13 @@ def comps(symbol="AAPL", peers=None, **_):
     # Kept per symbol, and only for symbols Yahoo actually answered: a throttled, partial answer used to be cached whole
     # for an hour, leaving peers on "no data". Missing symbols get one retry now and another on the next view.
     now = time.time()
-    met = {s: C._METRICS[s][1] for s in syms if s in C._METRICS and now - C._METRICS[s][0] < 3600}
+    met = {}
+    with _METRICS_LOCK:
+        for s in syms:
+            hit = _METRICS.get(s)
+            if hit and now - hit[0] < 3600:
+                _METRICS.move_to_end(s)
+                met[s] = hit[1]
     for attempt in range(2):
         need = [s for s in syms if s not in met]
         if not need:
@@ -224,10 +234,15 @@ def comps(symbol="AAPL", peers=None, **_):
             if attempt and not met:
                 raise
             rows = []
-        for r in rows:
-            if r.get("symbol"):
-                met[r["symbol"]] = r
-                C._METRICS[r["symbol"]] = (now, r)
+        with _METRICS_LOCK:
+            for r in rows:
+                if r.get("symbol"):
+                    sym_r = r["symbol"]
+                    met[sym_r] = r
+                    _METRICS[sym_r] = (now, r)
+                    _METRICS.move_to_end(sym_r)
+                    while len(_METRICS) > _METRICS_MAX:
+                        _METRICS.popitem(last=False)
         if not attempt and len(met) < len(syms):
             time.sleep(1.5)                   # Yahoo's client sometimes drops symbols when several requests run at once
     meta = C._meta(syms)
@@ -238,7 +253,7 @@ def comps(symbol="AAPL", peers=None, **_):
     fx = C._usd_rates({(meta.get(s) or {}).get("currency") for s in syms} | {(met.get(s) or {}).get("currency") for s in syms} - {None})
 
     def pos(v):
-        return v if isinstance(v, (int, float)) and v > 0 else None
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
     rows = []
     for s in syms:
         m, q = met.get(s), meta.get(s) or {}
@@ -250,13 +265,14 @@ def comps(symbol="AAPL", peers=None, **_):
         e = C._ev_parts(m, ccy, fx)                       # EV rebuilt in one currency (ADRs, dollar reporters listed abroad)
         nd = e["nd_ebitda"]
         dy = m.get("dividend_yield")
+        dy_ok = isinstance(dy, (int, float)) and not isinstance(dy, bool) and math.isfinite(dy)
         rows.append({
             "name": name, "symbol": s, "currency": ccy,
             "mcap_usd": e["mcap_usd"], "ev_usd": e["ev_usd"],
             "pe": pos(m.get("pe_ratio")), "fwd_pe": pos(m.get("forward_pe")), "ev_ebitda": e["ev_ebitda"], "ev_sales": e["ev_sales"], "pb": e["pb"],
             "gross_margin": m.get("gross_margin"), "ebitda_margin": m.get("ebitda_margin"), "op_margin": m.get("operating_margin"), "net_margin": m.get("profit_margin"),
             "rev_growth": m.get("revenue_growth"), "eps_growth": m.get("earnings_growth"), "roe": m.get("return_on_equity"), "nd_ebitda": nd,
-            "div_yield": dy / 100 if isinstance(dy, (int, float)) else None,     # Yahoo now reports the dividend yield in percent
+            "div_yield": float(dy) / 100 if dy_ok else None,                    # Yahoo now reports the dividend yield in percent
             "beta": m.get("beta"), "ret_1y": m.get("price_return_1y"), "_hl": s == sym,
             "note": e["note"],
         })
@@ -265,7 +281,7 @@ def comps(symbol="AAPL", peers=None, **_):
             rows[-1]["note"] = "; ".join(x for x in (e["note"], "bank: EV, EBITDA and gross margin " + BANK_NA) if x)
     med = {"name": "Peer median", "symbol": "", "_pin": True}
     for f in COMP_FIELDS:
-        vals = sorted(r[f] for r in rows[1:] if isinstance(r.get(f), (int, float)))
+        vals = sorted(r[f] for r in rows[1:] if isinstance(r.get(f), (int, float)) and not isinstance(r.get(f), bool) and math.isfinite(r[f]))
         if vals:
             k = len(vals) // 2
             med[f] = vals[k] if len(vals) % 2 else (vals[k - 1] + vals[k]) / 2

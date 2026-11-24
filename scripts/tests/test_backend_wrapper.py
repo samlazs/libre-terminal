@@ -716,4 +716,137 @@ def _test_tvchart_and_warm_route():
 
 _test_tvchart_and_warm_route()
 
+
+# ---- v0.7.0 TradingView sanitization, metadata bar repair, JSON scrubbing, provider & Guard hardening
+def _test_v07_reliability():
+    import datetime as _dt
+    import sys as _sys
+    import types as _types
+
+    # 1. _clean_json_val + strict JSON dumps
+    dirty = {"a": float("nan"), "b": [1.0, float("inf"), float("-inf")], "nested": {"x": 2.5, "y": float("nan")}}
+    cleaned = rb._clean_json_val(dirty)
+    check(cleaned == {"a": None, "b": [1.0, None, None], "nested": {"x": 2.5, "y": None}}, "_clean_json_val scrubs NaN/Inf")
+    check(json.dumps(cleaned, allow_nan=False) is not None, "cleaned payload serializes with allow_nan=False")
+
+    # 2. _sanitize_tv_bars drops NaN/Inf bars, preserves close-only bars, clamps negative volume
+    raw_bars = [
+        {"time": 1700000000, "open": 10.0, "high": 9.0, "low": 11.0, "close": 10.5, "volume": 100},
+        {"time": 1700086400, "open": float("nan"), "high": 12.0, "low": 9.5, "close": 11.0, "volume": 50},
+        {"time": 1700172800, "close": 11.2},
+        {"time": 1700259200, "open": 11.0, "high": 11.5, "low": 10.8, "close": float("inf"), "volume": 10},
+        {"time": 1700345600, "close": 12.0, "volume": -5},
+    ]
+    san = rb._sanitize_tv_bars(raw_bars)
+    check(len(san) == 3, f"_sanitize_tv_bars keeps 3 finite bars (got {len(san)})")
+    check(san[0]["high"] == 10.5 and san[0]["low"] == 10.0, "_sanitize_tv_bars clamps high/low envelope around O/C")
+    check(san[1] == {"time": 1700172800, "close": 11.2}, "_sanitize_tv_bars preserves close-only bars")
+    check(san[2]["volume"] == 0, "_sanitize_tv_bars clamps negative volume to 0")
+
+    # 3. _repair_daily_bar_from_meta appends active session bar when history stops before market date
+    today_dt = _dt.datetime.now(_dt.timezone.utc).replace(hour=15, minute=0, second=0, microsecond=0)
+    if today_dt.weekday() >= 5:
+        today_dt -= _dt.timedelta(days=today_dt.weekday() - 4)
+    yest_ts = int((today_dt - _dt.timedelta(days=1)).timestamp())
+    repaired = rb._repair_daily_bar_from_meta(
+        [{"time": yest_ts, "open": 40.0, "high": 42.0, "low": 39.0, "close": 41.0, "volume": 1000}],
+        {
+            "regularMarketPrice": 48.33,
+            "regularMarketOpen": 47.0,
+            "regularMarketDayHigh": 51.9,
+            "regularMarketDayLow": 46.53,
+            "regularMarketVolume": 94610000,
+            "regularMarketTime": int(today_dt.timestamp()),
+            "exchangeTimezoneName": "America/New_York",
+            "instrumentType": "EQUITY",
+        },
+    )
+    check(len(repaired) == 2 and repaired[-1]["close"] == 48.33 and repaired[-1]["open"] == 47.0, "_repair_daily_bar_from_meta appends active daily bar")
+
+    # 4. install_tmx_gainers_fix drops None / "-" strings safely
+    _saved_tmx = {m: _sys.modules.get(m) for m in ("openbb_tmx", "openbb_tmx.models", "openbb_tmx.models.gainers")}
+    try:
+        pkg = _types.ModuleType("openbb_tmx")
+        mods = _types.ModuleType("openbb_tmx.models")
+        gmod = _types.ModuleType("openbb_tmx.models.gainers")
+
+        class _GainersData:
+            @classmethod
+            def model_validate(cls, row):
+                return dict(row)
+
+        class _GainersFetcher:
+            @staticmethod
+            def transform_data(query, data, **kwargs):
+                return data
+
+        gmod.TmxGainersData = _GainersData
+        gmod.TmxGainersFetcher = _GainersFetcher
+        mods.gainers = gmod
+        pkg.models = mods
+        _sys.modules["openbb_tmx"] = pkg
+        _sys.modules["openbb_tmx.models"] = mods
+        _sys.modules["openbb_tmx.models.gainers"] = gmod
+
+        ap_tmx = []
+        rb.install_tmx_gainers_fix(ap_tmx)
+        rows = _GainersFetcher.transform_data(None, [{"symbol": "RY", "longName": None, "exchange": "-"}, {"symbol": ""}])
+        check(bool(ap_tmx) and rows == [{"symbol": "RY"}], "install_tmx_gainers_fix strips None/'-' strings and blank symbols")
+    finally:
+        for _n, _old in _saved_tmx.items():
+            if _old is None:
+                _sys.modules.pop(_n, None)
+            else:
+                _sys.modules[_n] = _old
+
+    # 5. Guard pre-header exception returns sanitized 500 JSON with CORS headers
+    class _CrashConfig:
+        def __init__(self, app_in):
+            self.loaded_app = app_in
+
+        def load(self):
+            pass
+
+    async def _boom_app(scope, receive, send):
+        raise RuntimeError("boom token=TOPSECRET_ERR")
+
+    uc_mod = _sys.modules["uvicorn.config"]
+    orig_cfg = uc_mod.Config
+    try:
+        uc_mod.Config = _CrashConfig
+        rb.install_guard(6900)
+        cfg_inst = _CrashConfig(_boom_app)
+        uc_mod.Config.load(cfg_inst)
+        guard_crash = cfg_inst.loaded_app
+        sent = []
+
+        async def _send_c(msg):
+            sent.append(msg)
+
+        async def _recv_c():
+            return {"type": "http.request"}
+
+        asyncio.run(guard_crash({
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/crash",
+            "query_string": b"",
+            "headers": [(b"host", b"127.0.0.1:6900"), (b"origin", b"http://127.0.0.1:6950")],
+        }, _recv_c, _send_c))
+        st = next(m for m in sent if m["type"] == "http.response.start")
+        hs = {k.decode().lower(): v.decode() for k, v in st["headers"]}
+        btxt = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body").decode("utf-8")
+        check(
+            st["status"] == 500
+            and hs.get("access-control-allow-origin") == "http://127.0.0.1:6950"
+            and "TOPSECRET_ERR" not in btxt
+            and "RuntimeError" in btxt,
+            "Guard converts unhandled pre-header crash to redacted 500 JSON with CORS headers",
+        )
+    finally:
+        uc_mod.Config = orig_cfg
+
+
+_test_v07_reliability()
+
 done("test_backend_wrapper")

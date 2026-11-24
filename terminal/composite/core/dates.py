@@ -51,7 +51,8 @@ def range_start(rng, since, default="2015"):
         return t.replace(year=t.year - RANGE_YEARS[r], day=min(t.day, 28)).isoformat()
     if r == "MAX":
         return "1950-01-01"
-    y = re.sub(r"\D", "", str(since or ""))[:4] or default
+    raw = re.sub(r"\D", "", str(since or ""))
+    y = raw[:4] if len(raw) >= 4 else default
     return f"{y}-01-01"
 
 
@@ -73,19 +74,23 @@ def _month_start():
 
 
 def _period_date(p):
-    p = str(p)
-    if len(p) >= 10:
+    p = str(p or "").strip()
+    if len(p) >= 10 and p[4:5] == "-" and p[7:8] == "-":
         return p[:10]
-    if "Q" in p:
-        y, q = p.split("-Q") if "-Q" in p else p.split("Q")
-        return f"{y}-{(int(q) - 1) * 3 + 1:02d}-01"
-    if len(p) == 7:
+    m = re.match(r"^(\d{4})-?Q([1-4])$", p, re.IGNORECASE)
+    if m:
+        return f"{m.group(1)}-{(int(m.group(2)) - 1) * 3 + 1:02d}-01"
+    if len(p) == 7 and p[4] == "-":
         return p + "-01"
-    return p[:4] + "-01-01"
+    y = re.sub(r"\D", "", p)[:4]
+    return (y + "-01-01") if len(y) == 4 else ""
 
 
 def _next_month(iso):
-    y, m = int(iso[:4]), int(iso[5:7])
+    s = str(iso or "")
+    if len(s) < 7 or not s[:4].isdigit() or not s[5:7].isdigit():
+        return s
+    y, m = int(s[:4]), int(s[5:7])
     return f"{y + (m == 12)}-{1 if m == 12 else m + 1:02d}-01"
 
 
@@ -93,7 +98,7 @@ def _date_span(v):
     """(first ISO date, last ISO date or None) from Yahoo's earnings date: one date, or a list/"a, b" range when the company
     has not confirmed (audit C9: the card printed "['2026-01-2")."""
     if isinstance(v, (list, tuple)):
-        ds = sorted(str(x)[:10] for x in v if x)
+        ds = sorted(x for x in (str(item)[:10] for item in v if item) if re.match(r"^\d{4}-\d{2}-\d{2}$", x))
     else:
         ds = sorted(re.findall(r"\d{4}-\d{2}-\d{2}", str(v or "")))
     if not ds:

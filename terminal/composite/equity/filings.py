@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import math
 
 import composite as C
 
@@ -69,8 +70,11 @@ def _facts(symbols, fact):
                     continue
                 if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
                     continue
+                val = r.get("value")
+                if not (isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val)):
+                    continue
                 d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
-                d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(r["value"])))
+                d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(val)))
         out = {}
         for sym, spans in merged.items():
             # fiscal Q4 is only reported inside the annual figure: annual minus the three reported quarters

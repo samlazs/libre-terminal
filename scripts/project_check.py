@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "terminal"))
 import local_paths  # noqa: E402
 import redact  # noqa: E402
+from version import VERSION  # noqa: E402
 
 PUBLISHABLE_DIRS = ("terminal", "scripts", "config", "docs")
 PUBLISHABLE_ROOT_FILES = (
@@ -77,9 +78,9 @@ WINDOWS_RELEASE_EXCLUDE_FILES = {
     "README.md",
 }
 WINDOWS_RELEASE_EXCLUDE_PREFIXES = ("docs/", "scripts/tests/")
-WINDOWS_README_TEXT = """\
-Libre Terminal - Windows Quick Guide
-====================================
+WINDOWS_README_TEXT = f"""\
+Libre Terminal v{VERSION} - Windows Quick Guide
+===========================================
 
 No Python, coding tools, or accounts are required.
 

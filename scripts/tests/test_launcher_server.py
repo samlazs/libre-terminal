@@ -492,6 +492,44 @@ st_mix, hs_mix, b_mix = full("GET", "/static/app.js", {"Accept-Encoding": "gzip"
 check(st_mix == 200 and hs_mix.get("Content-Encoding") == "gzip" and hs_mix.get("ETag") == hs_g["ETag"],
       "uncompressed ETag sent with Accept-Encoding: gzip returns 200 gzipped instead of mismatched 304")
 
+# ---- v0.7.0 version, strict finite JSON, chart comparison errors, series/date & port guards
+import composite as _comp  # noqa: E402
+import version as _ver  # noqa: E402
+
+st_cfg, cfg_raw = req("GET", "/api/config")
+cfg_json = json.loads(cfg_raw)
+check(st_cfg == 200 and cfg_json.get("version") == _ver.VERSION == "0.7.0", "/api/config reports VERSION 0.7.0")
+check(_ver.VERSION in server.Handler.server_version, "Handler.server_version includes VERSION")
+
+strict_bytes = server.Handler._dumps_strict({"a": float("nan"), "b": [1.5, float("inf"), float("-inf")]})
+check(strict_bytes == b'{"a": null, "b": [1.5, null, null]}', "Handler._dumps_strict replaces NaN/Inf with null")
+
+st_nan, _ = req("PUT", "/api/state", {"Content-Type": "application/json"}, b'{"v": 2, "dashboards": {}, "bad": NaN}')
+check(st_nan == 400, "PUT /api/state rejects non-standard NaN JSON with 400")
+
+_orig_hist = _comp.history
+try:
+    _comp.history = lambda syms, start, *_a, **_kw: {s: [("2026-11-20", 100.0), ("2026-11-21", 101.0)] for s in syms if s == "AAPL"}
+    st_ratio, body_ratio = req("GET", "/x/chart?symbol=AAPL&compare=ZZZZZZZ_BAD&view=ratio")
+    j_ratio = json.loads(body_ratio)
+    check(st_ratio == 502 and j_ratio.get("user_message") is True and "comparison" in j_ratio.get("detail", "").lower(),
+          "chart ratio raises clean 502 CompositeError when comparison symbol has no data")
+finally:
+    _comp.history = _orig_hist
+
+check(_comp._num_or_none("inf") is None and _comp._num_or_none("nan") is None, "_num_or_none rejects inf and nan")
+check(_comp._ret([("2026-11-20", float("nan")), ("2026-11-21", 10.0)], "1D") is None, "_ret rejects NaN values")
+check(_comp._big(float("inf")) == "–" and _comp._big(True) == "–", "_big rejects Inf and bool")
+check(_comp.range_start(None, "20") == "2015-01-01", "range_start falls back to default when year < 4 digits")
+check(_comp._period_date("2026Q2") == "2026-04-01" and _comp._period_date("2026Q") == "2026-01-01",
+      "_period_date parses valid quarters and handles malformed strings safely")
+
+try:
+    launcher.resolve_ports(types.SimpleNamespace(ui_port=99999, v5_port=None, v4_port=None))
+    check(False, "resolve_ports rejects out-of-range port")
+except SystemExit:
+    check(True, "resolve_ports rejects out-of-range port")
+
 httpd.shutdown()
 
 done("test_launcher_server")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import math
 
 import composite as C
 
@@ -195,11 +196,15 @@ def _imf_cpi(keys, start):
             names = kw["country"].split(",")
             for r in rows:
                 v = r.get("value")
-                if v is None:
+                try:
+                    vf = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(vf):
                     continue
                 key = C._imf_key(r.get("country"), r.get("country_code"), names)
                 if key:
-                    out.setdefault(key, []).append([str(r.get("date"))[:10], round(float(v) * 100, 3)])
+                    out.setdefault(key, []).append([str(r.get("date"))[:10], round(vf * 100, 3)])
         for k in out:
             out[k].sort()
         if not out:
@@ -227,8 +232,12 @@ def _oecd_all(path, start):
         rows = C.api(C.V5, path, provider="oecd", country="all", start_date=start, end_date=dt.date.today().isoformat())
         out = {}
         for r in rows or []:
-            if r.get("value") is not None:
-                out.setdefault(str(r.get("country")).replace("’", "'"), []).append([str(r.get("date"))[:10], float(r["value"])])
+            try:
+                vf = float(r.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(vf):
+                out.setdefault(str(r.get("country")).replace("’", "'"), []).append([str(r.get("date"))[:10], vf])
         for k in out:
             out[k].sort()
         if not out:
@@ -256,7 +265,7 @@ def country_monitor(**_):
             label, _, _, iso = C.COUNTRIES.get(k, (k.replace("_", " ").title(), None, None, None))
             row = {"country": MONITOR_LABELS.get(k, label), "key": k}
             g = C._oecd_for(gdp, k)
-            if len(g) >= 5 and g[-5][1]:
+            if len(g) >= 5 and g[-5][1] and math.isfinite(g[-5][1]) and math.isfinite(g[-1][1]):
                 row["gdp_yoy"], row["gdp_q"] = (g[-1][1] / g[-5][1] - 1), C._quarter(g[-1][0])
             c = cpi.get(k) or []
             if c:

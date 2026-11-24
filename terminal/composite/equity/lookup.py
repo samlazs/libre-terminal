@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import re
 import threading
 import time
+from collections import OrderedDict
 
 import composite as C
 
@@ -91,11 +93,12 @@ def _meta(symbols):
         nonlocal disk
         if disk is not None:
             return disk
-        try:
-            raw = json.loads(disk_path.read_text(encoding="utf-8"))
-            disk = raw if isinstance(raw, dict) else {}
-        except (OSError, ValueError, TypeError):
-            disk = {}
+        with _META_LOCK:
+            try:
+                raw = json.loads(disk_path.read_text(encoding="utf-8"))
+                disk = raw if isinstance(raw, dict) else {}
+            except (OSError, ValueError, TypeError):
+                disk = {}
         return disk
 
     for s in symbols:
@@ -130,12 +133,17 @@ def _meta(symbols):
                     out[sym] = info
         if fresh:
             ts = time.time()
-            merged = dict(read_disk())
-            with C._guard:
-                for sym, info in fresh.items():
-                    C._cache[("msym", sym)] = (ts, info)
-                    merged[sym] = {"t": ts, "v": info}
-            C._write_json(disk_path, merged)
+            with _META_LOCK:
+                try:
+                    raw = json.loads(disk_path.read_text(encoding="utf-8"))
+                    merged = dict(raw) if isinstance(raw, dict) else {}
+                except (OSError, ValueError, TypeError):
+                    merged = {}
+                with C._guard:
+                    for sym, info in fresh.items():
+                        C._cache[("msym", sym)] = (ts, info)
+                        merged[sym] = {"t": ts, "v": info}
+                C._write_json(disk_path, merged)
         for s in need:
             if s not in out and s in fallback:
                 out[s] = fallback[s]
@@ -184,7 +192,9 @@ def snapshot(symbol="AAPL", **_):
             raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.")
         ccy = q.get("currency") or p.get("currency") or ""
         last, prev = q.get("last_price"), q.get("prev_close")
-        chg = f" ({(last / prev - 1) * 100:+.2f}%)" if isinstance(last, (int, float)) and prev else ""
+        ok_last = isinstance(last, (int, float)) and not isinstance(last, bool) and math.isfinite(last)
+        ok_prev = isinstance(prev, (int, float)) and not isinstance(prev, bool) and math.isfinite(prev) and prev != 0
+        chg = f" ({(last / prev - 1) * 100:+.2f}%)" if ok_last and ok_prev else ""
         head = f"### {p.get('name') or q.get('name') or sym}  `{sym}`"
         bits = [b for b in (q.get("exchange") or p.get("stock_exchange"), ccy, " › ".join(x for x in (p.get("sector"), p.get("industry_category")) if x),
                             p.get("hq_country"), f"{p['employees']:,} employees" if isinstance(p.get("employees"), int) else None) if b]
@@ -212,7 +222,9 @@ def snapshot(symbol="AAPL", **_):
         tgt, cur = st.get("target_consensus"), st.get("current_price") or last
         t_ccy = str(st.get("currency") or "")      # audit C9: Yahoo states the target's currency (ADRs: USD; SHEL.L: GBp); no upside across currencies
         same = bool(t_ccy) and t_ccy == ccy
-        upside = (f" ({(tgt / cur - 1) * 100:+.0f}%)" if isinstance(tgt, (int, float)) and cur else "") if same else \
+        ok_tgt = isinstance(tgt, (int, float)) and not isinstance(tgt, bool) and math.isfinite(tgt)
+        ok_cur = isinstance(cur, (int, float)) and not isinstance(cur, bool) and math.isfinite(cur) and cur != 0
+        upside = (f" ({(tgt / cur - 1) * 100:+.0f}%)" if ok_tgt and ok_cur else "") if same else \
             "" if tgt is None else f" (target in {t_ccy}, price in {ccy}: no upside computed)" if t_ccy else " (target currency not stated: no upside computed)"
         rec = str(st.get("recommendation") or "").replace("_", " ")
         rows = [
@@ -224,7 +236,7 @@ def snapshot(symbol="AAPL", **_):
             ("EV / EBITDA", C._num(m.get("enterprise_to_ebitda"), "{:,.1f}", "x"), "Return on equity", C._pc(m.get("return_on_equity"))),
             ("EV / Sales", C._num(m.get("enterprise_to_revenue"), "{:,.1f}", "x"), "Debt / equity", C._num(m.get("debt_to_equity"), "{:,.0f}", "%")),
             ("Price / book", C._num(m.get("price_to_book"), "{:,.1f}", "x"), "Beta", C._num(m.get("beta") or p.get("beta"))),
-            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if isinstance(dy, (int, float)) else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
+            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if isinstance(dy, (int, float)) and not isinstance(dy, bool) and math.isfinite(dy) else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
         ]
         fdic, fdic_missing = None, False
         if bank:                                           # a bank: EV, EBITDA, gross margin and debt/equity carry no meaning
@@ -252,11 +264,22 @@ def snapshot(symbol="AAPL", **_):
     out = C.cached_complete(("snapshot", sym), 900, run)
     # the Estimates tab's three views share one Yahoo burst (_est_raw, 7 requests): start it once the snapshot is in,
     # in the background, so a switch to Estimates finds it warm instead of queueing behind the Overview's own requests
-    if PREFETCH_ESTIMATES and (sym not in _EST_STARTED or time.time() - _EST_STARTED[sym] > 600):
-        _EST_STARTED[sym] = time.time()
-        threading.Thread(target=C._safe, args=(C._est_raw, sym), daemon=True).start()
+    if PREFETCH_ESTIMATES:
+        now = time.time()
+        should_prefetch = False
+        with C._guard:
+            last_start = _EST_STARTED.get(sym)
+            if last_start is None or now - last_start > 600:
+                _EST_STARTED[sym] = now
+                _EST_STARTED.move_to_end(sym)
+                while len(_EST_STARTED) > 512:
+                    _EST_STARTED.popitem(last=False)
+                should_prefetch = True
+        if should_prefetch:
+            threading.Thread(target=C._safe, args=(C._est_raw, sym), daemon=True).start()
     return {k: v for k, v in out.items() if k != "_partial"}
 
 
-_EST_STARTED: dict = {}
+_META_LOCK = threading.Lock()
+_EST_STARTED: OrderedDict = OrderedDict()
 PREFETCH_ESTIMATES = True          # offline tests turn it off (no background Yahoo requests)
