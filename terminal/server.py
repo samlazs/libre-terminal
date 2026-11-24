@@ -211,6 +211,16 @@ class FileCache:
 _dash_cache = FileCache()
 
 
+RESTART_SETTLE_S = 10.0          # after a restart, failures remembered for a few seconds still read as "restarting"
+
+
+def backends_restarting() -> bool:
+    """True while a restart from the page runs, and for RESTART_SETTLE_S seconds after it finished."""
+    with _restart_lock:
+        st = dict(_restart_state)
+    return bool(st.get("restarting")) or (time.time() - float(st.get("finished_at") or 0.0) < RESTART_SETTLE_S)
+
+
 def _dash_build(raw: bytes):
     json.loads(raw.decode("utf-8"))                         # refuse a damaged file instead of serving it
     return raw, '"' + hashlib.sha1(raw).hexdigest()[:20] + '"'
@@ -510,6 +520,11 @@ class Handler(BaseHTTPRequestHandler):
             # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
             # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
             kind = contract.kind_of(e)
+            if kind in ("upstream", "timeout") and backends_restarting():
+                # the data service is being restarted on purpose: say so, and let the card retry, instead of a source error
+                return self._json(503, contract.error_body(
+                    "unavailable", "The data service is restarting; this card retries shortly.", retry_after=X_RETRY_AFTER,
+                    sources=_safe_sources(name, params), user_message=True), headers={"Retry-After": str(X_RETRY_AFTER)})
             code = e.status or contract.STATUS_BY_KIND[kind]
             return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,
                                                         sources=_safe_sources(name, params), user_message=True))

@@ -921,6 +921,8 @@ def cmd_test(a):
         cmd.append("--fast")
     if getattr(a, "fail_fast", False):
         cmd.append("--fail-fast")
+    if getattr(a, "live", False):
+        cmd.append("--live")
     if getattr(a, "jobs", None):
         cmd += ["-j", str(a.jobs)]
     cmd += list(getattr(a, "patterns", None) or [])
@@ -1066,6 +1068,7 @@ def main():
     s.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend)")
     s.add_argument("-j", "--jobs", type=int, default=None, help="parallel worker count")
     s.add_argument("--fail-fast", action="store_true", help="stop after first failure")
+    s.add_argument("--live", action="store_true", help="also run live suites on an isolated instance (e.g. test lifecycle --live)")
     s = sub.add_parser("gate", parents=[ports], help="release gate G1-G5 -> local/notes/gates-YYYY-MM-DD.json (exit 0 = no gate failed)")
     s.add_argument("--only", default=None, help="comma-separated gates, e.g. G1,G4")
     s.add_argument("--offline", action="store_true", help="only checks that need no running terminal; live parts are marked manual")

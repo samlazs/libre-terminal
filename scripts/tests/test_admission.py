@@ -119,6 +119,23 @@ for _ in range(30):
     req("GET", "/x/board")
 check(slots_free() == 24, "slots are released after defects too")
 
+# ---- while the backends restart, a failing view answers 503 unavailable (not a source error)
+import composite as _C  # noqa: E402
+_C.ROUTES["board"] = lambda **_: (_ for _ in ()).throw(_C.CompositeError("OpenBB V5 backend is not reachable (refused).", kind="upstream"))
+with server._restart_lock:
+    server._restart_state.update(restarting=True, finished_at=0.0)
+st, body, hdr = req("GET", "/x/board")
+check(st == 503 and body["error"]["kind"] == "unavailable" and "restarting" in body["detail"] and hdr.get("Retry-After") == "5",
+      f"during a restart: 503 unavailable with Retry-After ({st})")
+with server._restart_lock:
+    server._restart_state.update(restarting=False, finished_at=time.time())
+st, _, _ = req("GET", "/x/board")
+check(st == 503, "and for a few seconds after it finished")
+with server._restart_lock:
+    server._restart_state.update(restarting=False, finished_at=time.time() - 60)
+st, body, _ = req("GET", "/x/board")
+check(st == 502 and body["error"]["kind"] == "upstream", "otherwise the source error stands (502 upstream)")
+
 # ---- HEAD never runs a view
 calls = [0]
 orig_dispatch = C.dispatch

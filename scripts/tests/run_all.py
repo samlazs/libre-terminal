@@ -33,10 +33,15 @@ def select_tests(all_tests: list[Path], patterns: list[str] | None = None, fast:
     return selected
 
 
-def _run_one(test: Path) -> tuple[Path, int, int, str, list[str], float]:
+LIVE_TIMEOUT = 1800                  # seconds for a test that drives a live isolated instance (--live)
+
+
+def _run_one(test: Path, live: bool = False) -> tuple[Path, int, int, str, list[str], float]:
     t = time.time()
+    env = dict(os.environ, TERMINAL_LIVE_TESTS="1") if live else {k: v for k, v in os.environ.items() if k != "TERMINAL_LIVE_TESTS"}
     try:
-        r = subprocess.run([sys.executable, str(test)], cwd=HERE.parents[1], capture_output=True, text=True, timeout=120)
+        r = subprocess.run([sys.executable, str(test)], cwd=HERE.parents[1], capture_output=True, text=True,
+                           timeout=LIVE_TIMEOUT if live else 120, env=env)
     except subprocess.TimeoutExpired:
         return test, 1, 0, "TIMEOUT", [], time.time() - t
     out = (r.stdout or "") + (r.stderr or "")
@@ -53,6 +58,7 @@ def main(argv=None):
     ap.add_argument("-j", "--jobs", type=int, default=min(6, os.cpu_count() or 4), help="parallel worker processes")
     ap.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend.py)")
     ap.add_argument("--fail-fast", action="store_true", help="stop queuing new tests after the first failure")
+    ap.add_argument("--live", action="store_true", help="also run the live suites (isolated instance on spare ports; minutes)")
     a = ap.parse_args(argv)
 
     tests = select_tests(all_tests, a.patterns, fast=a.fast)
@@ -69,13 +75,13 @@ def main(argv=None):
     jobs = max(1, min(a.jobs, len(tests)))
     if jobs == 1:
         for test in tests:
-            res = _run_one(test)
+            res = _run_one(test, a.live)
             results[test] = res
             if res[1] and a.fail_fast:
                 break
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
-            futs = {ex.submit(_run_one, test): test for test in tests}
+            futs = {ex.submit(_run_one, test, a.live): test for test in tests}
             for fut in concurrent.futures.as_completed(futs):
                 res = fut.result()
                 results[res[0]] = res
