@@ -4,9 +4,10 @@ Used by the terminal's own views (terminal/composite/) and, through scripts/run_
 provider when no FRED key is set. Standard library only.
 
 FRED's edge network answers scripts that say what they are (the default Python user agent) but stalls requests
-that imitate a browser ("Mozilla/5.0 ..."): that is why the download used to time out. Requests are kept few
-(at most four in flight), retried with a growing timeout, and a failure blocks the download for a short while so
-a tab of FRED cards does not wait on a source that is not answering.
+that imitate a browser ("Mozilla/5.0 ..."): that is why the download used to time out. The requests go through the
+terminal's one outbound client (composite.core.http.fetch, policy "fred"): at most four in flight, retried with a
+growing timeout but never on a 429, and a failure blocks the download for two minutes so a tab of FRED cards does
+not wait on a source that is not answering.
 """
 from __future__ import annotations
 
@@ -15,17 +16,13 @@ import html
 import io
 import re
 import sys
-import threading
-import time
-import urllib.error
 import urllib.parse
-import urllib.request
 
-UA = f"Python-urllib/{sys.version_info[0]}.{sys.version_info[1]}"
+UA = f"Python-urllib/{sys.version_info[0]}.{sys.version_info[1]}"     # policy "fred" in composite/core/http.py
 CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 PAGE_URL = "https://fred.stlouisfed.org/series/"
-TIMEOUTS = (15, 25)                 # one retry with a longer wait
-DOWN_FOR = 120                      # seconds the download is skipped after it stopped answering
+TIMEOUTS = (15, 25)                 # one retry with a longer wait (policy "fred")
+DOWN_FOR = 120                      # seconds the download is skipped after it stopped answering (policy "fred")
 
 # FRED API parameters -> fredgraph.csv parameters
 UNITS = {"lin", "chg", "ch1", "pch", "pc1", "pca", "cch", "cca", "log"}
@@ -33,11 +30,6 @@ FREQ = {"d": "Daily", "w": "Weekly", "wef": "Weekly, Ending Friday", "weth": "We
         "wetu": "Weekly, Ending Tuesday", "wem": "Weekly, Ending Monday", "wesu": "Weekly, Ending Sunday", "wesa": "Weekly, Ending Saturday",
         "bwew": "Biweekly, Ending Wednesday", "bwem": "Biweekly, Ending Monday", "m": "Monthly", "q": "Quarterly", "sa": "Semiannual", "a": "Annual"}
 AGG = {"avg", "sum", "eop"}
-
-_gate = threading.BoundedSemaphore(4)
-_lock = threading.Lock()
-_down = [0.0, ""]
-
 
 class FredPublicError(Exception):
     """The public download could not serve this request (missing series, or FRED not answering)."""
@@ -89,28 +81,22 @@ def parse_meta(page):
             "seasonal_adjustment": one(r'series-meta-value-units">[^<]*</span>,\s*</div>\s*<div class="default-text">([^<]*)<')}
 
 
+def _http():
+    from composite.core import http      # imported on first use: this module also runs inside the backend process
+    return http
+
+
 def _get(url):
-    with _lock:
-        if time.time() < _down[0]:
-            raise FredPublicError(_down[1])
-    last = None
-    for timeout in TIMEOUTS:
-        try:
-            with _gate:
-                req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/csv,text/html,*/*"})
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            if e.code in (400, 404):
-                raise FredPublicError("FRED has no such series.", missing=True) from None
-            last = f"HTTP {e.code}"
-        except Exception as e:  # noqa: BLE001  (timeouts, resets)
-            last = type(e).__name__
-        time.sleep(1.5)
-    msg = f"FRED's public download did not answer ({last}). Try again in a minute, or add the free FRED key with Setup-Keys.cmd (or setup-keys.sh)."
-    with _lock:
-        _down[0], _down[1] = time.time() + DOWN_FOR, msg
-    raise FredPublicError(msg)
+    H = _http()
+    try:
+        return H.fetch(url, provider="fred", parse="text", headers={"Accept": "text/csv,text/html,*/*"})
+    except H.CompositeError as e:
+        status = getattr(e, "http_status", None)
+        if status in (400, 404):
+            raise FredPublicError("FRED has no such series.", missing=True) from None
+        why = f"HTTP {status}" if status else "no answer in time" if e.kind == "timeout" else "not reachable"
+        raise FredPublicError(f"FRED's public download did not answer ({why}). Try again in a minute, or add the free FRED key "
+                              "with Setup-Keys.cmd (or setup-keys.sh).") from None
 
 
 def observations(sid, start=None, end=None, units=None, freq=None, agg=None):
@@ -136,6 +122,5 @@ def metadata(sid):
 
 
 def reset():
-    """Forget a recorded outage (tests)."""
-    with _lock:
-        _down[0], _down[1] = 0.0, ""
+    """Forget a recorded outage or cooldown (tests)."""
+    _http().reset_outbound("fred")

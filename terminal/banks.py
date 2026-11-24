@@ -7,7 +7,6 @@
 """
 
 import datetime as dt
-import json
 import math
 import urllib.parse
 
@@ -30,7 +29,7 @@ FIELDS = [k for k, _, _ in QUALITY + EXTRA]
 
 def _fdic(path, **params):
     url = FDIC + path + "?" + urllib.parse.urlencode(params)
-    j = json.loads(C._download(url, timeout=40, ua=C.BROWSER_UA))
+    j = C.fetch(url, parse="json", timeout=40, ua=C.BROWSER_UA)
     return [r.get("data", r) for r in j.get("data") or []]
 
 

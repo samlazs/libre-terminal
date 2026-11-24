@@ -125,9 +125,6 @@ _FEED_FAIL: dict = {}              # url -> time of the last failure (no retry f
 _FEED_ERR: dict = {}               # url -> last error text
 _lock = threading.Lock()
 _pool = _cf.ThreadPoolExecutor(max_workers=12, thread_name_prefix="news")
-_GNEWS_GAP = 2.5                   # Google News answers 429 to a burst (probed: the 4th query within a few seconds)
-_gnews_lock = threading.Lock()
-_gnews_last = [0.0]
 
 
 def _ptime(s):
@@ -191,8 +188,9 @@ def parse_feed(body):
     return out
 
 
-def _get(url, ua=C.BROWSER_UA):
-    return C._download(url, timeout=15, ua=ua)
+def _get(url, ua=C.BROWSER_UA, gnews=False):
+    """One feed under its outbound policy (Google News: one query at a time, 2.5 s apart; composite/core/http.py)."""
+    return C.fetch(url, provider="google_news" if gnews else None, parse="bytes", timeout=15, ua=ua)
 
 
 def fetch(url, ttl=300, gnews=False):
@@ -206,17 +204,7 @@ def fetch(url, ttl=300, gnews=False):
         if now - _FEED_FAIL.get(url, 0) < 600:
             return hit[1] if hit else []
     try:
-        if gnews:
-            with _gnews_lock:                       # one Google News query at a time, spaced
-                wait = _gnews_last[0] + _GNEWS_GAP - time.time()
-                if wait > 0:
-                    time.sleep(wait)
-                try:
-                    body = _get(url)
-                finally:
-                    _gnews_last[0] = time.time()
-        else:
-            body = _get(url)
+        body = _get(url, gnews=gnews)
         items = parse_feed(body)
     except Exception as e:  # noqa: BLE001 - a feed down or malformed must not take the card with it
         with _lock:

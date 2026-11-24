@@ -6,6 +6,8 @@ import json
 import os
 import re
 import ssl
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -34,12 +36,95 @@ class CompositeError(Exception):
 
 _ORIG_URLOPEN = urllib.request.urlopen
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_RETRY_DELAYS = (0.4, 1.0)
+_RETRY_DELAYS = (0.4, 1.0)          # sleep before the 2nd, 3rd attempt (tests set zeros; the last value repeats)
 _NO_RETRY_RE = re.compile(r"(?:[?&]provider=(?:oecd|nasdaq)(?:&|$)|/(?:oecd|nasdaq)/|sdmx\.oecd\.org|stats\.oecd\.org|api\.nasdaq\.com)", re.I)
+DEFAULT_UA = "Mozilla/5.0 (compatible; terminal-ui)"
+COOLDOWN_CAP = 600.0                # seconds: a Retry-After longer than this is not believed
+_NET = "net"                        # in retry_on: connection errors and timeouts
+
+# One outbound policy per provider. timeout: seconds per attempt (a tuple: per attempt); attempts: tries in all;
+# retry_on: HTTP statuses (and "net") worth another attempt; max_concurrency: requests in flight at once (None: no
+# cap); min_interval: seconds kept between one request's end and the next one's start; cooldown_on_429: seconds the
+# provider is not asked after a 429 without Retry-After (Retry-After wins, capped at COOLDOWN_CAP; 0: no cooldown);
+# down_for: seconds the provider is skipped after every attempt failed; ua: User-Agent.
+PROVIDERS = {
+    "backend":     dict(timeout=45, attempts=3, retry_on=(502, 503, 504, _NET), max_concurrency=None, min_interval=0.0,
+                        cooldown_on_429=30, down_for=0, ua="openbb-terminal-ui"),
+    # OECD and Nasdaq (direct, or through the backend's provider=oecd / provider=nasdaq) are never retried
+    "oecd":        dict(timeout=60, attempts=1, retry_on=(), max_concurrency=None, min_interval=0.0, cooldown_on_429=600,
+                        down_for=0, ua="openbb-terminal-ui"),
+    "nasdaq":      dict(timeout=45, attempts=1, retry_on=(), max_concurrency=None, min_interval=0.0, cooldown_on_429=120,
+                        down_for=0, ua="openbb-terminal-ui"),
+    # FRED's edge stalls browser-like agents and answers the plain Python one; it is not retried on 429
+    "fred":        dict(timeout=(15, 25), attempts=2, retry_on=(408, 500, 502, 503, 504, _NET), max_concurrency=4,
+                        min_interval=0.0, cooldown_on_429=60, down_for=120,
+                        ua=f"Python-urllib/{sys.version_info[0]}.{sys.version_info[1]}"),
+    "multpl":      dict(timeout=20, attempts=2, retry_on=(502, 503, 504, _NET), max_concurrency=2, min_interval=0.0,
+                        cooldown_on_429=300, down_for=0,
+                        ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
+    # Google News answers 429 to a burst (probed: the 4th query within a few seconds): one at a time, 2.5 s apart
+    "google_news": dict(timeout=15, attempts=1, retry_on=(), max_concurrency=1, min_interval=2.5, cooldown_on_429=300,
+                        down_for=0, ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+    "default":     dict(timeout=60, attempts=2, retry_on=(408, 502, 503, 504, _NET), max_concurrency=None, min_interval=0.0,
+                        cooldown_on_429=60, down_for=0, ua=DEFAULT_UA),
+}
+
+_state_lock = threading.Lock()
+_cool: dict = {}                    # cooldown key -> monotonic time the provider may be asked again
+_down: dict = {}                    # provider -> (monotonic time it may be asked again, message)
+_sems: dict = {}                    # provider -> BoundedSemaphore
+_pace: dict = {}                    # provider -> monotonic time the next request may start
 
 
 def _no_retry(url: str) -> bool:
     return bool(_NO_RETRY_RE.search(str(url or "")))
+
+
+def provider_of(url: str) -> str:
+    """The policy a URL falls under (PROVIDERS key)."""
+    u = str(url or "")
+    low = u.lower()
+    if re.search(r"[?&]provider=oecd(?:&|$)|/oecd/|oecd\.org", low):
+        return "oecd"
+    if re.search(r"[?&]provider=nasdaq(?:&|$)|/nasdaq/|api\.nasdaq\.com", low):
+        return "nasdaq"
+    if u.startswith((C.V5, C.V4)):
+        return "backend"
+    host = low.split("/")[2] if "://" in low else ""
+    if host.endswith("stlouisfed.org"):
+        return "fred"
+    if host.endswith("multpl.com"):
+        return "multpl"
+    if host == "news.google.com":
+        return "google_news"
+    return "default"
+
+
+def _cool_key(url: str, provider: str) -> str:
+    """What a 429 blocks: a named provider as a whole; the backend per upstream provider; anything else per host."""
+    if provider == "backend":
+        m = re.search(r"[?&]provider=([\w-]+)", url)
+        return "backend:" + (m.group(1).lower() if m else urllib.parse.urlsplit(url).path)
+    if provider == "default":
+        return "host:" + (urllib.parse.urlsplit(url).hostname or "")
+    return provider
+
+
+def reset_outbound(provider: str | None = None) -> None:
+    """Forget cooldowns, outages and pacing (all, or one provider's): after a restart, and between tests."""
+    with _state_lock:
+        for d in (_cool, _down, _pace):
+            for k in [k for k in d if provider is None or k == provider or str(k).startswith(provider + ":")]:
+                d.pop(k, None)
+
+
+def _sem(provider: str, cap):
+    with _state_lock:
+        s = _sems.get(provider)
+        if s is None or getattr(s, "_cap", None) != cap:
+            s = _sems[provider] = threading.BoundedSemaphore(cap)
+            s._cap = cap
+        return s
 
 
 def _retry_after(headers) -> float | None:
@@ -91,7 +176,7 @@ def _parse_json(body: bytes, url: str):
 
 
 def _transport(req, timeout, context=None):
-    """The single outbound seam: every request made through http_json and _download is opened here.
+    """The single outbound seam: every request is opened here (through fetch).
     Offline tests inject faults by replacing composite._transport (scripts/tests/_fixtures.py)."""
     url = req.full_url
     if url.startswith((C.V5, C.V4)) and urllib.request.urlopen is _ORIG_URLOPEN:
@@ -101,48 +186,131 @@ def _transport(req, timeout, context=None):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
-def http_json(url, timeout=45):
-    headers = {"User-Agent": "openbb-terminal-ui", "Accept": "application/json"}
+def _fail(msg, *, kind, http_status=None, retry_after=None):
+    e = C.CompositeError(msg, kind=kind, retry_after=retry_after)
+    e.http_status = http_status
+    return e
+
+
+def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None, headers=None):
+    """GET (or POST `data`) one URL under its provider's policy; the one place the terminal opens a connection.
+
+    parse: "json" (NaN -> None; empty body -> {"results": []}; non-JSON -> upstream error), "text" (UTF-8) or "bytes".
+    timeout: overall seconds for all attempts (default: the policy's per-attempt timeouts).
+    Raises CompositeError with a kind (and .http_status when the source answered with an error status)."""
+    pname = provider or provider_of(url)
+    pol = PROVIDERS.get(pname) or PROVIDERS["default"]
+    per = pol["timeout"] if isinstance(pol["timeout"], (tuple, list)) else (pol["timeout"],) * pol["attempts"]
+    attempts = max(1, min(pol["attempts"], len(per)))
+    if pname == "backend" and _no_retry(url):
+        attempts = 1
+    budget = float(timeout) if timeout else float(sum(per[:attempts]))
+    deadline = time.monotonic() + max(1.0, budget)
     is_local = url.startswith((C.V5, C.V4))
+    label = C._which(url)
+    ckey = _cool_key(url, pname)
+
+    now = time.monotonic()
+    with _state_lock:
+        until = _cool.get(ckey, 0.0)
+        down = _down.get(pname)
+    if now < until:                                       # cooling down after a 429: no network I/O at all
+        left = until - now
+        raise _fail(f"{label} is limiting requests; try again in ~{int(left) + 1} s.", kind="rate_limited", retry_after=left)
+    if down and now < down[0]:
+        raise _fail(down[1], kind="upstream")
+
+    h = {"User-Agent": ua or pol["ua"], "Accept": "application/json" if parse == "json" else "*/*"}
     if is_local:
-        headers["X-Terminal-Pool"] = "x"
-    req = urllib.request.Request(url, headers=headers)
-    deadline = time.monotonic() + max(1.0, float(timeout))
-    max_attempts = 1 if _no_retry(url) else len(_RETRY_DELAYS) + 1
-    for attempt in range(max_attempts):
-        rem = max(1.0, deadline - time.monotonic())
+        h["X-Terminal-Pool"] = "x"
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=h)
+    ctx = C._ssl_context() if url.lower().startswith("https://") else None
+    sem = _sem(pname, pol["max_concurrency"]) if pol["max_concurrency"] else None
+    retry_on = set(pol["retry_on"])
+    last: CompositeError | None = None
+    for attempt in range(attempts):
+        if attempt:
+            delay = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)] if _RETRY_DELAYS else 0.0
+            if delay > 0:
+                time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
+        rem = deadline - time.monotonic()
+        if rem <= 0 and attempt:
+            break
+        this_timeout = max(1.0, min(per[min(attempt, len(per) - 1)], rem) if not timeout else rem)
+        if sem is not None and not sem.acquire(timeout=max(0.1, rem)):
+            raise _fail(f"{label} did not answer in time (too many requests waiting).", kind="timeout")
         try:
-            with C._transport(req, rem) as r:
-                body = r.read()
-            if not body.strip():
-                return {"results": []}                         # 204 / empty body means "no data"
-            return _parse_json(body, url)
-        except urllib.error.HTTPError as e:
+            if pol["min_interval"]:
+                with _state_lock:
+                    wait = _pace.get(pname, 0.0) - time.monotonic()
+                if wait > 0:
+                    time.sleep(wait)
             try:
-                detail = json.loads(e.read()).get("detail")
-            except Exception:
-                detail = None
-            msg = str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}"
+                with C._transport(req, this_timeout, ctx) as r:
+                    body = r.read()
+            finally:
+                if pol["min_interval"]:
+                    with _state_lock:
+                        _pace[pname] = time.monotonic() + pol["min_interval"]
+        except urllib.error.HTTPError as e:
+            raw = b""
+            try:
+                raw = e.read() or b""
+            except Exception:  # noqa: BLE001
+                pass
             if e.code == 429:
-                raise C.CompositeError(msg, kind="rate_limited", retry_after=_retry_after(e.headers)) from None
-            if e.code in (502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
-                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
+                ra = _retry_after(e.headers)
+                cool = min(COOLDOWN_CAP, ra if ra is not None else float(pol["cooldown_on_429"] or 0))
+                if cool > 0:
+                    with _state_lock:
+                        _cool[ckey] = max(_cool.get(ckey, 0.0), time.monotonic() + cool)
+            if parse == "json":
+                try:
+                    detail = json.loads(raw).get("detail")
+                except Exception:  # noqa: BLE001
+                    detail = None
+                msg = str(detail) if detail else f"HTTP {e.code} from {url.split('?')[0]}"
+            else:
+                msg = f"{urllib.parse.urlsplit(url).hostname} is not reachable ({e})."
+            kind = _status_kind(e.code)
+            last = _fail(msg, kind=kind, http_status=e.code, retry_after=_retry_after(e.headers) if e.code == 429 else None)
+            if e.code in retry_on and attempt + 1 < attempts and time.monotonic() < deadline:
                 continue
-            raise C.CompositeError(msg, kind=_status_kind(e.code)) from None
-        except urllib.error.URLError as e:
-            if attempt + 1 < max_attempts and time.monotonic() < deadline:
-                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
-                continue
-            if _net_kind(e) == "timeout":
-                raise C.CompositeError(f"{C._which(url)} did not answer in time.", kind="timeout") from None
-            raise C.CompositeError(f"{C._which(url)} is not reachable ({e.reason}).", kind="upstream") from None
-        except (TimeoutError, OSError) as e:                 # read timeouts are not URLErrors
-            if attempt + 1 < max_attempts and time.monotonic() < deadline:
-                time.sleep(min(_RETRY_DELAYS[attempt], max(0.0, deadline - time.monotonic())))
-                continue
+            break
+        except (urllib.error.URLError, TimeoutError, OSError) as e:      # read timeouts are not URLErrors
             kind = _net_kind(e)
-            raise C.CompositeError(f"{C._which(url)} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e})."),
-                                   kind=kind) from None
+            reason = getattr(e, "reason", e)
+            if parse == "json":
+                msg = f"{label} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({reason}).")
+            else:
+                host = urllib.parse.urlsplit(url).hostname
+                msg = f"{host} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e}).")
+            last = _fail(msg, kind=kind)
+            if _NET in retry_on and attempt + 1 < attempts and time.monotonic() < deadline:
+                continue
+            break
+        except Exception as e:  # noqa: BLE001
+            raise _fail(f"{urllib.parse.urlsplit(url).hostname} could not be read ({type(e).__name__}).", kind="internal") from None
+        else:
+            if parse == "json":
+                return {"results": []} if not body.strip() else _parse_json(body, url)
+            if parse == "text":
+                return body.decode("utf-8", "replace")
+            return body
+        finally:
+            if sem is not None:
+                sem.release()
+    assert last is not None
+    if pol["down_for"] and last.kind in ("upstream", "timeout") and getattr(last, "http_status", None) not in (400, 404, 429):
+        with _state_lock:
+            _down[pname] = (time.monotonic() + pol["down_for"], str(last))
+    raise last
+
+
+def http_json(url, timeout=45):
+    """A JSON answer (backend or public API) under the URL's provider policy; see fetch."""
+    return C.fetch(url, parse="json", timeout=timeout)
 
 
 def _which(url):
@@ -206,33 +374,6 @@ def _ssl_context():
 BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 
-def _download(url, timeout=60, data=None, ua="Mozilla/5.0 (compatible; terminal-ui)"):
-    req = urllib.request.Request(url, data=data, headers={"User-Agent": ua, "Accept": "*/*"})
-    host = url.split("/")[2]
-    deadline = time.monotonic() + max(1.0, float(timeout))
-    max_attempts = 1 if _no_retry(url) else 2
-    for attempt in range(max_attempts):
-        rem = max(1.0, deadline - time.monotonic())
-        try:
-            with C._transport(req, rem, C._ssl_context()) as r:
-                return r.read()
-        except urllib.error.HTTPError as e:
-            if e.code in (408, 502, 503, 504) and attempt + 1 < max_attempts and time.monotonic() < deadline:
-                delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
-                if delay > 0:
-                    time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-                continue
-            kind = _status_kind(e.code)
-            raise C.CompositeError(f"{host} is not reachable ({e}).", kind=kind,
-                                   retry_after=_retry_after(e.headers) if kind == "rate_limited" else None) from None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            if attempt + 1 < max_attempts and time.monotonic() < deadline:
-                delay = _RETRY_DELAYS[0] if _RETRY_DELAYS else 0.0
-                if delay > 0:
-                    time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-                continue
-            kind = _net_kind(e)
-            raise C.CompositeError(f"{host} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e})."),
-                                   kind=kind) from None
-        except Exception as e:  # noqa: BLE001
-            raise C.CompositeError(f"{host} could not be read ({type(e).__name__}).", kind="internal") from None
+def _download(url, timeout=60, data=None, ua=None):
+    """Raw bytes from a public source under the URL's provider policy; see fetch."""
+    return C.fetch(url, parse="bytes", timeout=timeout, data=data, ua=ua)

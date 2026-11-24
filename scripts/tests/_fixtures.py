@@ -132,10 +132,12 @@ def _installed(transport):
 
     saved = C._transport
     C._transport = wrapped
+    C.reset_outbound()                 # cooldowns and outage gates from an earlier block never leak into this one
     try:
         yield rec
     finally:
         C._transport = saved
+        C.reset_outbound()
 
 
 def fault(kind: str, **kw):

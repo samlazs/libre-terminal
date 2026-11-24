@@ -151,6 +151,11 @@ try:
         check(False, "429 should raise")
     except c.CompositeError as e:
         check(e.transient and _calls_429[0] == 1, "http_json 429 raises transient=True without retrying")
+    try:
+        _http.http_json("https://example.com/rate")
+    except c.CompositeError as e:
+        check(e.kind == "rate_limited" and _calls_429[0] == 1, "during the 429 cooldown nothing more is sent to that host")
+    c.reset_outbound()                    # the cases below are about retries, not the cooldown
 
     for _oecd_url in ("http://127.0.0.1:6900/api/v1/economy/gdp?provider=oecd", "http://127.0.0.1:6900/api/v1/oecd/nominal"):
         _oecd_calls = [0]
@@ -240,6 +245,7 @@ try:
 
     for _code, _exp_t in ((429, True), (404, False)):
         _dl_calls[0] = 0
+        c.reset_outbound()                # each status on its own (a 429 leaves the host cooling down)
         def _dl_no_retry(req, timeout=None, _c=_code, **kw):
             _dl_calls[0] += 1
             raise _ue.HTTPError(req.full_url, _c, "Err", {}, _io.BytesIO(b""))

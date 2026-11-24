@@ -244,7 +244,8 @@ def reset_runtime_caches() -> dict:
         C._cache.clear()
         C._backoff.clear()
         C._STALE_SINCE.clear()
-        return counts
+    C.reset_outbound()                            # 429 cooldowns and outage gates start over too
+    return counts
 
 
 def _clean_json(v):

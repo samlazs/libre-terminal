@@ -22,22 +22,22 @@ check(fp.parse_meta(page) == {"title": "10-Year Treasury & More", "units": "Perc
 
 # ---- one retry with a longer wait, then the outage is remembered (no request per card for two minutes)
 calls = []
-saved_open, saved_sleep = fp.urllib.request.urlopen, fp.time.sleep
+import urllib.request as _ur  # noqa: E402
+saved_open = _ur.urlopen
 
 
-def timeout_open(req, timeout=None):
+def timeout_open(req, timeout=None, **_kw):
     calls.append(timeout)
     raise urllib.error.URLError("timed out")
 
 
-def missing_open(req, timeout=None):
+def missing_open(req, timeout=None, **_kw):
     calls.append(timeout)
     raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
 
 
 try:
-    fp.time.sleep = lambda s: None
-    fp.urllib.request.urlopen = timeout_open
+    _ur.urlopen = timeout_open
     fp.reset()
     err = None
     try:
@@ -52,7 +52,7 @@ try:
         pass
     check(calls == [], "during the outage window nothing is requested")
     fp.reset()
-    fp.urllib.request.urlopen = missing_open
+    _ur.urlopen = missing_open
     try:
         fp.observations("NOSUCH")
     except fp.FredPublicError as e:
@@ -70,7 +70,7 @@ try:
         err = e
     check(calls == [] and "transformation" in str(err), "a transformation FRED's download lacks is refused")
 finally:
-    fp.urllib.request.urlopen, fp.time.sleep = saved_open, saved_sleep
+    _ur.urlopen = saved_open
     fp.reset()
 
 # ---- the backend's keyless answer (what the FRED API would have returned)

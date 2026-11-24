@@ -263,6 +263,14 @@ python scripts/probe.py --all-routes --defaults        # every /x/ view in /widg
 python scripts/probe.py --backend v5 --url /PATH       # raw /api/v1 calls: status counts and latency per URL
 ```
 
+All outbound HTTP goes through `composite.core.http.fetch(url, provider=..., parse="json"|"text"|"bytes")`
+(`http_json` and `_download` are thin wrappers; `fred_public`, `multpl`, `banks` and `news` call it too). Its
+`PROVIDERS` table sets per provider the timeout per attempt, attempts, statuses worth a retry, concurrency cap,
+pacing (`min_interval`, Google News 2.5 s), the cooldown after a 429 (Retry-After wins, capped at 600 s; calls during
+it fail at once with `rate_limited` and send nothing; the backend cools down per upstream `provider=`, unknown hosts
+per host), an outage gate (`down_for`, FRED 120 s) and the User-Agent. OECD and Nasdaq are never retried.
+`reset_runtime_caches` (service restart) also clears cooldowns.
+
 Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
 http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
 for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the
@@ -287,6 +295,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
 | `test_contract.py` | Response envelope for every route (success, CompositeError, defect), parameter checks, one error object on `/api/*` |
 | `test_errors.py` | Fault kind to error kind table (HTTP layer and real server), Retry-After, server-side classification |
+| `test_http.py` | Outbound client: provider policies, 429 cooldown without I/O, Retry-After cap, concurrency peak, pacing, outage gate |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
