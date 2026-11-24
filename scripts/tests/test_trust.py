@@ -91,7 +91,7 @@ try:
     c._cache.clear()
     c._backoff.clear()
     c._STALE_SINCE.clear()
-    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1}]}}), encoding="utf-8")
+    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1}], "sources": [{"name": "OECD", "detail": "d", "url": ""}]}}), encoding="utf-8")
     saved_r = dict(c.ROUTES)
     try:
         def _fail_fn():
@@ -100,6 +100,7 @@ try:
         out_df = c.dispatch("__disk_fail", {})
         check("stale" in out_df and "Source not answering:" in out_df["stale"] and "cached" not in out_df,
               "cached_disk fallback after CompositeError still emits 'stale' (not 'cached')")
+        check(out_df["status"] == "stale" and out_df["notes"] == [out_df["stale"]], "a stale fallback answers status 'stale' with the note")
     finally:
         c.ROUTES.clear()
         c.ROUTES.update(saved_r)

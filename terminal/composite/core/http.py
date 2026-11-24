@@ -20,9 +20,15 @@ V4 = f"http://127.0.0.1:{os.environ.get('TERMINAL_V4_PORT') or 6901}/api/v1"
 
 
 class CompositeError(Exception):
-    def __init__(self, msg, *, transient=False):
+    """A view could not answer. kind is one of core.contract.ERROR_KINDS (None: classified by the server);
+    status overrides the HTTP status the UI server answers with (400 for input, 404 for an unknown view)."""
+
+    def __init__(self, msg, *, transient=False, kind=None, retry_after=None, status=None):
         super().__init__(msg)
         self.transient = bool(transient)
+        self.kind = kind
+        self.retry_after = retry_after
+        self.status = status
 
 
 _ORIG_URLOPEN = urllib.request.urlopen

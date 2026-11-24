@@ -19,6 +19,7 @@ REAL_LOCAL = (ROOT / Path(_raw).expanduser()).resolve() if _raw else ROOT / "loc
 TMP_LOCAL = Path(tempfile.mkdtemp(prefix="terminal-tests-"))
 atexit.register(shutil.rmtree, TMP_LOCAL, ignore_errors=True)
 os.environ["TERMINAL_LOCAL_DIR"] = str(TMP_LOCAL)          # never touch the real local/ folder
+os.environ.setdefault("TERMINAL_STRICT_CONTRACT", "1")       # a view answering outside the envelope fails the test
 for p in (ROOT / "terminal", ROOT / "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))

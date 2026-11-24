@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import composite  # noqa: E402
+from composite.core import contract  # noqa: E402
 import local_paths  # noqa: E402
 import xwidgets  # noqa: E402
 from redact import redact  # noqa: E402
@@ -443,6 +444,8 @@ class Handler(BaseHTTPRequestHandler):
             return json.dumps(cls._clean_json(obj), allow_nan=False).encode("utf-8")
 
     def _json(self, code: int, obj, headers: dict | None = None):
+        if code >= 400:
+            obj = contract.with_error(code, obj)        # every error answer carries the same {error: {kind, ...}} object
         self._send(code, self._dumps_strict(obj), "application/json; charset=utf-8", headers=headers)
 
     def _frame_answer(self, result: dict):
@@ -451,7 +454,7 @@ class Handler(BaseHTTPRequestHandler):
         302: Firefox labels a frame navigation that was redirected from this port to the backend's port
         Sec-Fetch-Site: cross-site (a direct load of the same URL is same-site), so the backend's request guard refused
         it (403, owner 2026-11-18)."""
-        out = {"sources": result.get("sources") or []}
+        out = {"sources": result.get("sources") or [], "as_of_na": result.get("as_of_na") or contract.NO_DATE}
         path = str(result.get("_frame") or "")
         if path.startswith("/sec/filing_viewer_app?"):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
@@ -545,16 +548,18 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = composite.dispatch(name, params)
             except composite.CompositeError as e:
-                # written for the user (or carrying a source's own error, which the page classifies)
-                return self._json(502, {"detail": redact(str(e)), "user_message": True, "sources": _safe_sources(name, params)})
+                # written for the user (or carrying a source's own error, which the page classifies). Bad parameters are
+                # found by dispatch against the view's signature (400), an unknown view is 404, everything else 502.
+                kind = e.kind or "upstream"
+                code = e.status or (400 if kind == "input" else 502)
+                return self._json(code, contract.error_body(kind, redact(str(e)), retryable=e.transient or None, retry_after=e.retry_after,
+                                                            sources=_safe_sources(name, params), user_message=True))
             except Exception as e:  # noqa: BLE001
-                # "bad parameters" only when the call itself failed (a parameter the view does not take): the traceback
-                # then ends in dispatch. A TypeError/ValueError raised inside a view is a defect: logged with a ref.
-                if isinstance(e, TypeError) and traceback.extract_tb(e.__traceback__)[-1].name == "dispatch":
-                    return self._json(400, {"detail": "Bad parameters for this view: " + redact(str(e))[:200]})
+                # A TypeError/ValueError raised inside a view is a defect: logged with a ref.
                 ref = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:6]
                 log(f"view {name} failed (ref {ref}): {type(e).__name__}: {e}\n" + redact(traceback.format_exc()))
-                return self._json(500, {"detail": f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).", "ref": ref})
+                return self._json(500, contract.error_body("internal", f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).",
+                                                           sources=_safe_sources(name, params), ref=ref))
             if isinstance(result, dict) and ("_frame" in result or "_message" in result):
                 return self._frame_answer(result)
             return self._json(200, result)

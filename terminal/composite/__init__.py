@@ -96,11 +96,16 @@ from .equity.filings import (  # noqa: F401
 )
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
 from .warm import _safe, warm, warm_status  # noqa: F401
+from .core import contract as _contract
 
 def dispatch(name, params):
+    """Run a view and answer inside the envelope of core/contract.py (sources, as_of or as_of_na, status, notes)."""
     fn = ROUTES.get(name)
     if fn is None:
-        raise CompositeError(f"Unknown view '{name}'.")
+        raise CompositeError(f"Unknown view '{name}'.", kind="input", status=404)
+    why = _contract.bad_params(fn, params)
+    if why:
+        raise CompositeError("Bad parameters for this view: " + why[:200], kind="input", status=400)
     notes, swr_notes = [], []
     token = _STALE_NOTES.set(notes)
     swr_token = _SWR_NOTES.set(swr_notes)
@@ -109,7 +114,9 @@ def dispatch(name, params):
     finally:
         _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)
-    if isinstance(out, dict) and not out.get("sources"):
+    if not isinstance(out, dict):
+        out = {"results": out}
+    if not out.get("sources"):
         out = dict(out, sources=static_sources(name, params))       # the cached object itself is never changed
     if isinstance(out, dict) and notes:
         out = dict(out, stale=stale_text(notes))
@@ -117,6 +124,10 @@ def dispatch(name, params):
         out = dict(out, cached=cached_text(swr_notes))
     if isinstance(out, dict) and name in DELAYED_VIEWS and "delayed" not in out and not str(params.get("symbol") or "").upper().startswith("FRED:"):
         out = dict(out, delayed=DELAYED_YAHOO)          # HANDOFF P2: live prices from a free feed say they are delayed
+    if "_frame" in out or "_message" in out:            # a frame card's answer: server.py shapes it
+        return out if out.get("as_of") or out.get("as_of_na") else dict(out, as_of_na=_contract.NO_DATE)
+    out = _contract.finish(out)
+    _contract.enforce(name, out)
     return out
 
 DELAYED_VIEWS = {"board", "watchlist", "fx_matrix", "fx_moves", "fx_trend", "chart", "snapshot", "perf_bars", "performance", "comps"}
@@ -297,7 +308,19 @@ def _late(module, fn):
     def view(**params):
         return getattr(importlib.import_module(module), fn)(**params)
     view.__name__ = fn + "_view"
+    view._target = (module, fn)                     # parameters are checked against this function's signature
     return view
+
+
+# The hand-written wrappers above call into late-imported modules too: name their targets for the parameter check
+for _w, _t in ((news_view, ("news", "news")), (bank_failures_view, ("banks", "bank_failures")),
+               (bank_quality_view, ("banks", "bank_quality")), (bank_rssd_view, ("banks", "bank_rssd")),
+               (policy_path_view, ("policy_path", "chart")), (policy_path_table_view, ("policy_path", "table")),
+               (cds_indices_view, ("cds", "table")), (cds_history_view, ("cds", "history")),
+               (crypto_vol_view, ("cryptovol", "chart")), (bond_lookup_view, ("bonds", "lookup")),
+               (bond_curve_view, ("bonds", "curve")), (company_links_view, ("links", "links")),
+               (sp500_multiples_view, ("multpl", "chart"))):
+    _w._target = _t
 
 
 ROUTES = {
