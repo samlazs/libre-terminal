@@ -647,6 +647,29 @@ def err_text(body: str, status: int | None) -> str:
     return txt
 
 
+# The terminal's own views (/x/*) say what kind of failure they hit (terminal/composite/core/contract.py): no text matching
+X_KIND_CLASS = {
+    "input": ("bad-default", "needs user input (the card asks for it)"),
+    "not_covered": ("not-covered", "default input not covered by the source"),
+    "rate_limited": ("rate-limited", "source rate limit"),
+    "timeout": ("upstream-error", "source did not answer in time"),
+    "upstream": ("upstream-error", "source unreachable, slow or changed format"),
+    "unavailable": ("slow", "terminal busy (all view slots in use); retried later"),
+    "internal": ("our-bug", "terminal view raised an internal error"),
+}
+
+
+def error_kind(body) -> str | None:
+    """error.kind from a terminal error answer ({error: {kind, ...}}), else None."""
+    try:
+        j = json.loads(body) if isinstance(body, str) else body
+    except (ValueError, TypeError):
+        return None
+    err = j.get("error") if isinstance(j, dict) else None
+    kind = err.get("kind") if isinstance(err, dict) else None
+    return kind if kind in X_KIND_CLASS else None
+
+
 def classify(card: dict, rec: dict | None, include_manual: bool = False) -> tuple[str, str]:
     """Classify a card + response record into a triage bucket and short cause."""
     if card.get("v4_skipped"):
@@ -683,6 +706,9 @@ def classify(card: dict, rec: dict | None, include_manual: bool = False) -> tupl
     if st is None or st < 0:
         return "our-bug", txt[:120] or "runner error"
     if st >= 400:
+        kind = error_kind(rec.get("error"))
+        if kind:
+            return X_KIND_CLASS[kind]
         if st == 429 or re.search(r"rate limit|too many requests", txt, re.I):
             return "rate-limited", "source rate limit"
         if st == 402 or re.search(r"Premium|Special Endpoint|Payment Required|subscription|upgrade|Legacy Endpoint|Restricted Endpoint|exclusive|not available under your", txt, re.I):

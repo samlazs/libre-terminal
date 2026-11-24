@@ -152,6 +152,12 @@ def main() -> int:
     local_card = {"backend": "v5", "url": "http://127.0.0.1:6900/api/v1/foo", "provider": "imf", "type": "table"}
     x_card = {"backend": "x", "url": "http://127.0.0.1:6950/x/foo", "provider": "terminal", "type": "table"}
     check(H.classify(local_card, {"status": 200, "secs": 1.2, "empty": False})[0] == "ok", "classify ok")
+    # /x/ errors are classified by error.kind, never by message text
+    for kind, want in (("input", "bad-default"), ("not_covered", "not-covered"), ("rate_limited", "rate-limited"), ("timeout", "upstream-error"),
+                       ("upstream", "upstream-error"), ("unavailable", "slow"), ("internal", "our-bug")):
+        body = json.dumps({"error": {"kind": kind, "message": "Click a bond's CUSIP in the table", "retryable": False}, "detail": "x", "sources": []})
+        check(H.classify(x_card, {"status": 400, "error": body, "etext": "Click a bond's CUSIP in the table"})[0] == want, f"x error.kind {kind} -> {want}")
+    check(H.error_kind("not json") is None and H.error_kind('{"detail": "x"}') is None, "no error object -> text rules apply")
     check(H.classify(local_card, {"status": 200, "secs": 9.2, "empty": False})[0] == "slow", "classify slow > 8s")
     check(H.classify(local_card, {"status": 200, "secs": 0.5, "empty": True})[0] == "empty", "classify empty")
     check(H.classify(local_card, {"untested": True})[0] == "rate-limited", "classify OECD untested")
