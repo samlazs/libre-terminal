@@ -111,22 +111,27 @@ class StateUnreadable(Exception):
 def atomic_write(path: Path, text: str):
     """Write through a temporary file and replace: a crash or a full disk never leaves half a file behind."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    for attempt in range(5):
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:             # Windows: a virus scanner or indexer holding the old file for a moment
+                if attempt == 4:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    except BaseException:
+        # any failure (a full disk while writing, the file still held after 5 tries, an interrupt): the target is
+        # untouched and no half-written temporary file stays behind
         try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:                 # Windows: a virus scanner or indexer holding the old file for a moment
-            if attempt == 4:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
-            time.sleep(0.1 * (attempt + 1))
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _parse_state(path: Path):

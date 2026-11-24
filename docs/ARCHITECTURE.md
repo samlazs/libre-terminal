@@ -320,6 +320,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_patch_registry.py` | Backend patch registry: unique ids, every installer registered, version ranges, status records, critical banner |
 | `test_admission.py` | 24 view slots, 503 after the wait, state/page never blocked, HEAD never runs a view, slots released after defects |
 | `test_cache.py` | 2,000-entry caps, monotonic TTLs, negative cache (20 concurrent callers -> 1 upstream call) |
+| `test_state.py` | Saved state under write faults: ENOSPC while writing, replace held 5 times, backup write failing -> 503, file unchanged, no temp |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
