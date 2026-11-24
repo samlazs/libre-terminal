@@ -701,6 +701,12 @@ window.__fcPromise = (async function (T) {
     ok(rs.slots[host].n === 0, "all slots released back to 0");
     delete rs.slots[host];
     ok(rs.isRateLimited("/api/v1/oecd/gdp?country=US") && !rs.isRateLimited("/api/v1/economy/gdp/nominal?provider=fred"), "OECD is rate-limited, FRED is not");
+    ok(rs.isRateLimited("/api/v1/economy/calendar?provider=nasdaq") && rs.isRateLimited("/api/v1/nasdaq/markets/movers")
+      && rs.rateLimitKey("/api/v1/oecd/gdp?country=US") === "oecd"
+      && rs.rateLimitKey("/api/v1/economy/calendar?provider=nasdaq") === "nasdaq"
+      && rs.rateLimitKey("/api/v1/nasdaq/markets/movers") === "nasdaq"
+      && rs.rateLimitKey("/api/v1/economy/gdp/nominal?provider=fred") === "",
+      "isRateLimited matches Nasdaq and rateLimitKey separates oecd vs nasdaq");
     var foNorm = rs.fetchOptions(false, ac.signal), foForce = rs.fetchOptions(true, ac.signal);
     ok(rs.keepFor === undefined && !foNorm.headers && foForce.headers && foForce.headers["X-Terminal-Refresh"] === "1",
       "browser Cache API retired (no keepFor); forced refresh sends X-Terminal-Refresh: 1 while normal fetches send no extra header");
@@ -1416,6 +1422,74 @@ window.__fcPromise = (async function (T) {
     T.clearAllCaches();
     var oecdOk = await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_429", true);
     ok(callsOecd429 === 2 && oecdOk && oecdOk.ok === true, "T.clearAllCaches clears OECD limitedUntil cooldown");
+
+    // Nasdaq URLs never retry on 503 or truncated JSON, and per-provider cooldown does not block OECD
+    var callsNasdaq503 = 0, callsNasdaqTrunc = 0, callsNasdaq400 = 0, callsNasdaq429 = 0, callsOecdWhileNasdaq = 0, callsNasdaqOther = 0;
+    window.fetch = async function (u, opts) {
+      var su = String(u);
+      if (su.indexOf("test_nasdaq_503") >= 0) {
+        callsNasdaq503++;
+        return { ok: false, status: 503, headers: new Headers(), text: async function () { return "Service Unavailable"; } };
+      }
+      if (su.indexOf("/api/v1/nasdaq/test_trunc") >= 0) {
+        callsNasdaqTrunc++;
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"broken":'; } };
+      }
+      if (su.indexOf("/api/v1/nasdaq/test_400_rl") >= 0) {
+        callsNasdaq400++;
+        if (callsNasdaq400 === 1) return { ok: false, status: 400, headers: new Headers(), text: async function () { return JSON.stringify({ detail: "Nasdaq rate limit reached" }); } };
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"ok":true}'; } };
+      }
+      if (su.indexOf("/api/v1/nasdaq/test_429") >= 0) {
+        callsNasdaq429++;
+        if (callsNasdaq429 === 1) return { ok: false, status: 429, headers: new Headers(), text: async function () { return JSON.stringify({ detail: "Too Many Requests" }); } };
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"ok":true}'; } };
+      }
+      if (su.indexOf("/api/v1/nasdaq/test_other_card") >= 0) {
+        callsNasdaqOther++;
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"other":true}'; } };
+      }
+      if (su.indexOf("/api/v1/oecd/test_unblocked") >= 0) {
+        callsOecdWhileNasdaq++;
+        return { ok: true, status: 200, headers: new Headers(), text: async function () { return '{"oecd":true}'; } };
+      }
+      return origFetch(u, opts);
+    };
+    var nasdaqErr503 = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/economy/calendar?provider=nasdaq&t=test_nasdaq_503", true); } catch (e) { nasdaqErr503 = e; }
+    ok(callsNasdaq503 === 1 && nasdaqErr503 && nasdaqErr503.status === 503, "getJSON never retries Nasdaq URL on 503");
+
+    var nasdaqErrTrunc = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_trunc", true); } catch (e) { nasdaqErrTrunc = e; }
+    ok(callsNasdaqTrunc === 1 && nasdaqErrTrunc && /incomplete response/i.test(nasdaqErrTrunc.message), "getJSON never retries Nasdaq URL on truncated JSON");
+
+    var nasdaqErr400a = null, nasdaqErr400b = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_400_rl", true); } catch (e) { nasdaqErr400a = e; }
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_400_rl", true); } catch (e) { nasdaqErr400b = e; }
+    var oecdUnblocked = await T.getJSON("http://127.0.0.1:6950/api/v1/oecd/test_unblocked", true);
+    ok(callsNasdaq400 === 1 && nasdaqErr400a && nasdaqErr400b && /Nasdaq rate limit/i.test(nasdaqErr400b.message)
+      && callsOecdWhileNasdaq === 1 && oecdUnblocked && oecdUnblocked.oecd === true,
+      "Nasdaq 400 rate limit arms Nasdaq cooldown without blocking OECD URLs");
+
+    T.clearAllCaches();
+    var nasdaqErr429a = null, nasdaqErr429b = null;
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_429", true); } catch (e) { nasdaqErr429a = e; }
+    try { await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_429", true); } catch (e) { nasdaqErr429b = e; }
+    ok(callsNasdaq429 === 1 && nasdaqErr429a && nasdaqErr429b && /Too Many Requests/i.test(nasdaqErr429b.message),
+      "Nasdaq 429 arms Nasdaq cooldown so next call skips fetch");
+    var nasdaqOther = await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_other_card", true);
+    ok(callsNasdaqOther === 1 && nasdaqOther && nasdaqOther.other === true,
+      "Nasdaq cooldown covers only the failed URL; other Nasdaq cards still reach the backend (its cache serves them)");
+    T.clearAllCaches();
+    var nasdaqOk = await T.getJSON("http://127.0.0.1:6950/api/v1/nasdaq/test_429", true);
+    ok(callsNasdaq429 === 2 && nasdaqOk && nasdaqOk.ok === true, "T.clearAllCaches clears Nasdaq cooldown");
+    ok(T.classifyError("Nasdaq rate limit reached (temporarily blocked). Cooling down for ~120s.", 400, { source: "Nasdaq", provider: "nasdaq" }).cls === "ratelimit"
+      && T.classifyError("Nasdaq rate limit reached (HTTP 403).", 400, { source: "Nasdaq", provider: "nasdaq" }).cls === "ratelimit",
+      "Nasdaq rate-limit and temporary-block errors classify as ratelimit (never missing Nasdaq Data Link key)");
+    ok(/about 8 minutes/.test(T.classifyError("Nasdaq rate limit active (HTTP 429). Cooling down for ~480s.", 400, { source: "Nasdaq", provider: "nasdaq" }).hint)
+      && /about 45 seconds/.test(T.classifyError("Nasdaq rate limit active (HTTP 429). Cooling down for ~45s.", 400, { source: "Nasdaq", provider: "nasdaq" }).hint)
+      && /about 2 minutes/.test(T.classifyError("Too Many Requests", 429, { source: "Nasdaq", provider: "nasdaq" }).hint),
+      "rate-limit hint uses the backend's ~Ns cooldown when given (480s -> 8 minutes, 45s -> 45 seconds)");
 
     // Hidden-tab needPlotResize: ResizeObserver while 0x0 defers Plotly.Plots.resize until visible check()
     var rsStage = document.createElement("div");

@@ -86,6 +86,12 @@
     }
     if (/\b402\b|Payment Required|Premium Query Parameter|Restricted Endpoint|Special Endpoint|Legacy Endpoint|current subscription|upgrade your plan|not available under your (current )?(plan|subscription)/i.test(m))
       return { cls: "paid", kind: "info", text: "Needs a paid " + src + " plan.", hint: "The free " + src + " plan does not include this data." + (ctx.hasFreeOnTab ? " Other cards on this tab work without a paid plan." : "") };
+    if (/\b429\b|Too Many Requests|rate.?limit|exceeded your rate|temporarily blocked/i.test(m)) {
+      var secs = /~(\d+)\s*s\b/.exec(m), wait;
+      if (secs) { secs = +secs[1]; wait = secs < 90 ? secs + " seconds" : Math.ceil(secs / 60) + " minutes"; }
+      else wait = (/OECD/i.test(m + src) ? 10 : 2) + " minutes";
+      return { cls: "ratelimit", kind: "info", text: src + " is limiting how often it can be asked right now.", hint: "Try again in about " + wait + " (press ↻)." };
+    }
     if (/\b40[13]\b|Unauthorized|Forbidden|Invalid API key|invalid credentials|Access denied/i.test(m))
       return { cls: "denied", kind: "info", text: src + " refused the request (access denied).", hint: ctx.provider && KEY_NAMES[ctx.provider] ? "Check the " + KEY_NAMES[ctx.provider] + " API key in local/api_keys.env (Setup-Keys.cmd), then restart." : "The source blocks this kind of request at the moment. Try again later." };
     var req = /^(?:Error: )?(\w[\w ]*?) is a required field/i.exec(m);
@@ -98,10 +104,6 @@
     if (need || /^Please (enter|select|provide)|^Provide |is required\.?$|must be provided|^Set \w/i.test(m)) {
       var label = need ? ((ctx.param && ctx.param(need[1])) || String(need[1]).replace(/_/g, " ")) : null;
       return { cls: "input", kind: "info", text: label ? "Enter " + label + " to load this card." : m.replace(/\s*\(.*$/, "").slice(0, 160), hint: null, param: need ? need[1] : null };
-    }
-    if (/\b429\b|Too Many Requests|rate.?limit|exceeded your rate|too many requests/i.test(m)) {
-      var mins = /OECD/i.test(m + src) ? 10 : 2;
-      return { cls: "ratelimit", kind: "info", text: src + " is limiting how often it can be asked right now.", hint: "Try again in about " + mins + " minutes (press ↻)." };
     }
     if (/slow to answer the first request|keeps loading in the background/i.test(m))
       return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
@@ -195,13 +197,19 @@
       || /\/api\/v1\/(yfinance|cboe|tmx|nasdaq|deribit|finviz)\//.test(u)) return 30000;
     return REQUEST_TIMEOUT;
   };
-  var limitedUntil = 0, limitedMsg = "";      // set when OECD refuses us; no OECD requests are sent until it passes
-  T.clearAllCaches = function () { dataCache.clear(); limitedUntil = 0; limitedMsg = ""; };
-  function isRateLimited(url) { return /[?&]provider=oecd(&|$)|\/oecd\//i.test(url); }
+  var limitedBy = {};                         // cooldowns: OECD per provider; Nasdaq per URL (the backend still serves its cache hits)
+  T.clearAllCaches = function () { dataCache.clear(); limitedBy = {}; };
+  function rateLimitKey(url) {
+    var u = String(url || "");
+    if (/[?&]provider=oecd(&|$)|\/oecd\//i.test(u)) return "oecd";
+    if (/[?&]provider=nasdaq(&|$)|\/nasdaq\//i.test(u)) return "nasdaq";
+    return "";
+  }
+  function isRateLimited(url) { return !!rateLimitKey(url); }
   function fetchOptions(force, signal) {
     return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" } } : { signal: signal };
   }
-  T._reqSlots = { acquire: acquire, release: release, slots: slots, isRateLimited: isRateLimited, fetchOptions: fetchOptions, max: MAX_PARALLEL };
+  T._reqSlots = { acquire: acquire, release: release, slots: slots, rateLimitKey: rateLimitKey, isRateLimited: isRateLimited, fetchOptions: fetchOptions, max: MAX_PARALLEL };
   // Server CACHE_POLICY is now the sole authoritative persistent cache; remove any legacy browser Cache API store once on boot.
   try {
     if (typeof caches !== "undefined" && caches && typeof caches.delete === "function") {
@@ -246,8 +254,10 @@
   async function getJSON(url, force, outerSignal) {
     var c = dataCache.get(url);
     if (!force && c && Date.now() - c.t < TTL) return c.json;
-    var slow = isRateLimited(url);
-    if (slow && Date.now() < limitedUntil) throw new Error(limitedMsg);
+    var rlKey = rateLimitKey(url), slow = !!rlKey;
+    var limKey = rlKey === "nasdaq" ? "nasdaq|" + url : rlKey;
+    var lim = rlKey && limitedBy[limKey];
+    if (lim && Date.now() < lim.until) throw new Error(lim.msg);
     var host = /^https?:\/\/[^/]+/.exec(url); host = host ? host[0] : "self";
     await acquire(host, outerSignal);
     var timeoutMs = T.requestTimeout(url, false);
@@ -263,7 +273,10 @@
       var subE = resp.headers && resp.headers.get("X-Terminal-Source");
       if (subE) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
       try { var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
-      if (slow && (resp.status === 429 || /rate limit|too many requests/i.test(err.message))) { limitedUntil = Date.now() + 600000; limitedMsg = err.message; }
+      if (rlKey && (resp.status === 429 || /rate limit|too many requests|temporarily blocked/i.test(err.message))) {
+        var rlSecs = /~(\d+)\s*s\b/.exec(err.message);
+        limitedBy[limKey] = { until: Date.now() + (rlSecs ? +rlSecs[1] * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
+      }
       throw err;
     }
     try {

@@ -373,6 +373,83 @@ try:
     yf_srcs = c.earnings(symbol="AAPL")["sources"]
     check(any(s["name"] == "Yahoo Finance" and "delayed options chain" in s["detail"] for s in yf_srcs),
           "sources attribute delayed options chain to Yahoo Finance on fallback")
+
+    # Lazy options chain: only earnings() calls _options_chain; reports/release/history do not
+    opt_calls = [0]
+
+    def counting_chain(sym):
+        opt_calls[0] += 1
+        return fri_chain, "nasdaq"
+
+    install({"hist": HIST, "cal": cal_far, "eps": EPS, "rev": REV, "trend": TREND, "revs": REVS, "inc": INC},
+            CLOSES, ("2026-11-17T14:00:00", 100.0), release=None, chain=counting_chain)
+    c.earnings_reports(symbol="AAPL")
+    c.earnings_release(symbol="AAPL")
+    c.earnings_history(symbol="AAPL")
+    check(opt_calls[0] == 0, "earnings_reports/release/history do not call _options_chain")
+    c.earnings(symbol="AAPL")
+    check(opt_calls[0] == 1, "earnings() calls _options_chain once")
+
+    # Single-flight: 4 concurrent threads calling _options_chain("DELL") coalesce to 1 C.api call
+    import threading
+    import time
+
+    sf_calls = [0]
+    sf_lock = threading.Lock()
+    sf_barrier = threading.Barrier(4)
+
+    def slow_chain_api(base, path, **kw):
+        with sf_lock:
+            sf_calls[0] += 1
+        time.sleep(0.05)
+        return fri_chain
+
+    c.api = slow_chain_api
+    c._cache.clear()
+    c._options_chain = saved_chain
+    sf_results = []
+
+    def sf_worker():
+        sf_barrier.wait()
+        sf_results.append(c._options_chain("DELL"))
+
+    sf_threads = [threading.Thread(target=sf_worker) for _ in range(4)]
+    for t in sf_threads:
+        t.start()
+    for t in sf_threads:
+        t.join(timeout=5)
+    check(sf_calls[0] == 1 and len(sf_results) == 4 and all(r == (fri_chain, "nasdaq") for r in sf_results),
+          "4 concurrent _options_chain calls coalesce to 1 C.api call")
+
+    # All providers fail: 4 concurrent callers share one pass (3 providers = 3 calls, not 12); the miss is cached 60 s
+    fail_calls = [0]
+    fail_barrier = threading.Barrier(4)
+
+    def failing_chain_api(base, path, **kw):
+        with sf_lock:
+            fail_calls[0] += 1
+        time.sleep(0.05)
+        raise c.CompositeError("Nasdaq rate limit active")
+
+    c.api = failing_chain_api
+    c._cache.clear()
+    fail_results = []
+
+    def fail_worker():
+        fail_barrier.wait()
+        fail_results.append(c._options_chain("DELL"))
+
+    fail_threads = [threading.Thread(target=fail_worker) for _ in range(4)]
+    for t in fail_threads:
+        t.start()
+    for t in fail_threads:
+        t.join(timeout=5)
+    check(fail_calls[0] == 3 and fail_results == [(None, None)] * 4,
+          f"failed chain runs once for 4 concurrent callers ({fail_calls[0]} provider calls)")
+    hit = c._cache[("opt_chain", "DELL")]
+    c._cache[("opt_chain", "DELL")] = (hit[0] - 61, hit[1])
+    c._options_chain("DELL")
+    check(fail_calls[0] == 6, "cached miss expires after 60 s and the chain is retried")
 finally:
     c.api = saved_api
     c._est_raw = saved_raw

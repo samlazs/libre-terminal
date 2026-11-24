@@ -363,30 +363,42 @@ def _implied_move(chain, target_date, spot=None, today=None, timing=None):
 
 
 def _options_chain(sym):
-    """Delayed options chain for U.S.-listed stocks (Nasdaq -> Yahoo Finance -> Cboe), cached 15 minutes."""
+    """Delayed options chain for U.S.-listed stocks (Nasdaq -> Yahoo Finance -> Cboe), cached 15 minutes. A miss on
+    every provider is cached for 1 minute so concurrent cards for the same symbol share it instead of re-running the chain."""
     if not sym or re.search(r"\.[A-Z]{2,4}$|[=^]", sym):
         return None, None
     key = ("opt_chain", sym)
-    now = time.time()
+
+    def _fresh(hit):
+        return hit and time.time() - hit[0] < (900 if hit[1][0] is not None else 60)
+
     with C._guard:
         hit = C._cache.get(key)
-        if hit and now - hit[0] < 900:
+        if _fresh(hit):
             return hit[1]
-    for prov in ("nasdaq", "yfinance", "cboe"):
-        try:
-            res = C.api(C.V5, "derivatives/options/chains", _timeout=15, symbol=sym, provider=prov)
-        except C.CompositeError:
-            continue
-        has_rows = bool(res) if isinstance(res, list) else (isinstance(res, dict) and bool(res.get("expiration")))
-        if has_rows:
-            val = (res, prov)
-            with C._guard:
-                C._cache[key] = (time.time(), val)
-            return val
-    return None, None
+        lock = C._locks.setdefault(key, threading.Lock())
+    with lock:
+        with C._guard:
+            hit = C._cache.get(key)
+            if _fresh(hit):
+                return hit[1]
+        for prov in ("nasdaq", "yfinance", "cboe"):
+            try:
+                res = C.api(C.V5, "derivatives/options/chains", _timeout=15, symbol=sym, provider=prov)
+            except C.CompositeError:
+                continue
+            has_rows = bool(res) if isinstance(res, list) else (isinstance(res, dict) and bool(res.get("expiration")))
+            if has_rows:
+                val = (res, prov)
+                with C._guard:
+                    C._cache[key] = (time.time(), val)
+                return val
+        with C._guard:
+            C._cache[key] = (time.time(), (None, None))
+        return None, None
 
 
-def _earn_model(sym, today=None, report=None):
+def _earn_model(sym, today=None, report=None, need_implied=True):
     """Everything the Estimates views show, from one set of answers (see the section comment). `report` (a report date)
     picks an earlier report; empty or unknown means the latest."""
     today = today or C._today()
@@ -474,7 +486,7 @@ def _earn_model(sym, today=None, report=None):
     track = {"n": len(last8), "beats": sum(1 for r in last8 if r["est"] is not None and r["actual"] > r["est"]),
              "avg_surprise": sum(surp) / len(surp) if surp else None, "avg_abs_move": sum(moves) / len(moves) if moves else None}
     implied = None
-    if is_latest:
+    if need_implied and is_latest:
         imp_target = d if (pending and d >= t_iso and not release) else nxt_date
         imp_timing = timing if (pending and d >= t_iso and not release) else None
         if imp_target:
@@ -601,7 +613,7 @@ def earnings(symbol="AAPL", report=None, **_):
 def earnings_reports(symbol="AAPL", **_):
     """Choices of the Report picker: the latest report, then each report in Yahoo's history, newest first."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
-    m = C._earn_model(sym)
+    m = C._earn_model(sym, need_implied=False)
     opts = [{"label": "Latest report", "value": ""}]
     if m["latest"]["pending"]:
         opts.append({"label": f"{m['latest']['date']} · results pending", "value": m["latest"]["date"]})
@@ -614,7 +626,7 @@ def earnings_release(symbol="AAPL", report=None, **_):
     has no 99.1. Answered as {"_frame": viewer path} (the UI server answers the backend viewer's URL and the card's frame loads it) or {"_message": text}."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
     try:
-        m = C._earn_model(sym, report=report)
+        m = C._earn_model(sym, report=report, need_implied=False)
     except C.CompositeError as e:
         return {"_message": str(e), "sources": [C.src("SEC", "earnings releases: Form 8-K, Item 2.02", "https://www.sec.gov/edgar/search/")]}
     rel, d = m["latest"]["release"], m["latest"]["date"]
@@ -631,7 +643,7 @@ def earnings_release(symbol="AAPL", report=None, **_):
 def earnings_history(symbol="AAPL", **_):
     """EPS consensus vs reported for the last 12 reports, with the surprise and the 2-day price move around each."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
-    m = C._earn_model(sym)
+    m = C._earn_model(sym, need_implied=False)
     rows = [{"date": r["date"], "eps_est": r["est"], "eps_actual": r["actual"], "surprise": r["surprise"], "move_2d": r["move_2d"]} for r in m["history"]]
     return {"results": rows, "sources": C._earn_sources(m)[:1]}
 

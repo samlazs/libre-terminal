@@ -28,7 +28,7 @@ class CompositeError(Exception):
 _ORIG_URLOPEN = urllib.request.urlopen
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _RETRY_DELAYS = (0.4, 1.0)
-_NO_RETRY_RE = re.compile(r"(?:[?&]provider=oecd(?:&|$)|/oecd/|sdmx\.oecd\.org|stats\.oecd\.org)", re.I)
+_NO_RETRY_RE = re.compile(r"(?:[?&]provider=(?:oecd|nasdaq)(?:&|$)|/(?:oecd|nasdaq)/|sdmx\.oecd\.org|stats\.oecd\.org|api\.nasdaq\.com)", re.I)
 
 
 def _no_retry(url: str) -> bool:

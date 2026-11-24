@@ -19,13 +19,17 @@ Usage: python scripts/run_backend.py <name> [openbb-api arguments...]
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import faulthandler
 import json
+import math
 import os
 import sys
 import threading
 import time
 import urllib.request
+import weakref
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -2963,6 +2967,18 @@ def install_tvchart_fix(applied: list):
     @functools.wraps(orig_html)
     async def tvchart_widget_html(symbol: str = "AAPL", interval: str = "1d", theme: str = "dark") -> str:
         html = await orig_html(symbol, interval, theme)
+        # tvchart_bridge_register.js re-runs the chart's event registration, but
+        # 10-events.js already did it when window.pywry existed at load. Twice-
+        # registered data-response handlers race the chart rebuild on an interval
+        # change and add a stray Line series beside the candles. Register only
+        # once the page has loaded and no tvchart:create handler exists yet.
+        html = html.replace(
+            "window._tvRegisterEventHandlers(window.pywry);",
+            "(function(w){function reg(){var h=w._handlers&&w._handlers['tvchart:create'];"
+            "if(!(h&&h.length))window._tvRegisterEventHandlers(w);}"
+            "if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',reg);else reg();})(window.pywry);",
+            1,
+        )
         is_light = str(theme).lower() == "light"
         bg = "#ffffff" if is_light else "#1a1a19"
         fg = "#4b5563" if is_light else "#c3c2b7"
@@ -3226,7 +3242,9 @@ def install_nasdaq_etf_fallback(applied: list):
             return data
         try:
             return await orig(alt, *args, **kwargs) or data
-        except Exception:  # noqa: BLE001  (not an ETF either: keep the stocks answer)
+        except Exception as e:  # noqa: BLE001  (not an ETF either: keep the stocks answer)
+            if _is_nasdaq_rate_limit(e):
+                raise
             return data
 
     nh.get_nasdaq_data = get_nasdaq_data
@@ -3721,6 +3739,10 @@ def apply_fixes():
         install_nasdaq_empty_json_fix(applied)
     except Exception as e:  # noqa: BLE001
         _not_applied("Nasdaq empty JSON recovery", e)
+    try:
+        install_nasdaq_rate_limit_fix(applied)
+    except Exception as e:  # noqa: BLE001
+        _not_applied("Nasdaq rate-limit and transport guard", e)
     try:
         install_user_settings_cache(applied)
     except Exception as e:  # noqa: BLE001
@@ -4487,6 +4509,509 @@ def install_tmx_gainers_fix(applied: list):
     applied.append("TMX gainers tolerate missing longName without HTTP 500 ValidationError")
 
 
+NASDAQ_MAX_CONCURRENCY = 4
+NASDAQ_MIN_GAP_SEC = 0.15
+NASDAQ_COOLDOWN_SEC = 120.0
+NASDAQ_RETRY_AFTER_MIN = 30.0
+NASDAQ_RETRY_AFTER_MAX = 600.0
+_NASDAQ_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+# Only an explicit block/throttle page trips the cooldown; an ordinary HTML 404/500 page (which also loads Akamai assets) does not.
+_NASDAQ_BLOCK_MARKERS = (
+    "access denied",
+    "too many requests",
+)
+NASDAQ_DEFAULT_TIMEOUT_SEC = 10.0
+
+_nasdaq_rl_lock = threading.Lock()
+_nasdaq_blocked_until = 0.0
+_nasdaq_blocked_reason = ""
+_nasdaq_loop_gates: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Process-wide network gate: the cap and pacing hold across every event loop (worker-thread loops, asyncio.run callers).
+_nasdaq_slot_lock = threading.Lock()
+_nasdaq_inflight = 0
+_nasdaq_next_at = 0.0
+_nasdaq_sessions_lock = threading.Lock()
+_nasdaq_sessions: dict[int, dict] = {}
+_nasdaq_classes_cache = None
+
+
+def _nasdaq_error(msg: str) -> Exception:
+    try:
+        from openbb_core.app.model.abstract.error import OpenBBError
+
+        return OpenBBError(msg)
+    except Exception:  # noqa: BLE001
+        return RuntimeError(msg)
+
+
+def _check_nasdaq_cooldown() -> None:
+    with _nasdaq_rl_lock:
+        now = time.monotonic()
+        if now < _nasdaq_blocked_until:
+            rem = max(1, int(math.ceil(_nasdaq_blocked_until - now)))
+            reason = _nasdaq_blocked_reason or "rate limited"
+        else:
+            return
+    raise _nasdaq_error(
+        f"Nasdaq rate limit active ({reason}). "
+        f"Cooling down for ~{rem}s to avoid extending the block; "
+        "try again shortly or switch source on this card."
+    )
+
+
+def _trip_nasdaq_cooldown(status: int, retry_after: str | None = None, reason: str = "") -> None:
+    wait = NASDAQ_COOLDOWN_SEC
+    if retry_after is not None:
+        try:
+            parsed = float(str(retry_after).strip())
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None and math.isfinite(parsed):
+            wait = max(NASDAQ_RETRY_AFTER_MIN, min(NASDAQ_RETRY_AFTER_MAX, parsed))
+    if status == 429:
+        detail = f"HTTP 429{f', {reason}' if reason else ''}"
+    else:
+        detail = reason or "temporarily blocked"
+    with _nasdaq_rl_lock:
+        global _nasdaq_blocked_until, _nasdaq_blocked_reason
+        _nasdaq_blocked_until = max(_nasdaq_blocked_until, time.monotonic() + wait)
+        _nasdaq_blocked_reason = detail
+    raise _nasdaq_error(
+        f"Nasdaq rate limit reached ({detail}). "
+        f"Cooling down for ~{int(wait)}s to avoid extending the block; "
+        "try again shortly or switch source on this card."
+    )
+
+
+def _get_nasdaq_loop_gate() -> dict:
+    import asyncio
+
+    loop = asyncio.get_running_loop()
+    gate = _nasdaq_loop_gates.get(loop)
+    if gate is None:
+        gate = {"sess_lock": asyncio.Lock()}
+        _nasdaq_loop_gates[loop] = gate
+    return gate
+
+
+@contextlib.asynccontextmanager
+async def _nasdaq_network_slot():
+    """Hold one of NASDAQ_MAX_CONCURRENCY process-wide slots, spaced NASDAQ_MIN_GAP_SEC apart, across all event loops."""
+    import asyncio
+
+    global _nasdaq_inflight, _nasdaq_next_at
+    _check_nasdaq_cooldown()
+    while True:
+        with _nasdaq_slot_lock:
+            if _nasdaq_inflight < NASDAQ_MAX_CONCURRENCY:
+                _nasdaq_inflight += 1
+                break
+        await asyncio.sleep(0.02)
+        _check_nasdaq_cooldown()
+    try:
+        _check_nasdaq_cooldown()
+        with _nasdaq_slot_lock:
+            now = time.monotonic()
+            slot_at = max(now, _nasdaq_next_at)
+            _nasdaq_next_at = slot_at + NASDAQ_MIN_GAP_SEC
+            wait = slot_at - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _check_nasdaq_cooldown()
+        yield
+    finally:
+        with _nasdaq_slot_lock:
+            _nasdaq_inflight = max(0, _nasdaq_inflight - 1)
+
+
+def _is_nasdaq_rate_limit(exc: BaseException) -> bool:
+    return "rate limit" in str(exc).lower()
+
+
+def _nasdaq_session_kwargs() -> tuple[dict, dict]:
+    """(connector kwargs, session kwargs) mirroring openbb_core get_async_requests_session: proxy, SSL, auth, timeout."""
+    import ssl
+
+    import aiohttp
+
+    try:
+        from openbb_core.provider.utils.helpers import get_python_request_settings
+
+        settings = dict(get_python_request_settings())
+    except Exception:  # noqa: BLE001
+        settings = {}
+    password = settings.pop("password", None)
+    settings.pop("proxy_headers", None)
+    proxy = settings.get("proxy")
+    http_proxy = os.environ.get("HTTP_PROXY", os.environ.get("HTTPS_PROXY"))
+    https_proxy = os.environ.get("HTTPS_PROXY", os.environ.get("HTTP_PROXY"))
+    if not proxy and http_proxy:
+        # Nasdaq is https; aiohttp would try to upgrade an https:// proxy URL, so talk plain HTTP to the proxy.
+        proxy = (https_proxy or http_proxy).replace("https:", "http:")
+    connector_kwargs: dict = {}
+    if proxy or settings.get("verify_ssl") is False:
+        connector_kwargs["ssl"] = False
+    elif settings.get("certfile") or settings.get("cafile") or os.environ.get("REQUESTS_CA_BUNDLE"):
+        ctx = ssl.create_default_context()
+        ca = settings.get("cafile") or os.environ.get("REQUESTS_CA_BUNDLE")
+        if ca:
+            ctx.load_verify_locations(cafile=ca)
+        if settings.get("certfile"):
+            ctx.load_cert_chain(certfile=settings["certfile"], keyfile=settings.get("keyfile"), password=password)
+        connector_kwargs["ssl"] = ctx
+    try:
+        total = float(settings.get("timeout") or NASDAQ_DEFAULT_TIMEOUT_SEC)
+    except (TypeError, ValueError):
+        total = NASDAQ_DEFAULT_TIMEOUT_SEC
+    session_kwargs: dict = {"timeout": aiohttp.ClientTimeout(total=total)}
+    if proxy:
+        session_kwargs["proxy"] = proxy
+    p_auth = settings.get("proxy_auth")
+    if p_auth:
+        session_kwargs["proxy_auth"] = aiohttp.BasicAuth(*p_auth) if isinstance(p_auth, (list, tuple)) else aiohttp.BasicAuth(p_auth)
+    s_auth = settings.get("auth")
+    if s_auth:
+        session_kwargs["auth"] = aiohttp.BasicAuth(*s_auth) if isinstance(s_auth, (list, tuple)) else aiohttp.BasicAuth(s_auth)
+    cookies = settings.get("cookies")
+    if isinstance(cookies, dict) and cookies:
+        session_kwargs["cookies"] = cookies
+    return connector_kwargs, session_kwargs
+
+
+def _apply_nasdaq_request_timeout(kwargs: dict) -> dict:
+    """Honor the user's request_timeout preference (as amake_request does); the session default covers the rest."""
+    prefs = kwargs.pop("preferences", None)
+    if "timeout" not in kwargs and isinstance(prefs, dict) and prefs.get("request_timeout"):
+        kwargs["timeout"] = prefs["request_timeout"]
+    return kwargs
+
+
+async def _nasdaq_cache_filter(response) -> bool:
+    """Reject empty, non-JSON, or HTML block payloads before SQLite writes them. A valid JSON envelope is kept whatever
+    its rCode, so misses such as "Symbol not exists." stay negatively cached instead of being re-fetched on every call."""
+    if getattr(response, "status", 200) != 200:
+        return False
+    raw = await response.read()
+    if not raw or not raw.strip():
+        return False
+    try:
+        json.loads(raw.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return True
+
+
+def _configure_nasdaq_cache_backend(cache) -> None:
+    """Make aiosqlite worker threads daemon (prevents Python 3.12 exit deadlock) and filter bad 200 responses."""
+    import inspect
+
+    if cache is None:
+        return
+    for attr in ("responses", "redirects"):
+        store = getattr(cache, attr, None)
+        conn = getattr(store, "_connection", None)
+        th = getattr(conn, "_thread", None)
+        if th is not None and not th.is_alive():
+            with contextlib.suppress(RuntimeError):
+                th.daemon = True
+    if not getattr(cache, "_terminal_nasdaq_filtered", False):
+        orig_filter = getattr(cache, "filter_fn", None)
+
+        async def _combined_filter(response) -> bool:
+            if callable(orig_filter):
+                ok = (
+                    await orig_filter(response)
+                    if inspect.iscoroutinefunction(orig_filter)
+                    else orig_filter(response)
+                )
+                if not ok:
+                    return False
+            return await _nasdaq_cache_filter(response)
+
+        cache.filter_fn = _combined_filter
+        cache._terminal_nasdaq_filtered = True
+
+        async def _delete_expired_responses():
+            """Upstream calls filter_fn without awaiting it; with the async filter that would keep every entry."""
+            keys = set()
+            async for key in cache.responses.keys():
+                resp = await cache.responses.read(key)
+                if resp is None or getattr(resp, "is_expired", False) or not await _combined_filter(resp):
+                    keys.add(key)
+            await cache.bulk_delete(keys)
+
+        cache.delete_expired_responses = _delete_expired_responses
+
+
+def _stop_nasdaq_cache_sync(sess) -> None:
+    """Stop any aiosqlite worker threads synchronously when an event loop is already closed or exiting."""
+    cache = getattr(sess, "cache", None)
+    if cache is None:
+        return
+    seen: set[int] = set()
+    for attr in ("responses", "redirects"):
+        store = getattr(cache, attr, None)
+        if store is None:
+            continue
+        conn = getattr(store, "_connection", None)
+        if conn is None or id(conn) in seen:
+            continue
+        seen.add(id(conn))
+        th = getattr(conn, "_thread", None)
+        is_alive = bool(th is not None and th.is_alive())
+        has_db = getattr(conn, "_connection", None) is not None
+        if (is_alive or has_db) and callable(getattr(conn, "stop", None)):
+            with contextlib.suppress(Exception):
+                conn.stop()
+        with contextlib.suppress(Exception):
+            store._closed = True
+            store._connection = None
+
+
+def _close_nasdaq_session_sync(sess) -> None:
+    """Synchronously tear down connector and cache worker threads for a session whose loop is not running."""
+    import asyncio
+
+    _stop_nasdaq_cache_sync(sess)
+    conn = getattr(sess, "connector", None)
+    if conn is not None and not getattr(conn, "closed", True):
+        with contextlib.suppress(Exception):
+            res = conn.close()
+            if asyncio.iscoroutine(res):
+                res.close()
+
+
+async def _decode_nasdaq_response(response, *, from_cache: bool = False, cache=None, url: str | None = None):
+    status = getattr(response, "status", 200)
+    if not from_cache and status in (403, 429):
+        headers = getattr(response, "headers", None)
+        retry_after = None
+        if headers is not None:
+            retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        _trip_nasdaq_cooldown(status, retry_after=retry_after)
+    if status == 204:
+        return {}
+    raw = await response.read()
+    if not raw or not raw.strip():
+        if from_cache and cache is not None and url:
+            with contextlib.suppress(Exception):
+                await cache.delete_url(url)
+        if status < 400:
+            return {}
+        raise _nasdaq_error(f"Nasdaq answered HTTP {status} with an empty body.")
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        if from_cache and cache is not None and url:
+            with contextlib.suppress(Exception):
+                await cache.delete_url(url)
+        lower = text.lower()
+        if not from_cache and (
+            status in (403, 429) or any(marker in lower for marker in _NASDAQ_BLOCK_MARKERS)
+        ):
+            _trip_nasdaq_cooldown(status or 403, reason="temporarily blocked")
+        return {}
+
+
+def _get_nasdaq_session_classes():
+    global _nasdaq_classes_cache
+    if _nasdaq_classes_cache is not None:
+        return _nasdaq_classes_cache
+    import aiohttp
+
+    class _NasdaqThrottledClient(aiohttp.ClientSession):
+        async def _request(self, method, str_or_url, *args, **kwargs):
+            t = kwargs.get("timeout")
+            if isinstance(t, (int, float)) and not isinstance(t, bool):
+                kwargs["timeout"] = aiohttp.ClientTimeout(total=float(t))
+            async with _nasdaq_network_slot():
+                return await super()._request(method, str_or_url, *args, **kwargs)
+
+    try:
+        from aiohttp_client_cache.session import CacheMixin
+
+        class _NasdaqCachedSession(CacheMixin, _NasdaqThrottledClient):
+            pass
+    except ImportError:
+        _NasdaqCachedSession = None
+
+    _nasdaq_classes_cache = (_NasdaqThrottledClient, _NasdaqCachedSession)
+    return _nasdaq_classes_cache
+
+
+def _prune_nasdaq_sessions_locked() -> list:
+    dead = []
+    for loop_id, entry in _nasdaq_sessions.items():
+        loop = entry["loop_ref"]()
+        if loop is None or loop.is_closed():
+            dead.append(loop_id)
+    pruned = []
+    for loop_id in dead:
+        entry = _nasdaq_sessions.pop(loop_id, None)
+        if entry is not None:
+            pruned.append(entry)
+    return pruned
+
+
+def _cleanup_pruned_sessions(entries: list) -> None:
+    for entry in entries:
+        for key in ("cached", "live"):
+            sess = entry.get(key)
+            entry[key] = None
+            if sess is not None and not getattr(sess, "closed", True):
+                _close_nasdaq_session_sync(sess)
+
+
+def _get_nasdaq_session_entry(loop) -> dict:
+    loop_id = id(loop)
+    with _nasdaq_sessions_lock:
+        pruned = _prune_nasdaq_sessions_locked()
+        entry = _nasdaq_sessions.get(loop_id)
+        if entry is None or entry["loop_ref"]() is not loop:
+            entry = {
+                "loop_ref": weakref.ref(loop),
+                "live": None,
+                "cached": None,
+                "cache_fn": None,
+            }
+            _nasdaq_sessions[loop_id] = entry
+    if pruned:
+        _cleanup_pruned_sessions(pruned)
+    return entry
+
+
+async def _get_nasdaq_live_session():
+    import asyncio
+    import aiohttp
+
+    loop = asyncio.get_running_loop()
+    entry = _get_nasdaq_session_entry(loop)
+    sess = entry.get("live")
+    if sess is not None and not sess.closed:
+        return sess
+    async with _get_nasdaq_loop_gate()["sess_lock"]:
+        sess = entry.get("live")
+        if sess is not None and not sess.closed:
+            return sess
+        throttled_cls, _ = _get_nasdaq_session_classes()
+        conn_kwargs, sess_kwargs = _nasdaq_session_kwargs()
+        connector = aiohttp.TCPConnector(
+            limit=NASDAQ_MAX_CONCURRENCY,
+            limit_per_host=NASDAQ_MAX_CONCURRENCY,
+            ttl_dns_cache=300,
+            **conn_kwargs,
+        )
+        sess = throttled_cls(connector=connector, **sess_kwargs)
+        entry["live"] = sess
+        return sess
+
+
+async def _get_nasdaq_cached_session(nh):
+    import asyncio
+    import aiohttp
+
+    loop = asyncio.get_running_loop()
+    entry = _get_nasdaq_session_entry(loop)
+    cache_fn = getattr(nh, "get_cache_backend", None)
+    sess = entry.get("cached")
+    if sess is None or sess.closed or entry.get("cache_fn") is not cache_fn:
+        async with _get_nasdaq_loop_gate()["sess_lock"]:
+            sess = entry.get("cached")
+            if sess is not None and (sess.closed or entry.get("cache_fn") is not cache_fn):
+                entry["cached"] = None
+                if not sess.closed:
+                    with contextlib.suppress(Exception):
+                        await sess.close()
+                sess = None
+            if sess is None:
+                _, cached_cls = _get_nasdaq_session_classes()
+                if cached_cls is None:
+                    raise ImportError("aiohttp_client_cache is not available")
+                conn_kwargs, sess_kwargs = _nasdaq_session_kwargs()
+                connector = aiohttp.TCPConnector(
+                    limit=NASDAQ_MAX_CONCURRENCY,
+                    limit_per_host=NASDAQ_MAX_CONCURRENCY,
+                    ttl_dns_cache=300,
+                    **conn_kwargs,
+                )
+                cache_backend = nh.get_cache_backend()
+                _configure_nasdaq_cache_backend(cache_backend)
+                sess = cached_cls(cache=cache_backend, connector=connector, **sess_kwargs)
+                entry["cached"] = sess
+                entry["cache_fn"] = cache_fn
+    locks = getattr(sess, "_locks", None)
+    if locks is not None and len(locks) > 4096:
+        for k in list(locks.keys()):
+            lk = locks.get(k)
+            if lk is None or not lk.locked():
+                locks.pop(k, None)
+    return sess
+
+
+async def close_nasdaq_sessions(loop=None) -> None:
+    import asyncio
+
+    with _nasdaq_sessions_lock:
+        pruned = _prune_nasdaq_sessions_locked()
+        if loop is None:
+            entries = list(_nasdaq_sessions.values())
+            _nasdaq_sessions.clear()
+        else:
+            entry = _nasdaq_sessions.pop(id(loop), None)
+            entries = [entry] if entry is not None else []
+    if pruned:
+        _cleanup_pruned_sessions(pruned)
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        running = None
+    for entry in entries:
+        entry_loop = entry["loop_ref"]()
+        for key in ("cached", "live"):
+            sess = entry.get(key)
+            entry[key] = None
+            if sess is None or getattr(sess, "closed", True):
+                continue
+            if running is not None and entry_loop is running and not entry_loop.is_closed():
+                with contextlib.suppress(Exception):
+                    await sess.close()
+            else:
+                _close_nasdaq_session_sync(sess)
+
+
+def reset_nasdaq_rate_limit_state() -> None:
+    global _nasdaq_blocked_until, _nasdaq_blocked_reason, _nasdaq_inflight, _nasdaq_next_at
+    with _nasdaq_rl_lock:
+        _nasdaq_blocked_until = 0.0
+        _nasdaq_blocked_reason = ""
+    with _nasdaq_slot_lock:
+        _nasdaq_inflight = 0
+        _nasdaq_next_at = 0.0
+    _nasdaq_loop_gates.clear()
+    with _nasdaq_sessions_lock:
+        entries = list(_nasdaq_sessions.values())
+        _nasdaq_sessions.clear()
+    for entry in entries:
+        entry_loop = entry["loop_ref"]()
+        for key in ("cached", "live"):
+            sess = entry.get(key)
+            entry[key] = None
+            if sess is None or getattr(sess, "closed", True):
+                continue
+            if entry_loop is not None and not entry_loop.is_closed() and entry_loop.is_running():
+                with contextlib.suppress(Exception):
+                    entry_loop.create_task(sess.close())
+            else:
+                _close_nasdaq_session_sync(sess)
+
+
+atexit.register(reset_nasdaq_rate_limit_state)
+
+
 def install_nasdaq_empty_json_fix(applied: list):
     """Treat HTTP 204 / empty JSON bodies from Nasdaq cached requests as {} instead of raising JSONDecodeError."""
     import functools
@@ -4506,14 +5031,10 @@ def install_nasdaq_empty_json_fix(applied: list):
         async with CachedSession(cache=nh.get_cache_backend()) as session:
             response = await session.get(url, headers=nh.get_headers("json"), **kwargs)
             try:
-                if getattr(response, "status", 200) == 204:
-                    return {}
-                raw = await response.read()
-                if not raw or not raw.strip():
-                    return {}
-                return json.loads(raw.decode("utf-8", errors="replace"))
-            except (json.JSONDecodeError, ValueError):
-                return {}
+                return await _decode_nasdaq_response(
+                    response,
+                    from_cache=bool(getattr(response, "from_cache", False)),
+                )
             finally:
                 release = getattr(response, "release", None)
                 if callable(release):
@@ -4522,6 +5043,181 @@ def install_nasdaq_empty_json_fix(applied: list):
     _cached_request._terminal_nasdaq_empty_fixed = True
     nh._cached_request = _cached_request
     applied.append("Nasdaq cached requests treat HTTP 204 / empty JSON responses as empty")
+
+
+def install_nasdaq_rate_limit_fix(applied: list):
+    """Throttle, pool, stabilize UA, add 403/429 cooldown, and disable per-strike options detail fan-out for Nasdaq."""
+    import functools
+
+    try:
+        from openbb_nasdaq.utils import helpers as nh
+    except ImportError:
+        return
+
+    changed = False
+
+    orig_agent = getattr(nh, "get_random_agent", None)
+    if orig_agent is not None and not getattr(orig_agent, "_terminal_nasdaq_ua_fixed", False):
+        def _stable_agent() -> str:
+            return _NASDAQ_USER_AGENT
+
+        _stable_agent._terminal_nasdaq_ua_fixed = True
+        nh.get_random_agent = _stable_agent
+        changed = True
+
+    orig_cached = getattr(nh, "_cached_request", None)
+    if orig_cached is not None and not getattr(orig_cached, "_terminal_nasdaq_rl_fixed", False):
+        @functools.wraps(orig_cached)
+        async def _cached_request(url: str, **kwargs):
+            _apply_nasdaq_request_timeout(kwargs)
+            session = await _get_nasdaq_cached_session(nh)
+            response = await session.get(url, headers=nh.get_headers("json"), **kwargs)
+            try:
+                return await _decode_nasdaq_response(
+                    response,
+                    from_cache=bool(getattr(response, "from_cache", False)),
+                    cache=getattr(session, "cache", None),
+                    url=url,
+                )
+            finally:
+                release = getattr(response, "release", None)
+                if callable(release):
+                    release()
+
+        _cached_request._terminal_nasdaq_rl_fixed = True
+        _cached_request._terminal_nasdaq_empty_fixed = True
+        nh._cached_request = _cached_request
+        changed = True
+
+    orig_live = getattr(nh, "_live_request", None)
+    if orig_live is not None and not getattr(orig_live, "_terminal_nasdaq_rl_fixed", False):
+        @functools.wraps(orig_live)
+        async def _live_request(url: str, **kwargs):
+            _apply_nasdaq_request_timeout(kwargs)
+            session = await _get_nasdaq_live_session()
+            response = await session.get(url, headers=nh.get_headers("json"), **kwargs)
+            try:
+                return await _decode_nasdaq_response(response, from_cache=False)
+            finally:
+                release = getattr(response, "release", None)
+                if callable(release):
+                    release()
+
+        _live_request._terminal_nasdaq_rl_fixed = True
+        nh._live_request = _live_request
+        changed = True
+
+    orig_resolve = getattr(nh, "resolve_asset_class", None)
+    if (
+        orig_resolve is not None
+        and hasattr(nh, "_PROBE_ORDER")
+        and hasattr(nh, "_directory_asset_class")
+        and not getattr(orig_resolve, "_terminal_nasdaq_rl_fixed", False)
+    ):
+        from async_lru import alru_cache
+
+        @alru_cache(maxsize=2048)
+        async def _resolve_asset_class(symbol: str) -> str:
+            """Upstream memoizes "stocks" when every probe fails, which during a cooldown or outage pins an index, fund
+            or crypto symbol as a stock until restart. Re-raise rate-limit and transport failures so nothing is cached."""
+            ticker = symbol.strip().upper()
+            listing = nh._directory_asset_class(ticker)
+            if listing is not None:
+                return listing
+            transport_err = None
+            for asset_class in nh._PROBE_ORDER:
+                try:
+                    await nh.get_nasdaq_data(f"quote/{ticker}/info?assetclass={asset_class}")
+                except Exception as e:  # noqa: BLE001
+                    if _is_nasdaq_rate_limit(e):
+                        raise
+                    if "nasdaq request failed" not in str(e).lower():
+                        transport_err = e
+                    continue
+                return asset_class
+            if transport_err is not None:
+                raise transport_err
+            return "stocks"
+
+        _resolve_asset_class._terminal_nasdaq_rl_fixed = True
+        nh.resolve_asset_class = _resolve_asset_class
+        changed = True
+
+    try:
+        from openbb_nasdaq.models import options_chains as oc
+    except ImportError:
+        oc = None
+    if oc is not None and hasattr(oc, "NasdaqOptionsChainsFetcher"):
+        fetcher = oc.NasdaqOptionsChainsFetcher
+        orig_aextract = getattr(fetcher, "aextract_data", None)
+        if orig_aextract is not None and not getattr(orig_aextract, "_terminal_nasdaq_options_fixed", False):
+            async def _aextract_data(query, credentials, **kwargs):
+                from datetime import date, timedelta
+                from openbb_core.provider.utils.errors import EmptyDataError
+                from openbb_nasdaq.utils import helpers as nh_mod
+
+                symbol = query.symbol.upper()
+                asset_class = await nh_mod.resolve_asset_class(symbol)
+                excode = oc.EXCHANGE_MAP[query.exchange]
+                today = date.today()
+                requested = {
+                    d
+                    for d in (
+                        nh_mod.to_date(part) for part in (query.expiration or "").split(",") if part
+                    )
+                    if d is not None
+                }
+                chain_path = (
+                    f"quote/{symbol}/option-chain?assetclass={asset_class}"
+                    f"&fromdate={min(requested) if requested else today}"
+                    f"&todate={max(requested) if requested else today + timedelta(days=1095)}"
+                    f"&limit=20000&excode={excode}&callput=callput&money=all&type=all"
+                )
+                chain = await nh_mod.get_nasdaq_data(chain_path)
+                if not chain:
+                    raise EmptyDataError(f"No options chain was found for {symbol}.")
+
+                front = oc._front_expiration(chain)
+                fanout = requested or ({front} if front is not None else set())
+                greeks: dict = {}
+                for expiration in sorted(fanout):
+                    try:
+                        payload = await nh_mod.get_nasdaq_data(
+                            f"quote/{symbol}/option-chain/greeks?assetclass={asset_class}"
+                            f"&date={expiration}"
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        if _is_nasdaq_rate_limit(e):
+                            raise
+                        payload = {}
+                    greeks.update(oc._greeks_by_contract(payload or {}))
+
+                return {
+                    "symbol": symbol,
+                    "chain": chain,
+                    "greeks": greeks,
+                    "detail": {},
+                    "expirations": requested,
+                }
+
+            _aextract_data._terminal_nasdaq_options_fixed = True
+            fetcher.aextract_data = staticmethod(_aextract_data)
+            fetcher.extract_data = staticmethod(_aextract_data)
+            changed = True
+
+    try:
+        from openbb_nasdaq.utils import nordic as nn
+    except ImportError:
+        nn = None
+    if nn is not None and hasattr(nn, "DIRECTORY_CONCURRENCY"):
+        nn.DIRECTORY_CONCURRENCY = NASDAQ_MAX_CONCURRENCY
+        changed = True
+
+    if changed:
+        applied.append(
+            f"Nasdaq transport pooled/throttled (max {NASDAQ_MAX_CONCURRENCY}, gap {NASDAQ_MIN_GAP_SEC}s), "
+            "stable UA, 403/429 cooldown, and options detail fan-out removed"
+        )
 
 
 def install_user_settings_cache(applied: list):

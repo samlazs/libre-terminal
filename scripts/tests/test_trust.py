@@ -174,6 +174,43 @@ try:
         except c.CompositeError as e:
             check(e.transient and _oecd_calls[0] == 1, f"http_json never retries OECD URLError: {_oecd_url}")
 
+    for _nasdaq_url in (
+        "http://127.0.0.1:6900/api/v1/economy/calendar?provider=nasdaq",
+        "http://127.0.0.1:6900/api/v1/nasdaq/markets/movers",
+    ):
+        _nasdaq_calls = [0]
+        def _fail_nasdaq_503(req, timeout=None, **kw):
+            _nasdaq_calls[0] += 1
+            raise _ue.HTTPError(req.full_url, 503, "Unavailable", {}, _io.BytesIO(b""))
+        _ur.urlopen = _fail_nasdaq_503
+        try:
+            _http.http_json(_nasdaq_url)
+            check(False, "Nasdaq 503 should raise")
+        except c.CompositeError as e:
+            check(e.transient and _nasdaq_calls[0] == 1, f"http_json never retries Nasdaq 503: {_nasdaq_url}")
+
+        _nasdaq_calls[0] = 0
+        def _fail_nasdaq_urlerr(req, timeout=None, **kw):
+            _nasdaq_calls[0] += 1
+            raise _ue.URLError("reset")
+        _ur.urlopen = _fail_nasdaq_urlerr
+        try:
+            _http.http_json(_nasdaq_url)
+            check(False, "Nasdaq URLError should raise")
+        except c.CompositeError as e:
+            check(e.transient and _nasdaq_calls[0] == 1, f"http_json never retries Nasdaq URLError: {_nasdaq_url}")
+
+        _nasdaq_calls[0] = 0
+        def _fail_nasdaq_timeout(req, timeout=None, **kw):
+            _nasdaq_calls[0] += 1
+            raise TimeoutError("timed out")
+        _ur.urlopen = _fail_nasdaq_timeout
+        try:
+            _http.http_json(_nasdaq_url)
+            check(False, "Nasdaq TimeoutError should raise")
+        except c.CompositeError as e:
+            check(e.transient and _nasdaq_calls[0] == 1, f"http_json never retries Nasdaq TimeoutError: {_nasdaq_url}")
+
     _dl_calls = [0]
     def _dl_503(req, timeout=None, **kw):
         _dl_calls[0] += 1
