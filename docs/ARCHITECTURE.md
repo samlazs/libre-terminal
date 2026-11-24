@@ -133,6 +133,11 @@ The whole envelope is defined and checked in `terminal/composite/core/contract.p
 
 ## UI server (`terminal/server.py`)
 
+Admission control: at most 24 views (`/x/*`, `TERMINAL_X_SLOTS`) run at once; a request that waits more than 5 s
+for a slot answers 503 (`unavailable`, `retry_after` 5, `Retry-After` header). The page, static files, state,
+config and service status never wait for a slot. HEAD on `/x/*` answers 405 without running the view.
+`/api/services` reports `ui_threads` and the free view slots.
+
 Standard library only. It serves the page and its static files, the built dashboards and saved state. It never proxies market data: the browser calls the two backends directly.
 
 | Method and path | What it returns |
@@ -307,6 +312,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_errors.py` | Fault kind to error kind table (HTTP layer and real server), Retry-After, server-side classification |
 | `test_http.py` | Outbound client: provider policies, 429 cooldown without I/O, Retry-After cap, concurrency peak, pacing, outage gate |
 | `test_patch_registry.py` | Backend patch registry: unique ids, every installer registered, version ranges, status records, critical banner |
+| `test_admission.py` | 24 view slots, 503 after the wait, state/page never blocked, HEAD never runs a view, slots released after defects |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |

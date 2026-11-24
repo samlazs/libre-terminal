@@ -44,6 +44,12 @@ STATE_DIR = local_paths.STATE_DIR
 STATE_FILE = local_paths.STATE_FILE
 DASHBOARDS_FILE = local_paths.DASHBOARDS_FILE
 MAX_STATE_BYTES = 5 * 1024 * 1024
+# Admission control: at most X_SLOTS views run at once; a request that waits longer than X_WAIT seconds for a slot
+# answers 503 (kind unavailable, retry_after). The page, state, config and service status never wait for a slot.
+X_SLOTS = int(os.environ.get("TERMINAL_X_SLOTS", "24") or 24)
+X_WAIT = 5.0
+X_RETRY_AFTER = 5
+_x_slots = threading.BoundedSemaphore(X_SLOTS)
 
 # The product name shown in the browser title and the sidebar. Renaming the product is this one line
 # (static/app.js has the same name only as a fallback for the moment before /api/config answers).
@@ -279,6 +285,8 @@ def service_status() -> dict:
         else:
             out[name] = {"state": "not started"}
     out["restart"] = restart_snap
+    out["ui_threads"] = threading.active_count()
+    out["x_slots"] = {"max": X_SLOTS, "free": getattr(_x_slots, "_value", None)}
     return out
 
 
@@ -489,6 +497,27 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"detail": "not found"})
         self._send(200, data, ctype, cache, h)
 
+    def _run_view(self, name: str, params: dict):
+        """Run one view (inside an admission slot) and answer: the envelope on success, the error object otherwise."""
+        try:
+            result = composite.dispatch(name, params)
+        except composite.CompositeError as e:
+            # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
+            # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
+            kind = contract.kind_of(e)
+            code = e.status or contract.STATUS_BY_KIND[kind]
+            return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,
+                                                        sources=_safe_sources(name, params), user_message=True))
+        except Exception as e:  # noqa: BLE001
+            # A TypeError/ValueError raised inside a view is a defect: logged with a ref.
+            ref = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:6]
+            log(f"view {name} failed (ref {ref}): {type(e).__name__}: {e}\n" + redact(traceback.format_exc()))
+            return self._json(500, contract.error_body("internal", f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).",
+                                                       sources=_safe_sources(name, params), ref=ref))
+        if isinstance(result, dict) and ("_frame" in result or "_message" in result):
+            return self._frame_answer(result)
+        return self._json(200, result)
+
     def _host_ok(self) -> bool:
         """Only requests addressed to this computer by name are answered (blocks DNS-rebinding pages)."""
         return self.headers.get("Host", "").strip().lower() in allowed_hosts(self.server.server_address[1])
@@ -545,24 +574,14 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "", keep_blank_values=False)
             params = {k: v[-1] for k, v in query.items()}
             name = path[3:].strip("/")
+            if not _x_slots.acquire(timeout=X_WAIT):
+                return self._json(503, contract.error_body(
+                    "unavailable", "The terminal is busy with other cards; this one retries shortly.", retry_after=X_RETRY_AFTER,
+                    sources=_safe_sources(name, params), user_message=True), headers={"Retry-After": str(X_RETRY_AFTER)})
             try:
-                result = composite.dispatch(name, params)
-            except composite.CompositeError as e:
-                # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
-                # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
-                kind = contract.kind_of(e)
-                code = e.status or contract.STATUS_BY_KIND[kind]
-                return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,
-                                                            sources=_safe_sources(name, params), user_message=True))
-            except Exception as e:  # noqa: BLE001
-                # A TypeError/ValueError raised inside a view is a defect: logged with a ref.
-                ref = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:6]
-                log(f"view {name} failed (ref {ref}): {type(e).__name__}: {e}\n" + redact(traceback.format_exc()))
-                return self._json(500, contract.error_body("internal", f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).",
-                                                           sources=_safe_sources(name, params), ref=ref))
-            if isinstance(result, dict) and ("_frame" in result or "_message" in result):
-                return self._frame_answer(result)
-            return self._json(200, result)
+                return self._run_view(name, params)
+            finally:
+                _x_slots.release()
         if path == "/api/state":
             if not self._same_origin():
                 return self._json(403, {"detail": "cross-origin request refused"})
@@ -590,7 +609,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(target)
         return self._json(404, {"detail": "not found"})
 
-    do_HEAD = do_GET
+    def do_HEAD(self):
+        """HEAD never runs a view (it would compute a whole answer to throw it away); other paths answer as GET."""
+        if self.path.split("?", 1)[0].startswith("/x/"):
+            if not self._guard():
+                return None
+            return self._json(405, {"detail": "HEAD is not supported for views; use GET."}, headers={"Allow": "GET"})
+        return self.do_GET()
 
     def _body(self, limit: int):
         try:
