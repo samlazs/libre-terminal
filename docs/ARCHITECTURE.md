@@ -34,6 +34,7 @@ scripts/check_sources.py     source-contract check (--offline or live; checks bu
 scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding/lint/hygiene checks
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
+scripts/gate.py              release gate G1-G5 (launcher.py gate) -> local/notes/gates-YYYY-MM-DD.json
 scripts/probe.py             stdlib live probe of a running terminal: status counts, p50/p95 latency, envelope checks per view
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
 terminal/server.py           UI server: static page, dashboards, saved state, service status and restart, /x/* views (see UI server)
@@ -236,6 +237,7 @@ python scripts/launcher.py smoke                       # live data checks agains
 python scripts/launcher.py health --dry-run            # paced card health runner (add --phase/--filter/--limit/--resume)
 python scripts/check_sources.py [--offline]            # source-contract check (live or against recorded catalogs)
 python scripts/probe.py --view snapshot --inputs symbol=AAPL symbol=SAP.DE --concurrent 8 --assert-envelope
+python scripts/launcher.py gate [--only G1,G4] [--offline]  # release gate G1-G5; exit 0 only when no gate failed
 python scripts/probe.py --all-routes --defaults        # every /x/ view in /widgets.json with its default parameters
 python scripts/probe.py --backend v5 --url /PATH       # raw /api/v1 calls: status counts and latency per URL
 ```
@@ -262,6 +264,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Valuation bands, ROIC/DuPont, risk statistics, bond math, N-PORT overlap, GEX, Max Pain, volatility cone |
 | `test_redact.py`, `test_backend_wrapper.py` | Key redaction, backend guard and sanitized 500s, TradingView bar repair, NaN/Inf scrubbing |
 | `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
+| `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
 | `test_frontend.py` | Runs `frontend_checks.js` (315 browser checks) headless against a temporary UI server |

@@ -17,6 +17,7 @@ Standard library only; works with any Python 3.9 or newer.
   python scripts/launcher.py dashboards                         rebuild local/dashboards.json
   python scripts/launcher.py test    [pattern...] [--fast]      offline checks (scripts/tests/run_all.py)
   python scripts/launcher.py check   [--live-sources]           encoding/EOL, syntax, ruff, hygiene, source & note checks
+  python scripts/launcher.py gate    [--only G1,G4] [--offline]  release gate G1-G5 -> local/notes/gates-YYYY-MM-DD.json
   python scripts/launcher.py snapshot [--label NAME] [--force]  create a snapshot zip in local/snapshots/
   python scripts/launcher.py diff    [SNAPSHOT] [--stat]        diff working tree against the latest (or given) snapshot
   python scripts/launcher.py run {v5,v4,ui}                     one service in the foreground (restarts after any abnormal exit)
@@ -926,6 +927,21 @@ def cmd_test(a):
     return subprocess.run(cmd, cwd=ROOT).returncode
 
 
+def cmd_gate(a):
+    """Release gate G1-G5 (scripts/gate.py) -> local/notes/gates-YYYY-MM-DD.json."""
+    p = resolve_ports(a)
+    py = venv_python("v5")
+    cmd = [str(py) if py.exists() else sys.executable, str(ROOT / "scripts" / "gate.py"),
+           "--ui-port", str(p["ui"]), "--v5-port", str(p["v5"])]
+    if a.only:
+        cmd += ["--only", a.only]
+    if a.offline:
+        cmd.append("--offline")
+    if a.health_limit:
+        cmd += ["--health-limit", str(a.health_limit)]
+    return subprocess.run(cmd, cwd=ROOT, env=child_env(p)).returncode
+
+
 def _run_project_check(args: list[str]) -> int:
     py = venv_python("v5")
     exe = str(py) if py.exists() else sys.executable
@@ -1048,6 +1064,10 @@ def main():
     s.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend)")
     s.add_argument("-j", "--jobs", type=int, default=None, help="parallel worker count")
     s.add_argument("--fail-fast", action="store_true", help="stop after first failure")
+    s = sub.add_parser("gate", parents=[ports], help="release gate G1-G5 -> local/notes/gates-YYYY-MM-DD.json (exit 0 = no gate failed)")
+    s.add_argument("--only", default=None, help="comma-separated gates, e.g. G1,G4")
+    s.add_argument("--offline", action="store_true", help="only checks that need no running terminal; live parts are marked manual")
+    s.add_argument("--health-limit", type=int, default=0, help="cap the G2 health run to N unique URLs (0 = all)")
     s = sub.add_parser("check", help="run encoding, syntax, ruff, hygiene, source, state, and note checks")
     s.add_argument("--live-sources", action="store_true", help="check sources against live backends")
     s = sub.add_parser("snapshot", help="create a snapshot zip in local/snapshots/")
@@ -1063,7 +1083,7 @@ def main():
     local_paths.ensure()        # create local/ (or move an old layout into it) before anything reads or writes there
     handler = {"install": cmd_install, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "status": cmd_status,
                "logs": cmd_logs, "keys": cmd_keys, "smoke": cmd_smoke, "health": cmd_health, "dashboards": cmd_dashboards,
-               "test": cmd_test, "check": cmd_check, "snapshot": cmd_snapshot, "diff": cmd_diff, "run": cmd_run}[a.cmd]
+               "test": cmd_test, "gate": cmd_gate, "check": cmd_check, "snapshot": cmd_snapshot, "diff": cmd_diff, "run": cmd_run}[a.cmd]
     return handler(a) or 0
 
 

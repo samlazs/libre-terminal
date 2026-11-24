@@ -52,14 +52,16 @@ def parse_inputs(values: list[str] | None) -> list[dict]:
     return out
 
 
-def envelope_violations(status: int, body) -> list[str]:
-    """The response contract every /x/* answer must meet: a JSON object; on 200 a non-empty 'sources' list; on any
-    error status a 'detail' text."""
+def envelope_violations(status: int, body, require_as_of: bool = False) -> list[str]:
+    """The response contract every /x/* answer must meet: a JSON object; on 200 a non-empty 'sources' list (and, with
+    require_as_of, an 'as_of' date or an 'as_of_na' reason); on any error status a 'detail' text."""
     if not isinstance(body, dict):
         return [f"{status} body is not a JSON object"]
     out = []
     if status == 200 and not body.get("sources"):
         out.append("200 without sources")
+    if status == 200 and require_as_of and not (body.get("as_of") or body.get("as_of_na")):
+        out.append("200 without as_of or as_of_na")
     if status >= 400 and not str(body.get("detail") or "").strip():
         out.append(f"{status} without detail")
     return out
@@ -146,6 +148,7 @@ def main(argv=None) -> int:
     ap.add_argument("--concurrent", type=int, default=1, help="requests in flight at once")
     ap.add_argument("--repeat", type=int, default=1, help="ask each view/input pair this many times")
     ap.add_argument("--assert-envelope", action="store_true", help="count envelope violations as failures")
+    ap.add_argument("--require-as-of", action="store_true", help="a 200 must also carry as_of or as_of_na (with --assert-envelope)")
     ap.add_argument("--all-routes", action="store_true", help="every /x/ view listed in /widgets.json")
     ap.add_argument("--defaults", action="store_true", help="use each widget's default parameters (with --all-routes)")
     ap.add_argument("--allow", default="200", help="comma-separated statuses that count as success (default 200)")
@@ -198,7 +201,7 @@ def main(argv=None) -> int:
                 detail = body.get("detail") if isinstance(body, dict) else body
                 r["bad"].append(f"{status} {redact_url(url.split('/', 3)[-1])}: {str(detail or '')[:120]}")
             if not a.backend and isinstance(status, int):
-                r["viol"] += [f"{v} ({redact_url(url.split('/', 3)[-1])})" for v in envelope_violations(status, body)]
+                r["viol"] += [f"{v} ({redact_url(url.split('/', 3)[-1])})" for v in envelope_violations(status, body, a.require_as_of)]
     failed = False
     for key in sorted(results):
         r = results[key]
