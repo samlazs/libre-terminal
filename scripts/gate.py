@@ -236,10 +236,25 @@ def probe_all(ctx, *extra) -> tuple[int, list[str]]:
                 "--ui-port", str(ctx.ui_port), *extra], 1800)
 
 
+def critical_patch_failures(run_dir: Path | None = None) -> list[str]:
+    """'<backend>:<patch id>' for every critical runtime fix a backend could not apply at its last start."""
+    out = []
+    for f in sorted((run_dir or local_dir() / "run").glob("patches-*.json")):
+        try:
+            st = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        out += [f"{f.stem[len('patches-'):]}:{pid}" for pid in st.get("critical_failed") or []]
+    return out
+
+
 def gate_g2(ctx) -> tuple[str, list[str]]:
     if ctx.offline:
         return "manual", ["health run, cold start and route probe need the running terminal"]
     ev, ok = [], True
+    crit = critical_patch_failures()
+    ok &= not crit
+    ev.append(f"critical backend fixes not applied: {len(crit)}" + (f" ({', '.join(crit)})" if crit else ""))
     cmd = [py_exe(), ROOT / "scripts" / "health_check.py", "--phase", "all", "--skip-v4", "--limit", str(ctx.health_limit)]
     rc, lines = run(cmd, 4 * 3600, env=dict(os.environ, TERMINAL_UI_PORT=str(ctx.ui_port), TERMINAL_V5_PORT=str(ctx.v5_port)))
     ok &= rc == 0

@@ -193,6 +193,14 @@ nothing covers it the card says so and names what each source covers.
 
 ## Runtime patches (`scripts/run_backend.py`)
 
+Every fix is one entry of the `PATCHES` registry: `Patch(id, title, install, critical, targets)`. `apply_fixes`
+installs them in registry order and records each outcome; `patches-<name>.json` (local/run/) lists id, title,
+applied, why, critical, the installed versions of the target packages and, when a version is outside the range in
+`VERIFIED`, `unverified for <pkg> <ver>`. Critical fixes (thread offload, fetch cache, route offload, Yahoo crumb
+guard, Nasdaq rate limit, request guard) that fail turn Data status red with a banner and fail `launcher.py gate`
+G2. `test_patch_registry.py` checks unique ids, that every `install_*` function is registered once, and that all
+patches apply on the installed `.venv-v5`.
+
 Applied in memory at start; no installed file is modified.
 
 - Synchronous fetchers run in worker threads, so one slow source cannot freeze the event loop.
@@ -298,6 +306,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_contract.py` | Response envelope for every route (success, CompositeError, defect), parameter checks, one error object on `/api/*` |
 | `test_errors.py` | Fault kind to error kind table (HTTP layer and real server), Retry-After, server-side classification |
 | `test_http.py` | Outbound client: provider policies, 429 cooldown without I/O, Retry-After cap, concurrency peak, pacing, outage gate |
+| `test_patch_registry.py` | Backend patch registry: unique ids, every installer registered, version ranges, status records, critical banner |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |

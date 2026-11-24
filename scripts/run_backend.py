@@ -25,11 +25,13 @@ import faulthandler
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
 import urllib.request
 import weakref
+from typing import NamedTuple
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -3466,320 +3468,214 @@ def write_patch_status(name: str, applied: list):
         local_paths.RUN_DIR.mkdir(parents=True, exist_ok=True)
         path = local_paths.RUN_DIR / f"patches-{name}.json"
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "applied": applied, "failed": FAILED_PATCHES}), encoding="utf-8")
+        tmp.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "applied": applied, "failed": FAILED_PATCHES,
+                                   "patches": PATCH_RESULTS,
+                                   "critical_failed": [r["id"] for r in PATCH_RESULTS if r["critical"] and not r["applied"]]}), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
         say(f"[fixes] could not write the patch status: {e}")
 
 
-def apply_fixes():
-    """Fixes found 2026-11-13..15 (stack dumps, crash logs, reviews in local/notes/). Returns the list applied."""
-    applied = []
-    try:
-        install_thread_offload(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("sync fetchers off the event loop", e)
-    try:
-        install_fetch_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("disk cache for slow sources", e)
-    try:
-        install_futures_curve_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("futures curves in their own thread", e)
-    try:
-        install_fred_keyless(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("FRED series without a key", e)
+def install_oecd_fail_fast(applied: list):
+    """OECD answers 429 when its hourly quota is used: fail fast with a plain message instead of retrying."""
+    import inspect
 
-    try:
-        import inspect
+    from openbb_oecd.utils import query_builder as qb
 
-        from openbb_oecd.utils import query_builder as qb
+    def _make_request(url, headers=None, timeout=30):
+        import requests
 
-        def _make_request(url, headers=None, timeout=30):
-            import requests
+        req = requests.Request("GET", url, headers=headers or {})
+        prepared = req.prepare()
+        prepared.url = url                      # OECD needs the brackets un-encoded
+        with requests.Session() as sess:
+            resp = sess.send(prepared, timeout=min(timeout or 30, 60))
+        if resp.status_code == 429:
+            raise _OecdRateLimited(resp.headers.get("Retry-After") or "")
+        resp.raise_for_status()
+        return resp
 
-            req = requests.Request("GET", url, headers=headers or {})
-            prepared = req.prepare()
-            prepared.url = url                      # OECD needs the brackets un-encoded
-            with requests.Session() as sess:
-                resp = sess.send(prepared, timeout=min(timeout or 30, 60))
-            if resp.status_code == 429:
-                raise _OecdRateLimited(resp.headers.get("Retry-After") or "")
-            resp.raise_for_status()
-            return resp
+    qb._make_request = _make_request
+    builder = next(v for v in vars(qb).values() if inspect.isclass(v) and hasattr(v, "_fetch_with_multi_value_fallback") and hasattr(v, "fetch_data"))
+    original = builder.fetch_data
 
-        qb._make_request = _make_request
-        builder = next(v for v in vars(qb).values() if inspect.isclass(v) and hasattr(v, "_fetch_with_multi_value_fallback") and hasattr(v, "fetch_data"))
-        original = builder.fetch_data
+    def fetch_data(self, *args, **kwargs):
+        try:
+            return original(self, *args, **kwargs)
+        except _OecdRateLimited as e:
+            wait = f" OECD asks to wait {e} seconds." if str(e).isdigit() else ""
+            raise qb.OpenBBError("OECD rate limit reached (HTTP 429). OECD allows only a limited number of requests per hour." + wait
+                                 + " Try again later, or switch source on this card.") from None
 
-        def fetch_data(self, *args, **kwargs):
-            try:
-                return original(self, *args, **kwargs)
-            except _OecdRateLimited as e:
-                wait = f" OECD asks to wait {e} seconds." if str(e).isdigit() else ""
-                raise qb.OpenBBError("OECD rate limit reached (HTTP 429). OECD allows only a limited number of requests per hour." + wait
-                                     + " Try again later, or switch source on this card.") from None
+    builder.fetch_data = fetch_data
+    applied.append("OECD fails fast on rate limit")
 
-        builder.fetch_data = fetch_data
-        applied.append("OECD fails fast on rate limit")
-    except Exception as e:  # noqa: BLE001  (the V4 package is laid out differently)
-        _not_applied("OECD fails fast on rate limit", e)
+
+def install_eia_row_cap(applied: list):
+    """EIA: cap rows unless a limit is set, retry its cold-cache 504s, at most four calls in flight."""
     # EIA (found 2026-11-14): every EIA dataset widget asks for *all* rows by default. One card could pull
     # 195,000 rows (67 MB) as 39 simultaneous page requests with a 10 s timeout each; a tab of them made EIA's API
     # time out. Unless the caller sets a limit, return the most recent rows only. EIA's gateway also answers 504
     # after 10 s on a cold query and then serves the same query quickly from its cache, so retry, and keep at most
     # four EIA calls in flight. The data browser imports paginate by name, so it is patched there too.
+    from openbb_us_eia.utils import api_query as aq
+
+    auto_rows = int(os.environ.get("OPENBB_EIA_AUTO_ROWS", "5000"))      # one page = one EIA request per card
+    page_size = aq.PAGE_SIZE
+
+    gate_box = []
+
+    async def paginate(build_url, request, limit, amake_request, amake_requests, response_callback):
+        import asyncio
+
+        from openbb_core.app.model.abstract.error import OpenBBError
+        from openbb_core.provider.utils.errors import EmptyDataError
+
+        if not gate_box:
+            gate_box.append(asyncio.Semaphore(4))
+
+        async def get(url):
+            last = None
+            for attempt in range(3):
+                try:
+                    async with gate_box[0]:
+                        return await amake_request(url, response_callback=response_callback, timeout=25)
+                except (OpenBBError, EmptyDataError):
+                    raise                       # a real API answer (bad filter, bad key): do not retry
+                except Exception as e:  # noqa: BLE001  (timeout or EIA's 504 page)
+                    last = e
+                    await asyncio.sleep(1.5 * (attempt + 1))
+            raise OpenBBError("EIA's API did not answer (timed out three times). It is usually slow on the first request for a dataset; try again in a minute.") from last
+
+        req = dict(request)
+        cap = limit
+        if limit is None:
+            cap = auto_rows
+            req["sort"] = "desc"            # newest first, so the automatic cap keeps the latest data
+        response = await get(build_url(req, offset=0, length=min(cap, page_size)))
+        payload = response.get("response", {})
+        rows = list(payload.get("data", []))
+        total = int(payload.get("total") or 0)
+        if total == 0 or not rows:
+            raise EmptyDataError(await aq.empty_result_message(request, amake_request, response_callback))
+        target = min(cap, total)
+        if len(rows) < target:
+            async def page(offset):
+                r = await get(build_url(req, offset=offset, length=min(page_size, target - offset)))
+                return r.get("response", {}).get("data", [])
+
+            for part in await asyncio.gather(*(page(o) for o in range(len(rows), target, page_size))):
+                rows.extend(part)
+        return {"rows": rows[:target], "total": total, "date_format": payload.get("dateFormat")}
+
+    aq.paginate = paginate
     try:
-        from openbb_us_eia.utils import api_query as aq
+        from openbb_us_eia.models import data_browser as _db
+        _db.paginate = paginate
+    except Exception as e:  # noqa: BLE001
+        _not_applied("EIA row cap in the EIA data browser", e)
+    applied.append(f"EIA returns the latest {auto_rows:,} rows unless a limit is set")
 
-        auto_rows = int(os.environ.get("OPENBB_EIA_AUTO_ROWS", "5000"))      # one page = one EIA request per card
-        page_size = aq.PAGE_SIZE
 
-        gate_box = []
+class Patch(NamedTuple):
+    """One runtime fix. install(applied) raises on failure (it may add plain-text lines to `applied`); critical fixes
+    keep the backend safe or responsive, and a failure is shown in red on Data status and fails the release gate.
+    targets: distribution -> version range the fix was verified against (">=2.0,<2.1"); outside it the fix is
+    reported as unverified."""
+    id: str
+    title: str
+    install: object
+    critical: bool = False
+    targets: dict = {}
 
-        async def paginate(build_url, request, limit, amake_request, amake_requests, response_callback):
-            import asyncio
 
-            from openbb_core.app.model.abstract.error import OpenBBError
-            from openbb_core.provider.utils.errors import EmptyDataError
+# distribution -> version range every fix below was verified against (V5 environment, 2026-11-24)
+VERIFIED = {
+    "openbb-core": ">=2.0,<2.1", "openbb-platform-api": ">=2.0,<2.1", "openbb-mcp-server": ">=2.0,<2.1",
+    "openbb-yfinance": ">=2.1,<2.2", "yfinance": ">=1.8,<1.9", "openbb-oecd": ">=2.0,<2.1", "openbb-us-eia": ">=2.0,<2.1",
+    "openbb-fred": ">=2.0,<2.1", "openbb-nasdaq": ">=2.0,<2.1", "openbb-cboe": ">=2.0,<2.1", "openbb-tmx": ">=2.0,<2.1",
+    "openbb-sec": ">=2.0,<2.1", "openbb-imf": ">=3.0,<3.1", "openbb-cftc": ">=2.0,<2.1", "openbb-deribit": ">=2.0,<2.1",
+    "openbb-government-us": ">=2.0,<2.1", "openbb-federal-reserve": ">=2.0,<2.1", "openbb-congress-gov": ">=2.0,<2.1",
+    "fastapi": ">=0.162,<0.163", "uvicorn": ">=0.54,<0.55", "aiohttp": ">=3.14,<3.15",
+}
 
-            if not gate_box:
-                gate_box.append(asyncio.Semaphore(4))
 
-            async def get(url):
-                last = None
-                for attempt in range(3):
-                    try:
-                        async with gate_box[0]:
-                            return await amake_request(url, response_callback=response_callback, timeout=25)
-                    except (OpenBBError, EmptyDataError):
-                        raise                       # a real API answer (bad filter, bad key): do not retry
-                    except Exception as e:  # noqa: BLE001  (timeout or EIA's 504 page)
-                        last = e
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                raise OpenBBError("EIA's API did not answer (timed out three times). It is usually slow on the first request for a dataset; try again in a minute.") from last
+def _targets(*dists) -> dict:
+    return {d: VERIFIED[d] for d in dists}
 
-            req = dict(request)
-            cap = limit
-            if limit is None:
-                cap = auto_rows
-                req["sort"] = "desc"            # newest first, so the automatic cap keeps the latest data
-            response = await get(build_url(req, offset=0, length=min(cap, page_size)))
-            payload = response.get("response", {})
-            rows = list(payload.get("data", []))
-            total = int(payload.get("total") or 0)
-            if total == 0 or not rows:
-                raise EmptyDataError(await aq.empty_result_message(request, amake_request, response_callback))
-            target = min(cap, total)
-            if len(rows) < target:
-                async def page(offset):
-                    r = await get(build_url(req, offset=offset, length=min(page_size, target - offset)))
-                    return r.get("response", {}).get("data", [])
 
-                for part in await asyncio.gather(*(page(o) for o in range(len(rows), target, page_size))):
-                    rows.extend(part)
-            return {"rows": rows[:target], "total": total, "date_format": payload.get("dateFormat")}
+def _vtuple(v: str) -> tuple:
+    out = []
+    for part in str(v).split("."):
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        out.append(int(m.group(0)))
+    return tuple(out)
 
-        aq.paginate = paginate
+
+def version_in(ver: str, spec: str) -> bool:
+    """Is version `ver` inside a ">=a,<b" style range (also ==, <=, >)? Numeric parts only."""
+    v = _vtuple(ver)
+    for cond in [c.strip() for c in str(spec).split(",") if c.strip()]:
+        m = re.match(r"(>=|<=|==|>|<)\s*(.+)$", cond)
+        if not m:
+            return False
+        op, ref = m.group(1), _vtuple(m.group(2))
+        n = max(len(v), len(ref))
+        a, b = v + (0,) * (n - len(v)), ref + (0,) * (n - len(ref))
+        if not {">=": a >= b, "<=": a <= b, "==": a == b, ">": a > b, "<": a < b}[op]:
+            return False
+    return True
+
+
+def _dist_version(dist: str):
+    try:
+        import importlib.metadata as md
+        return md.version(dist)
+    except Exception:  # noqa: BLE001  (not installed in this environment)
+        return None
+
+
+PATCH_RESULTS: list = []
+_GUARD_PORT = ["6900"]
+
+
+def _install_guard_patch(applied: list):
+    install_guard(_GUARD_PORT[0])
+
+
+_install_guard_patch._wraps = "install_guard"
+
+
+def apply_fixes():
+    """Install every fix in PATCHES (order matters, see the registry) and record the outcome of each one in
+    PATCH_RESULTS. Returns the plain-text lines the fixes added (the same list Data status shows)."""
+    applied = []
+    PATCH_RESULTS.clear()
+    for patch in PATCHES:
+        rec = {"id": patch.id, "title": patch.title, "critical": bool(patch.critical), "applied": False, "why": "", "versions": {}}
+        unverified = []
+        for dist, spec in patch.targets.items():
+            ver = _dist_version(dist)
+            rec["versions"][dist] = ver
+            if ver and not version_in(ver, spec):
+                unverified.append(f"unverified for {dist} {ver}")
+        if unverified:
+            rec["unverified"] = "; ".join(unverified)
+        before = len(applied)
         try:
-            from openbb_us_eia.models import data_browser as _db
-            _db.paginate = paginate
+            patch.install(applied)
+            rec["applied"] = True
+            rec["detail"] = applied[before:]
         except Exception as e:  # noqa: BLE001
-            _not_applied("EIA row cap in the EIA data browser", e)
-        applied.append(f"EIA returns the latest {auto_rows:,} rows unless a limit is set")
-    except Exception as e:  # noqa: BLE001  (not installed in the V4 environment in this form)
-        _not_applied("EIA row cap and retries", e)
-    try:
-        install_imf_arcgis_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("IMF PortWatch ArcGIS error checks", e)
-    try:
-        install_tmx_filings_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX SEDAR+ filings missing description coercion", e)
-    try:
-        install_yfinance_losers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo Finance top losers filter", e)
-    try:
-        install_sec_quarters_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC company facts quarters from year-to-date chains", e)
-    try:
-        install_fx_session_closes(applied)          # before the Montreal-time patch: it reads hourly bars in UTC
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo FX daily closes", e)
-    try:
-        install_montreal_times(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Montreal time for Yahoo intraday bars and Nasdaq Nordic notices", e)
-    try:
-        install_nasdaq_etf_fallback(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq ETF fallback for quotes, profiles, history and short interest", e)
-    try:
-        install_sec_growth_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC growth units, adjacent quarters and TTM growth", e)
-    try:
-        install_yfinance_price_target_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo analyst actions order and empty price targets", e)
-    try:
-        install_yfinance_futures_curve_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo futures curve prices (one-sided quotes, untraded months)", e)
-    try:
-        install_yfinance_fund_multiples_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo fund multiples", e)
-    try:
-        install_yfinance_recommendations_months(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo recommendations readable months", e)
-    try:
-        install_tmx_holdings_currency_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX ETF holdings currency", e)
-    try:
-        install_tmx_asset_info_escape_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX Asset Info escaping", e)
-    try:
-        install_congress_search_bill_id(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Congressional search bill id", e)
-    try:
-        install_fred_bond_index_unit(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("FRED bond index unit column", e)
-    try:
-        install_tmx_quote_symbol_order(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX quote symbol order", e)
-    try:
-        install_cboe_chain_symbols(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe chain contract symbols", e)
-    try:
-        install_cboe_options_fallback(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe options analytics fallback", e)
-    try:
-        install_cboe_settlement_date(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe settlement session date", e)
-    try:
-        install_cboe_market_fallbacks(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe market fallbacks", e)
-    try:
-        install_cds_spread_bp(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("CFTC CDS spread in bp", e)
-    try:
-        install_usaspending_format(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("USAspending page amounts", e)
-    try:
-        install_imf_table_scale_label(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("IMF presentation table scale label", e)
-    try:
-        install_oecd_dataflow_list(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("OECD dataflow list", e)
-    try:
-        install_cot_search_aliases(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("COT search aliases", e)
-    try:
-        install_sec_fact_any_tag(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC company facts tags", e)
-    try:
-        install_deribit_funding_apr(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Deribit funding APR", e)
-    try:
-        install_deribit_book_ladder(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Deribit order book ladder", e)
-    try:
-        install_eia_aeo_identified(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("EIA AEO unnamed rows", e)
-    try:
-        install_eia_grid_hours(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("EIA grid hours", e)
-    try:
-        install_oecd_gdp_units(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("OECD GDP unit column", e)
-    try:
-        install_rescales(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("unit rescales (Nasdaq ratios, TMX short interest)", e)
-    try:
-        install_blocking_route_offload(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("blocking route event-loop offload", e)
-    try:
-        install_session_leak_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("WeakSet ClientSession cleanup", e)
-    try:
-        install_disable_mcp_subprocesses(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("disable background MCP subprocesses", e)
-    try:
-        install_yfinance_crumb_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo Finance crumb guard and 401 recovery", e)
-    try:
-        install_yfinance_options_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("YFinance options chains recovery", e)
-    try:
-        install_tmx_gainers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX gainers missing longName fix", e)
-    try:
-        install_nasdaq_empty_json_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq empty JSON recovery", e)
-    try:
-        install_nasdaq_rate_limit_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq rate-limit and transport guard", e)
-    try:
-        install_user_settings_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("user_settings.json mtime cache", e)
-    try:
-        install_tmx_movers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX market movers ranking", e)
-    try:
-        install_tmx_asset_info_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX asset info cache", e)
-    try:
-        install_tvchart_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TradingView chart cache & loading indicator", e)
-    try:
-        install_fx_chart_fix(applied)          # after the chart cache, which calls the history function it replaces
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TradingView FX closes", e)
-    try:
-        install_cot_canada(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("COT Canadian dollar", e)
+            _not_applied(patch.title, e)
+            rec["why"] = FAILED_PATCHES[-1]["why"]
+        PATCH_RESULTS.append(rec)
     say("[fixes] " + ("; ".join(applied) if applied else "none applied"))
+    bad = [r["title"] for r in PATCH_RESULTS if r["critical"] and not r["applied"]]
+    if bad:
+        say("[fixes] CRITICAL fixes not applied: " + "; ".join(bad))
     return applied
 
 
@@ -5702,6 +5598,65 @@ def install_guard(port: str):
     uc.Config.load = load
 
 
+# Every runtime fix, in the order it is installed (the order matters where noted on the installer).
+PATCHES = [
+    Patch("thread_offload", "sync fetchers off the event loop", install_thread_offload, critical=True, targets=_targets("openbb-core")),
+    Patch("fetch_cache", "disk cache for slow sources", install_fetch_cache, critical=True, targets=_targets("openbb-core")),
+    Patch("futures_curve_fix", "futures curves in their own thread", install_futures_curve_fix, targets=_targets("openbb-yfinance")),
+    Patch("fred_keyless", "FRED series without a key", install_fred_keyless, targets=_targets("openbb-fred")),
+    Patch("oecd_fail_fast", "OECD fails fast on rate limit", install_oecd_fail_fast, targets=_targets("openbb-oecd")),
+    Patch("eia_row_cap", "EIA row cap and retries", install_eia_row_cap, targets=_targets("openbb-us-eia")),
+    Patch("imf_arcgis_fix", "IMF PortWatch ArcGIS error checks", install_imf_arcgis_fix, targets=_targets("openbb-imf")),
+    Patch("tmx_filings_fix", "TMX SEDAR+ filings missing description coercion", install_tmx_filings_fix, targets=_targets("openbb-tmx")),
+    Patch("yfinance_losers_fix", "Yahoo Finance top losers filter", install_yfinance_losers_fix, targets=_targets("openbb-yfinance")),
+    Patch("sec_quarters_fix", "SEC company facts quarters from year-to-date chains", install_sec_quarters_fix, targets=_targets("openbb-sec")),
+    Patch("fx_session_closes", "Yahoo FX daily closes", install_fx_session_closes, targets=_targets("openbb-yfinance")),
+    Patch("montreal_times", "Montreal time for Yahoo intraday bars and Nasdaq Nordic notices", install_montreal_times, targets=_targets("openbb-yfinance", "openbb-nasdaq")),
+    Patch("nasdaq_etf_fallback", "Nasdaq ETF fallback for quotes, profiles, history and short interest", install_nasdaq_etf_fallback, targets=_targets("openbb-nasdaq")),
+    Patch("sec_growth_fix", "SEC growth units, adjacent quarters and TTM growth", install_sec_growth_fix, targets=_targets("openbb-sec")),
+    Patch("yfinance_price_target_fix", "Yahoo analyst actions order and empty price targets", install_yfinance_price_target_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_futures_curve_fix", "Yahoo futures curve prices (one-sided quotes, untraded months)", install_yfinance_futures_curve_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_fund_multiples_fix", "Yahoo fund multiples", install_yfinance_fund_multiples_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_recommendations_months", "Yahoo recommendations readable months", install_yfinance_recommendations_months, targets=_targets("openbb-yfinance")),
+    Patch("tmx_holdings_currency_fix", "TMX ETF holdings currency", install_tmx_holdings_currency_fix, targets=_targets("openbb-tmx")),
+    Patch("tmx_asset_info_escape_fix", "TMX Asset Info escaping", install_tmx_asset_info_escape_fix, targets=_targets("openbb-tmx")),
+    Patch("congress_search_bill_id", "Congressional search bill id", install_congress_search_bill_id, targets=_targets("openbb-congress-gov")),
+    Patch("fred_bond_index_unit", "FRED bond index unit column", install_fred_bond_index_unit, targets=_targets("openbb-fred")),
+    Patch("tmx_quote_symbol_order", "TMX quote symbol order", install_tmx_quote_symbol_order, targets=_targets("openbb-tmx")),
+    Patch("cboe_chain_symbols", "Cboe chain contract symbols", install_cboe_chain_symbols, targets=_targets("openbb-cboe")),
+    Patch("cboe_options_fallback", "Cboe options analytics fallback", install_cboe_options_fallback, targets=_targets("openbb-cboe")),
+    Patch("cboe_settlement_date", "Cboe settlement session date", install_cboe_settlement_date, targets=_targets("openbb-cboe")),
+    Patch("cboe_market_fallbacks", "Cboe market fallbacks", install_cboe_market_fallbacks, targets=_targets("openbb-cboe")),
+    Patch("cds_spread_bp", "CFTC CDS spread in bp", install_cds_spread_bp, targets=_targets("openbb-cftc")),
+    Patch("usaspending_format", "USAspending page amounts", install_usaspending_format, targets=_targets("openbb-government-us")),
+    Patch("imf_table_scale_label", "IMF presentation table scale label", install_imf_table_scale_label, targets=_targets("openbb-imf")),
+    Patch("oecd_dataflow_list", "OECD dataflow list", install_oecd_dataflow_list, targets=_targets("openbb-oecd")),
+    Patch("cot_search_aliases", "COT search aliases", install_cot_search_aliases, targets=_targets("openbb-cftc")),
+    Patch("sec_fact_any_tag", "SEC company facts tags", install_sec_fact_any_tag, targets=_targets("openbb-sec")),
+    Patch("deribit_funding_apr", "Deribit funding APR", install_deribit_funding_apr, targets=_targets("openbb-deribit")),
+    Patch("deribit_book_ladder", "Deribit order book ladder", install_deribit_book_ladder, targets=_targets("openbb-deribit")),
+    Patch("eia_aeo_identified", "EIA AEO unnamed rows", install_eia_aeo_identified, targets=_targets("openbb-us-eia")),
+    Patch("eia_grid_hours", "EIA grid hours", install_eia_grid_hours, targets=_targets("openbb-us-eia")),
+    Patch("oecd_gdp_units", "OECD GDP unit column", install_oecd_gdp_units, targets=_targets("openbb-oecd")),
+    Patch("rescales", "unit rescales (Nasdaq ratios, TMX short interest)", install_rescales, targets=_targets("openbb-nasdaq", "openbb-tmx")),
+    Patch("blocking_route_offload", "blocking route event-loop offload", install_blocking_route_offload, critical=True, targets=_targets("fastapi", "openbb-platform-api")),
+    Patch("session_leak_fix", "WeakSet ClientSession cleanup", install_session_leak_fix, targets=_targets("aiohttp")),
+    Patch("disable_mcp_subprocesses", "disable background MCP subprocesses", install_disable_mcp_subprocesses, targets=_targets("openbb-mcp-server")),
+    Patch("yfinance_crumb_fix", "Yahoo Finance crumb guard and 401 recovery", install_yfinance_crumb_fix, critical=True, targets=_targets("yfinance", "openbb-yfinance")),
+    Patch("yfinance_options_fix", "YFinance options chains recovery", install_yfinance_options_fix, targets=_targets("yfinance", "openbb-yfinance")),
+    Patch("tmx_gainers_fix", "TMX gainers missing longName fix", install_tmx_gainers_fix, targets=_targets("openbb-tmx")),
+    Patch("nasdaq_empty_json_fix", "Nasdaq empty JSON recovery", install_nasdaq_empty_json_fix, targets=_targets("openbb-nasdaq")),
+    Patch("nasdaq_rate_limit_fix", "Nasdaq rate-limit and transport guard", install_nasdaq_rate_limit_fix, critical=True, targets=_targets("openbb-nasdaq")),
+    Patch("user_settings_cache", "user_settings.json mtime cache", install_user_settings_cache, targets=_targets("openbb-core")),
+    Patch("tmx_movers_fix", "TMX market movers ranking", install_tmx_movers_fix, targets=_targets("openbb-tmx")),
+    Patch("tmx_asset_info_cache", "TMX asset info cache", install_tmx_asset_info_cache, targets=_targets("openbb-tmx")),
+    Patch("tvchart_fix", "TradingView chart cache & loading indicator", install_tvchart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
+    Patch("fx_chart_fix", "TradingView FX closes", install_fx_chart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
+    Patch("cot_canada", "COT Canadian dollar", install_cot_canada, targets=_targets("openbb-cftc")),
+    Patch("guard", "request guard (Host and Origin checks, redacted errors)", _install_guard_patch, critical=True, targets=_targets("uvicorn")),
+]
+
+
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "backend"
     args = sys.argv[2:]
@@ -5710,9 +5665,9 @@ def main():
         faulthandler.enable(file=sys.__stderr__)
     except Exception:  # noqa: BLE001  (no console stream: the watchdog's dumps still work)
         pass
-    write_patch_status(name, apply_fixes())
     port = _arg(args, "--port", "6900")
-    install_guard(port)
+    _GUARD_PORT[0] = port
+    write_patch_status(name, apply_fixes())
     threading.Thread(target=watchdog, args=(name, _arg(args, "--host", "127.0.0.1"), port), daemon=True, name="freeze-watchdog").start()
     sys.argv = ["openbb-api", *args]
     from openbb_platform_api.main import main as openbb_main
