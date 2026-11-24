@@ -40,6 +40,7 @@ from redact import redact  # noqa: E402
 LOGS = local_paths.LOGS_DIR
 RESTART_CODE = 75
 FROZEN_AFTER = float(os.environ.get("OPENBB_FROZEN_AFTER", "45"))     # seconds without any answer
+STARTUP_GRACE = float(os.environ.get("OPENBB_STARTUP_GRACE", "240"))   # seconds allowed before the first answer
 UI_PORT = os.environ.get("TERMINAL_UI_PORT") or "6950"
 BACKEND_CACHE = local_paths.CACHE_DIR / "backend"
 
@@ -190,17 +191,37 @@ def say(msg: str):
         pass
 
 
-def watchdog(name: str, host: str, port: str):
+def _freeze_exit(name: str, why: str):
+    """Write every thread's stack to <name>-freeze-*.txt and exit with RESTART_CODE (the supervisor restarts us)."""
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        dump = LOGS / f"{name}-freeze-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        with open(dump, "w", encoding="utf-8") as f:
+            f.write(f"{name} backend {why}. Thread stacks:\n\n")
+            f.flush()
+            faulthandler.dump_traceback(file=f, all_threads=True)
+        say(f"\n[watchdog] {name} backend {why}; stacks in {dump}; restarting.")
+    finally:
+        os._exit(RESTART_CODE)      # always reached, whatever happened to the output streams
+
+
+def watchdog(name: str, host: str, port: str, startup_grace: float | None = None):
+    """Restart a backend that stops answering, and one that never answers at all: startup (building the API) may take
+    up to STARTUP_GRACE seconds; a startup that hangs longer (an import or lock deadlock) is dumped and restarted too."""
     probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "[::]", "") else host
     url = f"http://{probe_host}:{port}/"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    # wait until the server has answered once (startup builds the API and can take a minute)
+    grace = STARTUP_GRACE if startup_grace is None else float(startup_grace)
+    started = time.time()
+    poll = min(3.0, max(0.2, grace / 4))
     while True:
-        time.sleep(3)
+        time.sleep(poll)
         try:
             opener.open(url, timeout=5).read(1)
             break
         except Exception:  # noqa: BLE001
+            if time.time() - started >= grace:
+                _freeze_exit(name, f"gave no first answer within {int(grace)}s of starting")
             continue
     last_ok = time.time()
     misses = 0
@@ -216,16 +237,7 @@ def watchdog(name: str, host: str, port: str):
             misses += 1
             if misses < 2:
                 continue
-            try:
-                LOGS.mkdir(parents=True, exist_ok=True)
-                dump = LOGS / f"{name}-freeze-{time.strftime('%Y%m%d-%H%M%S')}.txt"
-                with open(dump, "w", encoding="utf-8") as f:
-                    f.write(f"{name} backend stopped answering for {int(time.time() - last_ok)}s. Thread stacks:\n\n")
-                    f.flush()
-                    faulthandler.dump_traceback(file=f, all_threads=True)
-                say(f"\n[watchdog] {name} backend frozen for {int(time.time() - last_ok)}s; stacks in {dump}; restarting.")
-            finally:
-                os._exit(RESTART_CODE)      # always reached, whatever happened to the output streams
+            _freeze_exit(name, f"stopped answering for {int(time.time() - last_ok)}s")
 
 
 class _OecdRateLimited(Exception):

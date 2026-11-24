@@ -64,6 +64,42 @@ check("SECRETVALUE123" not in rec_buf.getvalue() and "SECRETVALUE456" not in rec
 check(any("os._exit(RESTART_CODE)" in seg[:400] for seg in (ROOT / "scripts" / "run_backend.py").read_text(encoding="utf-8").split("finally:")[1:]),
       "watchdog exits in a finally block")
 
+# ---- P1-01: a backend that never answers after starting is dumped and restarted (exit 75), not waited on forever
+import socket as _socket  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+import tempfile as _tempfile  # noqa: E402
+import time as _time  # noqa: E402
+
+check(rb.STARTUP_GRACE == float(os.environ.get("OPENBB_STARTUP_GRACE", "240")), "startup grace defaults to 240 s (env OPENBB_STARTUP_GRACE)")
+_s = _socket.socket()
+_s.bind(("127.0.0.1", 0))
+_dead_port = _s.getsockname()[1]
+_s.close()                                         # nothing listens there: the backend never answers
+_wd_local = _tempfile.mkdtemp(prefix="wd-", dir=os.environ["TERMINAL_LOCAL_DIR"])
+_code = (f"import importlib.util,sys; sys.path[:0]=[{str(ROOT / 'scripts')!r},{str(ROOT / 'terminal')!r}]\n"
+         f"spec=importlib.util.spec_from_file_location('rb', {str(ROOT / 'scripts' / 'run_backend.py')!r})\n"
+         "rb=importlib.util.module_from_spec(spec); spec.loader.exec_module(rb)\n"
+         f"rb.watchdog('v5', '127.0.0.1', '{_dead_port}')\n")
+_t0 = _time.time()
+_r = _subprocess.run([sys.executable, "-c", _code], env=dict(os.environ, OPENBB_STARTUP_GRACE="2", TERMINAL_LOCAL_DIR=_wd_local),
+                     capture_output=True, text=True, timeout=120)
+_elapsed = _time.time() - _t0
+_dumps = list((importlib.import_module("pathlib").Path(_wd_local) / "logs").glob("v5-freeze-*.txt"))
+check(_r.returncode == rb.RESTART_CODE == 75, f"no first answer within the grace -> exit 75 (got {_r.returncode}: {(_r.stderr or '')[-200:]})")
+check(len(_dumps) == 1 and "gave no first answer within 2s" in _dumps[0].read_text(encoding="utf-8")
+      and "Thread" in _dumps[0].read_text(encoding="utf-8"), "the freeze dump names the startup hang and holds the thread stacks")
+check(_elapsed < 60, f"the hang is caught soon after the grace ({_elapsed:.1f} s)")
+_lsrc = (ROOT / "scripts" / "launcher.py").read_text(encoding="utf-8")
+spec_l = importlib.util.spec_from_file_location("launcher_for_wd", ROOT / "scripts" / "launcher.py")
+_lm = importlib.util.module_from_spec(spec_l)
+spec_l.loader.exec_module(_lm)
+_crashes = []
+_go, _wait, _why = _lm.restart_decision(75, _crashes, 1000.0)
+check(_go and _wait == _lm.RESTART_DELAYS[0] and "watchdog" in _why, "the supervisor restarts a startup hang like any watchdog exit")
+for _i in range(1, _lm.CRASH_LIMIT):
+    _go, _wait, _why = _lm.restart_decision(75, _crashes, 1000.0 + _i)
+check(not _go and "crashes" in _why, "and stops after the same crash cap")
+
 
 # ---- H3 + H2: the ASGI guard
 class FakeConfig:
