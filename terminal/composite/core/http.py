@@ -35,6 +35,28 @@ def _no_retry(url: str) -> bool:
     return bool(_NO_RETRY_RE.search(str(url or "")))
 
 
+def _parse_json(body: bytes, url: str):
+    """Parse a JSON answer. NaN/Infinity become None (a number is either right or blank), and a body that is not JSON
+    (an HTML error or login page, a truncated answer) is a transient CompositeError, never a raw ValueError."""
+    try:
+        return json.loads(body, parse_constant=lambda _c: None)
+    except (ValueError, UnicodeDecodeError):
+        head = body[:200].lstrip().lower()
+        what = "an HTML page" if head.startswith((b"<!doctype", b"<html", b"<")) else "a reply that is not JSON"
+        raise C.CompositeError(f"{C._which(url)} answered with {what} instead of data.", transient=True) from None
+
+
+def _transport(req, timeout, context=None):
+    """The single outbound seam: every request made through http_json and _download is opened here.
+    Offline tests inject faults by replacing composite._transport (scripts/tests/_fixtures.py)."""
+    url = req.full_url
+    if url.startswith((C.V5, C.V4)) and urllib.request.urlopen is _ORIG_URLOPEN:
+        return _LOCAL_OPENER.open(req, timeout=timeout)     # bypass corporate/system proxies on loopback requests
+    if context is not None:
+        return urllib.request.urlopen(req, timeout=timeout, context=context)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 def http_json(url, timeout=45):
     headers = {"User-Agent": "openbb-terminal-ui", "Accept": "application/json"}
     is_local = url.startswith((C.V5, C.V4))
@@ -46,11 +68,11 @@ def http_json(url, timeout=45):
     for attempt in range(max_attempts):
         rem = max(1.0, deadline - time.monotonic())
         try:
-            # Bypass corporate/system HTTP proxies on loopback requests unless tests monkeypatched urlopen.
-            opener = _LOCAL_OPENER.open if (is_local and urllib.request.urlopen is _ORIG_URLOPEN) else urllib.request.urlopen
-            with opener(req, timeout=rem) as r:
+            with C._transport(req, rem) as r:
                 body = r.read()
-                return json.loads(body) if body.strip() else {"results": []}      # 204 / empty body means "no data"
+            if not body.strip():
+                return {"results": []}                         # 204 / empty body means "no data"
+            return _parse_json(body, url)
         except urllib.error.HTTPError as e:
             try:
                 detail = json.loads(e.read()).get("detail")
@@ -144,7 +166,7 @@ def _download(url, timeout=60, data=None, ua="Mozilla/5.0 (compatible; terminal-
     for attempt in range(max_attempts):
         rem = max(1.0, deadline - time.monotonic())
         try:
-            with urllib.request.urlopen(req, timeout=rem, context=C._ssl_context()) as r:
+            with C._transport(req, rem, C._ssl_context()) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
             transient = e.code in (408, 429, 502, 503, 504)

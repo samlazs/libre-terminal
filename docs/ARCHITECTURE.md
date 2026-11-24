@@ -34,6 +34,7 @@ scripts/check_sources.py     source-contract check (--offline or live; checks bu
 scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding/lint/hygiene checks
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
+scripts/probe.py             stdlib live probe of a running terminal: status counts, p50/p95 latency, envelope checks per view
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
 terminal/server.py           UI server: static page, dashboards, saved state, service status and restart, /x/* views (see UI server)
 terminal/version.py          release version constant (VERSION) shared by server.py, /api/config and project_check.py
@@ -234,7 +235,16 @@ python scripts/launcher.py logs [ui|v5|v4] [--errors]  # tail logs, freeze dumps
 python scripts/launcher.py smoke                       # live data checks against the running backends
 python scripts/launcher.py health --dry-run            # paced card health runner (add --phase/--filter/--limit/--resume)
 python scripts/check_sources.py [--offline]            # source-contract check (live or against recorded catalogs)
+python scripts/probe.py --view snapshot --inputs symbol=AAPL symbol=SAP.DE --concurrent 8 --assert-envelope
+python scripts/probe.py --all-routes --defaults        # every /x/ view in /widgets.json with its default parameters
+python scripts/probe.py --backend v5 --url /PATH       # raw /api/v1 calls: status counts and latency per URL
 ```
+
+Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
+http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
+for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the
+single outbound seam `composite._transport` (used by `http_json` and `_download`), so a test needs no knowledge of a
+module's internals. `http_json` turns NaN/Infinity into None and a non-JSON body into a transient `CompositeError`.
 
 A full `test` run reports **4,729 checks across 43 test files**, all passing. `test_frontend.py` contributes 315 browser checks.
 The browser checks are skipped with a notice when no headless Edge or Chrome is installed.
@@ -252,6 +262,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Valuation bands, ROIC/DuPont, risk statistics, bond math, N-PORT overlap, GEX, Max Pain, volatility cone |
 | `test_redact.py`, `test_backend_wrapper.py` | Key redaction, backend guard and sanitized 500s, TradingView bar repair, NaN/Inf scrubbing |
 | `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
+| `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
 | `test_frontend.py` | Runs `frontend_checks.js` (315 browser checks) headless against a temporary UI server |
 
