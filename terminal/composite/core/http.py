@@ -59,8 +59,9 @@ PROVIDERS = {
     "fred":        dict(timeout=(15, 25), attempts=2, retry_on=(408, 500, 502, 503, 504, _NET), max_concurrency=4,
                         min_interval=0.0, cooldown_on_429=60, down_for=120,
                         ua=f"Python-urllib/{sys.version_info[0]}.{sys.version_info[1]}"),
-    "multpl":      dict(timeout=20, attempts=2, retry_on=(502, 503, 504, _NET), max_concurrency=2, min_interval=0.0,
-                        cooldown_on_429=300, down_for=0,
+    # multpl.com: one try (as before the shared client); when it does not answer, its other series fail at once for 2 min
+    "multpl":      dict(timeout=20, attempts=1, retry_on=(), max_concurrency=2, min_interval=0.0,
+                        cooldown_on_429=300, down_for=120,
                         ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"),
     # Google News answers 429 to a burst (probed: the 4th query within a few seconds): one at a time, 2.5 s apart
     "google_news": dict(timeout=15, attempts=1, retry_on=(), max_concurrency=1, min_interval=2.5, cooldown_on_429=300,

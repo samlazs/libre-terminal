@@ -22,6 +22,8 @@ check(all(set(p) == {"timeout", "attempts", "retry_on", "max_concurrency", "min_
           for p in H.PROVIDERS.values()), "every policy states every field")
 check(H.PROVIDERS["oecd"]["attempts"] == 1 and H.PROVIDERS["nasdaq"]["attempts"] == 1, "OECD and Nasdaq are never retried")
 check(429 not in H.PROVIDERS["fred"]["retry_on"] and not any(429 in p["retry_on"] for p in H.PROVIDERS.values()), "no provider retries a 429")
+check(H.PROVIDERS["multpl"]["attempts"] == 1 and H.PROVIDERS["multpl"]["down_for"] == 120,
+      "multpl: one try, and an unreachable site is skipped for 2 min (a view asks for several series)")
 check(H.PROVIDERS["google_news"]["min_interval"] >= 2.5 and H.PROVIDERS["google_news"]["max_concurrency"] == 1, "Google News: one at a time, 2.5 s apart")
 import fred_public as fp  # noqa: E402
 check(H.PROVIDERS["fred"]["timeout"] == fp.TIMEOUTS and H.PROVIDERS["fred"]["ua"] == fp.UA and H.PROVIDERS["fred"]["down_for"] == fp.DOWN_FOR,
