@@ -23,6 +23,14 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 HOST = f"127.0.0.1:{port}"
 
 
+def slots_free(want=24, wait=3.0):
+    """The server releases a slot just after the answer is written: give it a moment."""
+    end = time.monotonic() + wait
+    while server._x_slots._value != want and time.monotonic() < end:
+        time.sleep(0.02)
+    return server._x_slots._value
+
+
 def req(method, path, timeout=30):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     c.request(method, path, headers={"Host": HOST})
@@ -84,7 +92,14 @@ try:
     check(st_state in (200, 503) and ms_state < 300, f"GET /api/state answers in {ms_state:.0f} ms with 40 views in flight")
     check(st_cfg == 200 and st_svc == 200 and st_page == 200 and ms_rest < 900, f"config, services and the page answer at once ({ms_rest:.0f} ms)")
     check(isinstance(svc.get("ui_threads"), int) and svc["ui_threads"] >= 40 and svc["x_slots"]["max"] == 24, f"/api/services reports ui_threads ({svc.get('ui_threads')})")
-    time.sleep(1.6)                       # the 16 waiting past X_WAIT answer 503
+    deadline = time.monotonic() + 15      # the 16 waiting past X_WAIT answer 503 (each 1.5 s after it arrived)
+    while time.monotonic() < deadline:
+        with lock:
+            n503 = sum(1 for r in results if r[0] == 503)
+        if n503 >= 16:
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)                       # and no more than 16 do
     with lock:
         n503 = sum(1 for r in results if r[0] == 503)
     check(n503 == 16, f"the 16 requests without a slot answer 503 after the wait ({n503})")
@@ -96,13 +111,13 @@ finally:
     for t in ts:
         t.join(30)
 check(sum(1 for r in results if r[0] == 200) == 24 and peak[0] == 24, f"the 24 admitted views finish normally (peak {peak[0]})")
-check(server._x_slots._value == 24, "every slot is released afterwards")
+check(slots_free() == 24, "every slot is released afterwards")
 
 # ---- a view that fails still releases its slot
 C.ROUTES["board"] = lambda **_: 1 / 0
 for _ in range(30):
     req("GET", "/x/board")
-check(server._x_slots._value == 24, "slots are released after defects too")
+check(slots_free() == 24, "slots are released after defects too")
 
 # ---- HEAD never runs a view
 calls = [0]
