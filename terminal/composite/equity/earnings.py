@@ -57,7 +57,7 @@ def _est_raw(sym):
         return out
     key = ("est_raw", sym)
     hit = C._cache.get(key)
-    if hit and hit[1].get("_failed") and time.time() - hit[0] > 60:
+    if hit and hit[1].get("_failed") and time.monotonic() - hit[0] > 60:
         with C._guard:                              # a partial answer is kept one minute, not ten: never taken for the whole picture
             C._cache.pop(key, None)
     return C.cached(key, 600, run)
@@ -220,7 +220,7 @@ def _yahoo_quarter_chart(sym):
         return {"currency": e.get("financialCurrency"), "quarters": qs} if qs else None
     key = ("yahoo_qchart", sym)
     hit = C._cache.get(key)
-    if hit and hit[1] is None and time.time() - hit[0] > 60:
+    if hit and hit[1] is None and time.monotonic() - hit[0] > 60:
         with C._guard:
             C._cache.pop(key, None)
     return C.cached(key, 600, run)
@@ -370,7 +370,7 @@ def _options_chain(sym):
     key = ("opt_chain", sym)
 
     def _fresh(hit):
-        return hit and time.time() - hit[0] < (900 if hit[1][0] is not None else 60)
+        return hit and time.monotonic() - hit[0] < (900 if hit[1][0] is not None else 60)
 
     with C._guard:
         hit = C._cache.get(key)
@@ -391,10 +391,10 @@ def _options_chain(sym):
             if has_rows:
                 val = (res, prov)
                 with C._guard:
-                    C._cache[key] = (time.time(), val)
+                    C._cache[key] = (time.monotonic(), val)
                 return val
         with C._guard:
-            C._cache[key] = (time.time(), (None, None))
+            C._cache[key] = (time.monotonic(), (None, None))
         return None, None
 
 

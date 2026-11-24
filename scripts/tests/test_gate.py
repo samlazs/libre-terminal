@@ -163,6 +163,16 @@ code = G.main(["--offline", "--only", "G1"])
 out = json.loads((notes / f"gates-{dt.date.today().isoformat()}.json").read_text(encoding="utf-8"))
 check(code == 1 and out["gates"]["G1"]["status"] == "fail" and out["gates"]["G5"]["status"] == "manual", "a failed gate -> exit 1; earlier gates kept")
 
+# ---- G2 soak: memory read from tasklist, skipped with --soak-minutes 0
+check(abs(G.parse_tasklist_kb('"python.exe","1234","Console","1","123,456 K"') - 120.5625) < 1e-6, "tasklist '123,456 K' -> 120.56 MB")
+check(G.parse_tasklist_kb("INFO: No tasks are running which match the specified criteria.") is None, "no process -> None")
+check(G.ui_pid() is None, "no ui.json -> no pid")
+ok_, why_ = G.soak(G.Ctx(False, 1, 1, soak_minutes=0.01))
+check(not ok_ and "could not be measured" in why_, "a soak without a UI process fails instead of passing")
+import os as _os  # noqa: E402
+rss = G.process_rss_mb(_os.getpid())
+check(rss is not None and rss > 5, f"this process's RSS is readable ({rss})")
+
 # ---- launcher wiring
 r = subprocess.run([sys.executable, str(ROOT / "scripts" / "launcher.py"), "gate", "--help"], capture_output=True, text=True, timeout=60)
 check(r.returncode == 0 and "--only" in r.stdout and "--offline" in r.stdout, "launcher.py gate --help")

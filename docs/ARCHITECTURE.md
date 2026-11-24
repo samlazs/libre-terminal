@@ -286,6 +286,12 @@ it fail at once with `rate_limited` and send nothing; the backend cools down per
 per host), an outage gate (`down_for`, FRED 120 s) and the User-Agent. OECD and Nasdaq are never retried.
 `reset_runtime_caches` (service restart) also clears cooldowns.
 
+In-memory caches stamp entries with `time.monotonic()` (wall time only for disk records and shown ages; `_mono`
+converts a disk stamp). Process-lifetime maps (`_backoff`, `_STALE_SINCE`, `_HIST_REVALIDATING`, the news feed maps,
+the negative cache) are `LRUDict`/`LRUSet` capped at 2,000 entries. `cached()` remembers a failed fetch for 10 s (a
+rate limit: its retry_after), so callers queued on a failing key get the same typed error without another upstream
+call. `launcher.py gate` G2 ends with a 30-minute probe soak that must grow the UI process by less than 50 MB.
+
 Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
 http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
 for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the
@@ -313,6 +319,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_http.py` | Outbound client: provider policies, 429 cooldown without I/O, Retry-After cap, concurrency peak, pacing, outage gate |
 | `test_patch_registry.py` | Backend patch registry: unique ids, every installer registered, version ranges, status records, critical banner |
 | `test_admission.py` | 24 view slots, 503 after the wait, state/page never blocked, HEAD never runs a view, slots released after defects |
+| `test_cache.py` | 2,000-entry caps, monotonic TTLs, negative cache (20 concurrent callers -> 1 upstream call) |
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |

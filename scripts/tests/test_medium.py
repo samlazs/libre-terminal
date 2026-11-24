@@ -159,9 +159,9 @@ finally:
 _n = []
 c._cache.clear()
 _v = c.cached_complete(("t", 1), 900, lambda: (_n.append(1), {"x": 1, "_partial": True})[1])
-c._cache[("t", 1)] = (c.time.time() - 61, c._cache[("t", 1)][1])
+c._cache[("t", 1)] = (c.time.monotonic() - 61, c._cache[("t", 1)][1])
 c.cached_complete(("t", 1), 900, lambda: (_n.append(1), {"x": 2})[1])
-c._cache[("t", 1)] = (c.time.time() - 600, c._cache[("t", 1)][1])
+c._cache[("t", 1)] = (c.time.monotonic() - 600, c._cache[("t", 1)][1])
 _v3 = c.cached_complete(("t", 1), 900, lambda: (_n.append(1), {"x": 3})[1])
 check(len(_n) == 2 and _v3 == {"x": 2}, "partial refetched after 60 s; complete kept 15 minutes")
 c._cache.clear()

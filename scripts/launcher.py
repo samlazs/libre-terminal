@@ -939,6 +939,8 @@ def cmd_gate(a):
         cmd.append("--offline")
     if a.health_limit:
         cmd += ["--health-limit", str(a.health_limit)]
+    if a.soak_minutes is not None:
+        cmd += ["--soak-minutes", str(a.soak_minutes)]
     return subprocess.run(cmd, cwd=ROOT, env=child_env(p)).returncode
 
 
@@ -1068,6 +1070,7 @@ def main():
     s.add_argument("--only", default=None, help="comma-separated gates, e.g. G1,G4")
     s.add_argument("--offline", action="store_true", help="only checks that need no running terminal; live parts are marked manual")
     s.add_argument("--health-limit", type=int, default=0, help="cap the G2 health run to N unique URLs (0 = all)")
+    s.add_argument("--soak-minutes", type=float, default=None, help="G2 UI memory soak length in minutes (default 30; 0 skips)")
     s = sub.add_parser("check", help="run encoding, syntax, ruff, hygiene, source, state, and note checks")
     s.add_argument("--live-sources", action="store_true", help="check sources against live backends")
     s = sub.add_parser("snapshot", help="create a snapshot zip in local/snapshots/")

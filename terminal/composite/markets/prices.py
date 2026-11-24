@@ -72,7 +72,7 @@ HIST_STALE_TTL = 24 * 3600
 
 PARTIAL_TTL = 30
 
-_HIST_REVALIDATING: set = set()
+_HIST_REVALIDATING = C.LRUSet()            # (symbol, interval) being refreshed in the background (bounded)
 
 
 def _sym_hist_path(sym):
@@ -91,7 +91,7 @@ def _sym_hist_load(sym, interval):
         saved = json.loads(C._sym_hist_path(sym).read_text(encoding="utf-8"))
         if isinstance(saved, dict) and saved.get("rows") and saved.get("start") and saved.get("t"):
             with C._guard:
-                C._cache[("hsym", sym, interval)] = (float(saved["t"]), saved)
+                C._cache[("hsym", sym, interval)] = (C._mono(saved["t"]), saved)
             return saved
     except (OSError, ValueError, TypeError):
         pass
@@ -115,7 +115,7 @@ def _sym_hist_save(sym, interval, start_iso, rows, divs, now=None):
         merged_start = start_iso
     entry = {"t": ts, "start": merged_start, "rows": merged_rows, "divs": merged_divs}
     with C._guard:
-        C._cache[("hsym", sym, interval)] = (ts, entry)
+        C._cache[("hsym", sym, interval)] = (C._mono(ts), entry)
     if interval == "1d":
         C._write_json(C._sym_hist_path(sym), entry)
 

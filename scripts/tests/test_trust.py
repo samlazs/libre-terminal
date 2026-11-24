@@ -271,12 +271,12 @@ finally:
     _ur.urlopen = _saved_urlopen
 
 # ---- cached_disk backoff tiers + memory cache non-shadowing + OECD / Too Many Requests 600s protection
-_saved_time_fn = _cache_mod.time.time
+_saved_time_fn, _saved_mono_fn = _cache_mod.time.time, _cache_mod.time.monotonic
 _saved_cd = c.CACHE_DIR
 _tmp_bo = tempfile.TemporaryDirectory()
 _clk = [10000.0]
 try:
-    _cache_mod.time.time = lambda: _clk[0]
+    _cache_mod.time.time = _cache_mod.time.monotonic = lambda: _clk[0]     # one fake clock for wall and monotonic time
     c.CACHE_DIR = pathlib.Path(_tmp_bo.name)
     c.reset_runtime_caches()
 
@@ -396,7 +396,7 @@ try:
     check(c.cached_disk("oecd_rates_long", 3600, _bo_oecd) == {"ok": "oecd"} and _oecd_bo_calls[0] == 2,
           "non-429 OECD error retries after 600s")
 finally:
-    _cache_mod.time.time = _saved_time_fn
+    _cache_mod.time.time, _cache_mod.time.monotonic = _saved_time_fn, _saved_mono_fn
     c.CACHE_DIR = _saved_cd
     c.reset_runtime_caches()
     _tmp_bo.cleanup()

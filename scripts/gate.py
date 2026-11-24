@@ -13,8 +13,9 @@ G1  local/notes/g1-spotcheck.json: at least 10 figures, at least 4 non-US; each 
        "select": {"rows": "results", "match": {"label": "Revenue"}, "field": "value"}  (or "pointer": "/results/0/price"),
        "expected": 34176.0, "tol_pct": 1.0 (or "tol_abs": 0.05), "unit": "EUR m", "as_of": "2025-12-31",
        "independent_source": {"name": "SAP annual report 2025", "url": "https://..."}}
-G2  paced health run (no our-bug, no key in an error, backend survives); cold start of an isolated keyless instance to
-    the first screen in under 30 s; probe --all-routes --defaults --concurrent 8 with no 500 and no envelope violation.
+G2  no critical backend fix failed; paced health run (no our-bug, no key in an error, backend survives); cold start of an
+    isolated keyless instance to the first screen in under 30 s; probe --all-routes --defaults --concurrent 8 with no 500
+    and no envelope violation; a 30-minute probe soak grows the UI process by less than 50 MB (--soak-minutes).
 G3  check_sources (live, or --offline) and probe --all-routes --defaults --require-as-of (every 200 carries sources and
     as_of or as_of_na).
 G4  hygiene scan of publishable files; logs free of key material; live: foreign Host -> 403, Sec-Fetch-Site:
@@ -248,6 +249,56 @@ def critical_patch_failures(run_dir: Path | None = None) -> list[str]:
     return out
 
 
+SOAK_RSS_LIMIT_MB = 50.0
+
+
+def parse_tasklist_kb(csv_line: str) -> float | None:
+    """MB from one `tasklist /FO CSV /NH` line ("python.exe","1234","Console","1","123,456 K")."""
+    cells = [c.strip().strip('"') for c in csv_line.split('","')]
+    if len(cells) < 5:
+        return None
+    digits = re.sub(r"[^0-9]", "", cells[-1])
+    return int(digits) / 1024.0 if digits else None
+
+
+def process_rss_mb(pid: int) -> float | None:
+    if os.name != "nt":
+        try:
+            for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+        except OSError:
+            return None
+        return None
+    rc, lines = run(["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"], 30)
+    return next((v for v in (parse_tasklist_kb(ln) for ln in lines) if v is not None), None) if rc == 0 else None
+
+
+def ui_pid() -> int | None:
+    try:
+        return int(json.loads((local_dir() / "run" / "ui.json").read_text(encoding="utf-8"))["child"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def soak(ctx) -> tuple[bool, str]:
+    """Loop the route probe for ctx.soak_minutes and measure the UI process's memory growth."""
+    pid = ui_pid()
+    before = process_rss_mb(pid) if pid else None
+    if before is None:
+        return False, "soak: the UI process (local/run/ui.json) could not be measured"
+    end, rounds = time.monotonic() + ctx.soak_minutes * 60, 0
+    while time.monotonic() < end:
+        probe_all(ctx)
+        rounds += 1
+    after = process_rss_mb(pid)
+    if after is None:
+        return False, f"soak: the UI process ended during the soak ({rounds} rounds)"
+    growth = after - before
+    return growth < SOAK_RSS_LIMIT_MB, (f"soak {ctx.soak_minutes:g} min ({rounds} probe rounds): UI RSS {before:.0f} -> {after:.0f} MB "
+                                        f"({growth:+.0f} MB, limit {SOAK_RSS_LIMIT_MB:.0f})")
+
+
 def gate_g2(ctx) -> tuple[str, list[str]]:
     if ctx.offline:
         return "manual", ["health run, cold start and route probe need the running terminal"]
@@ -265,6 +316,12 @@ def gate_g2(ctx) -> tuple[str, list[str]]:
     rc, lines = probe_all(ctx, "--assert-envelope", "--allow", "200,204,400,404,429,502,503,504")
     ok &= rc == 0
     ev += [f"probe --all-routes exit {rc}"] + lines[-4:]
+    if ctx.soak_minutes > 0:
+        good, why = soak(ctx)
+        ok &= good
+        ev.append(why)
+    else:
+        ev.append("soak skipped (--soak-minutes 0)")
     return ("pass" if ok else "fail"), ev
 
 
@@ -393,12 +450,13 @@ GATE_FUNCS = {"G1": gate_g1, "G2": gate_g2, "G3": gate_g3, "G4": gate_g4, "G5": 
 
 # ---------------------------------------------------------------- driver
 class Ctx:
-    def __init__(self, offline: bool, ui_port: int, v5_port: int, health_limit: int = 0):
+    def __init__(self, offline: bool, ui_port: int, v5_port: int, health_limit: int = 0, soak_minutes: float = 30.0):
         self.offline = offline
         self.ui_port, self.v5_port = ui_port, v5_port
         self.ui_host = f"127.0.0.1:{ui_port}"
         self.ui = f"http://{self.ui_host}"
         self.health_limit = health_limit
+        self.soak_minutes = soak_minutes
 
 
 def parse_only(value: str | None) -> list[str]:
@@ -437,11 +495,12 @@ def main(argv=None) -> int:
     ap.add_argument("--only", default=None, help="comma-separated gates, e.g. G1,G4 (default: all)")
     ap.add_argument("--offline", action="store_true", help="only what needs no running terminal; live parts are manual")
     ap.add_argument("--health-limit", type=int, default=0, help="cap the G2 health run to N unique URLs (0 = all)")
+    ap.add_argument("--soak-minutes", type=float, default=30.0, help="G2 memory soak length (0 skips it)")
     ap.add_argument("--ui-port", type=int, default=None)
     ap.add_argument("--v5-port", type=int, default=None)
     a = ap.parse_args(argv)
     gates = parse_only(a.only)
-    ctx = Ctx(a.offline, probe.port_of("ui", a.ui_port), probe.port_of("v5", a.v5_port), a.health_limit)
+    ctx = Ctx(a.offline, probe.port_of("ui", a.ui_port), probe.port_of("v5", a.v5_port), a.health_limit, a.soak_minutes)
     before = probe.state_digest()
     date = dt.date.today().isoformat()
     out_path = local_dir() / "notes" / f"gates-{date}.json"

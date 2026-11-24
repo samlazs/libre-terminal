@@ -104,14 +104,14 @@ def _meta(symbols):
     for s in symbols:
         with C._guard:
             hit = C._cache.get(("msym", s))
-        if hit and now - hit[0] < C.META_TTL:
+        if hit and time.monotonic() - hit[0] < C.META_TTL:
             out[s] = hit[1]
             continue
         rec = read_disk().get(s)
         if isinstance(rec, dict) and rec.get("v") and rec.get("t"):
             if now - float(rec["t"]) < C.META_TTL:
                 with C._guard:
-                    C._cache[("msym", s)] = (float(rec["t"]), rec["v"])
+                    C._cache[("msym", s)] = (C._mono(rec["t"]), rec["v"])
                 out[s] = rec["v"]
                 continue
             fallback[s] = rec["v"]
@@ -141,7 +141,7 @@ def _meta(symbols):
                     merged = {}
                 with C._guard:
                     for sym, info in fresh.items():
-                        C._cache[("msym", sym)] = (ts, info)
+                        C._cache[("msym", sym)] = (C._mono(ts), info)
                         merged[sym] = {"t": ts, "v": info}
                 C._write_json(disk_path, merged)
         for s in need:

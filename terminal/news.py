@@ -120,9 +120,9 @@ OFFICIAL_DOMAINS = (".gov", "ecb.europa.eu", "europa.eu", "bankofengland.co.uk",
 
 
 # ------------------------------------------------------------------ fetching
-_FEED_CACHE: dict = {}             # url -> (time fetched, items); kept on failure so a feed that stops answering ages out
-_FEED_FAIL: dict = {}              # url -> time of the last failure (no retry for 10 minutes)
-_FEED_ERR: dict = {}               # url -> last error text
+_FEED_CACHE = C.LRUDict()          # url -> (monotonic time fetched, items); kept on failure so a dead feed ages out (bounded)
+_FEED_FAIL = C.LRUDict()           # url -> monotonic time of the last failure (no retry for 10 minutes)
+_FEED_ERR = C.LRUDict()            # url -> last error text
 _lock = threading.Lock()
 _pool = _cf.ThreadPoolExecutor(max_workers=12, thread_name_prefix="news")
 
@@ -196,23 +196,24 @@ def _get(url, ua=C.BROWSER_UA, gnews=False):
 def fetch(url, ttl=300, gnews=False):
     """A feed's items, at most `ttl` seconds old. A feed that fails keeps its last items (they age out of the time
     window by themselves) and is not asked again for 10 minutes."""
-    now = time.time()
+    now = time.monotonic()
     with _lock:
         hit = _FEED_CACHE.get(url)
         if hit and now - hit[0] < ttl:
             return hit[1]
-        if now - _FEED_FAIL.get(url, 0) < 600:
+        failed_at = _FEED_FAIL.get(url)
+        if failed_at is not None and now - failed_at < 600:
             return hit[1] if hit else []
     try:
         body = _get(url, gnews=gnews)
         items = parse_feed(body)
     except Exception as e:  # noqa: BLE001 - a feed down or malformed must not take the card with it
         with _lock:
-            _FEED_FAIL[url] = time.time()
+            _FEED_FAIL[url] = time.monotonic()
             _FEED_ERR[url] = str(e)[:200]
         return hit[1] if hit else []
     with _lock:
-        _FEED_CACHE[url] = (time.time(), items)
+        _FEED_CACHE[url] = (time.monotonic(), items)
         _FEED_FAIL.pop(url, None)
         _FEED_ERR.pop(url, None)
         if len(_FEED_CACHE) > 300:

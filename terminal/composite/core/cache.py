@@ -11,6 +11,7 @@ import math
 import os
 import re
 import threading
+from collections import OrderedDict
 import time
 import local_paths
 
@@ -19,28 +20,113 @@ import composite as C
 CACHE_DIR = local_paths.CACHE_DIR
 
 # ---------------------------------------------------------------- caching
+# In-memory entries are stamped with time.monotonic() (immune to sleep/resume and clock changes); wall time
+# (time.time()) is kept only for disk records and the ages shown to the user. _mono() converts a disk stamp.
+STATE_CAP = 2000                       # most entries any process-lifetime map below may hold (least recently used go first)
+NEG_TTL = 10.0                         # seconds a failed fetch is answered from memory instead of being run again
+
+
+class LRUDict(OrderedDict):
+    """A dict that keeps at most `cap` entries, dropping the least recently written or read."""
+
+    def __init__(self, cap=STATE_CAP):
+        super().__init__()
+        self.cap = cap
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.move_to_end(key)
+        while len(self) > self.cap:
+            self.popitem(last=False)
+
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+            return super().__getitem__(key)
+        return default
+
+
+class LRUSet:
+    """A set that keeps at most `cap` members (the oldest go first)."""
+
+    def __init__(self, cap=STATE_CAP):
+        self._d = LRUDict(cap)
+
+    def add(self, item):
+        self._d[item] = True
+
+    def discard(self, item):
+        self._d.pop(item, None)
+
+    def clear(self):
+        self._d.clear()
+
+    def __contains__(self, item):
+        return item in self._d
+
+    def __len__(self):
+        return len(self._d)
+
+    def __iter__(self):
+        return iter(list(self._d))
+
+
+def _mono(wall_t):
+    """A wall-clock stamp (disk record) as a monotonic one, so it can sit in the in-memory cache."""
+    return time.monotonic() - max(0.0, time.time() - float(wall_t))
+
+
 _cache: dict = {}
+_neg = LRUDict()                       # key -> (monotonic time until which the failure is repeated, kind, message, retry_after)
 
 _locks: dict = {}
 
 _guard = threading.Lock()
 
 
+def _neg_check(key):
+    """Raise the remembered failure of `key` while it is fresh (no upstream call)."""
+    with C._guard:
+        neg = C._neg.get(key)
+    if neg and time.monotonic() < neg[0]:
+        left = neg[0] - time.monotonic()
+        raise C.CompositeError(neg[2], kind=neg[1], retry_after=neg[3] if neg[3] is not None else left)
+
+
+def _neg_store(key, e):
+    """Remember a failed fetch for NEG_TTL seconds (a rate limit: for as long as the source asked)."""
+    from .contract import kind_of
+    kind = kind_of(e)
+    ra = getattr(e, "retry_after", None)
+    hold = float(ra) if kind == "rate_limited" and ra else C.NEG_TTL
+    with C._guard:
+        C._neg[key] = (time.monotonic() + max(0.0, min(hold, 600.0)), kind, str(e), ra)
+
+
 def cached(key, ttl, fn):
-    now = time.time()
+    """fn() once per key per ttl seconds; concurrent callers wait for the one fetch. A failure (CompositeError) is
+    remembered for NEG_TTL seconds, so callers queued on a failing key do not each re-run it."""
+    now = time.monotonic()
     with C._guard:
         hit = C._cache.get(key)
         if hit and now - hit[0] < ttl:
             return hit[1]
         lock = C._locks.setdefault(key, threading.Lock())
+    _neg_check(key)
     with lock:                                   # one fetch per key at a time
         with C._guard:
             hit = C._cache.get(key)
-            if hit and time.time() - hit[0] < ttl:
+            if hit and time.monotonic() - hit[0] < ttl:
                 return hit[1]
-        val = fn()
+        _neg_check(key)
+        try:
+            val = fn()
+        except C.CompositeError as e:
+            _neg_store(key, e)
+            raise
         with C._guard:
-            C._cache[key] = (time.time(), val)
+            C._neg.pop(key, None)
+            C._cache[key] = (time.monotonic(), val)
             if len(C._cache) > 1200:
                 for k in sorted(C._cache, key=lambda k: C._cache[k][0])[:200]:
                     held = C._locks.get(k)
@@ -51,7 +137,7 @@ def cached(key, ttl, fn):
         return val
 
 
-_backoff: dict = {}
+_backoff = LRUDict()                   # dataset name -> (monotonic time the fetch may run again, message)
 
 
 def disk_name(prefix, ident, suffix=""):
@@ -66,7 +152,7 @@ def disk_name(prefix, ident, suffix=""):
 # (HANDOFF P2). cached_disk records which of its datasets are being served from an old copy; dispatch() collects the ones a
 # view touched during its own request (a context variable: the thread pools below copy the context into their workers)
 # and answers {"stale": "..."}, which the card footer shows.
-_STALE_SINCE: dict = {}                       # dataset name -> time of the saved copy now served after a failed fetch
+_STALE_SINCE = LRUDict()                      # dataset name -> wall time of the saved copy now served after a failed fetch
 
 _STALE_NOTES = contextvars.ContextVar("stale_notes", default=None)
 _SWR_NOTES = contextvars.ContextVar("swr_notes", default=None)
@@ -155,11 +241,12 @@ def cached_disk(name, ttl, fn):
             saved = None
         with C._guard:
             blocked = C._backoff.get(name)
-        if blocked and now < blocked[0]:
+        mnow = time.monotonic()
+        if blocked and mnow < blocked[0]:
             if saved is not None:
                 with C._guard:
                     C._STALE_SINCE[name] = saved["t"]
-                return saved["v"], min(mem_ttl, max(0.0, blocked[0] - now))
+                return saved["v"], min(mem_ttl, max(0.0, blocked[0] - mnow))
             raise C.CompositeError(blocked[1])
         try:
             val = fn()
@@ -179,7 +266,7 @@ def cached_disk(name, ttl, fn):
                 wait = 30 if saved is not None else 10
             else:
                 wait = 120 if saved is not None else 30
-            until = time.time() + wait
+            until = time.monotonic() + wait
             with C._guard:
                 C._backoff[name] = (until, msg)
                 if saved is not None:
@@ -193,7 +280,7 @@ def cached_disk(name, ttl, fn):
         C._write_json(path, {"t": time.time(), "v": val})
         return val, float(mem_ttl)
 
-    now = time.time()
+    now = time.monotonic()
     with C._guard:
         hit = C._cache.get(key)
         if hit and now - hit[0] < mem_ttl:
@@ -207,7 +294,7 @@ def cached_disk(name, ttl, fn):
         return val
 
     with lock:
-        now = time.time()
+        now = time.monotonic()
         with C._guard:
             hit = C._cache.get(key)
             if hit and now - hit[0] < mem_ttl:
@@ -219,7 +306,7 @@ def cached_disk(name, ttl, fn):
             C._note_stale(name)
             return val
         val, eff_ttl = run()
-        stored_at = time.time() - max(0.0, float(mem_ttl) - float(eff_ttl))
+        stored_at = time.monotonic() - max(0.0, float(mem_ttl) - float(eff_ttl))
         with C._guard:
             C._cache[key] = (stored_at, val)
             if len(C._cache) > 1200:
@@ -240,10 +327,12 @@ def reset_runtime_caches() -> dict:
             "cache": len(C._cache),
             "backoff": len(C._backoff),
             "stale": len(C._STALE_SINCE),
+            "negative": len(C._neg),
         }
         C._cache.clear()
         C._backoff.clear()
         C._STALE_SINCE.clear()
+        C._neg.clear()
     C.reset_outbound()                            # 429 cooldowns and outage gates start over too
     return counts
 
@@ -289,7 +378,7 @@ def cached_complete(key, ttl, fn, short=60):
     if part or getattr(val, "partial", False):
         with C._guard:
             hit = C._cache.get(key)
-            if hit and time.time() - hit[0] > short:
+            if hit and time.monotonic() - hit[0] > short:
                 C._cache.pop(key, None)
         val = C.cached(key, ttl, fn)
     return val
