@@ -156,7 +156,7 @@
     if (saving) { saveAgain = true; return; }
     saving = true;
     $("save-status").textContent = "Saving…";
-    fetch("/api/state", { method: "PUT", headers: { "Content-Type": "application/json" }, body: serializeState() })
+    T.request("/api/state", { method: "PUT", headers: { "Content-Type": "application/json" }, body: serializeState() })
       .then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) {
           if (r.ok) { S.state._rev = j.rev; $("save-status").textContent = "All changes saved"; return; }
@@ -762,10 +762,7 @@
   }
 
   // ---------- backends ----------
-  function fetchT(url, ms) {
-    var c = new AbortController(), t = setTimeout(function () { c.abort(); }, ms);
-    return fetch(url, { signal: c.signal }).finally(function () { clearTimeout(t); });
-  }
+  function fetchT(url, ms) { return T.request(url, { timeout: ms }); }
   /** A dashboard shipped by an OpenBB extension (grouped by data provider). */
   function normalizeApp(app, bid) {
     var groups = (app.groups || []).filter(function (g) { return g && g.paramName; }).map(function (g) {
@@ -1521,7 +1518,7 @@
       S.cur.groups.forEach(function (o) {
         if (o === g || o.syncFrom !== g.name || !o.syncUrl) return;
         var mySeq = (syncSeq[o.name] = (syncSeq[o.name] || 0) + 1), dashId = S.cur.id;
-        fetch(o.syncUrl + "?" + encodeURIComponent(g.paramName) + "=" + encodeURIComponent(g.value))
+        T.request(o.syncUrl + "?" + encodeURIComponent(g.paramName) + "=" + encodeURIComponent(g.value))
           .then(function (r) { return r.ok ? r.json() : null; })
           .then(function (j) {
             if (mySeq !== syncSeq[o.name] || !S.cur || S.cur.id !== dashId) return;
@@ -1561,7 +1558,7 @@
         }
         if (v != null && v !== "") q.set(k, v);
       });
-      return fetch(g.optionsEndpoint + "?" + q.toString()).then(function (r) { return r.ok ? r.json() : { results: [] }; })
+      return T.request(g.optionsEndpoint + "?" + q.toString()).then(function (r) { return r.ok ? r.json() : { results: [] }; })
         .then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function () { return []; });
     };
   }
@@ -1622,7 +1619,7 @@
         holder.appendChild(b);
       });
     }
-    if (!jumpCache[sym]) jumpCache[sym] = fetch("/x/company_links?symbol=" + encodeURIComponent(sym)).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+    if (!jumpCache[sym]) jumpCache[sym] = T.request("/x/company_links?symbol=" + encodeURIComponent(sym), { timeout: 20000 }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
     jumpCache[sym].then(draw);
   }
   function jumpTo(l) {
@@ -2228,13 +2225,13 @@
     active.forEach(function (b) { stopWatchBackend(b); b.up = false; b.service = "restarting"; });
     paintStatus();
     try {
-      var res = await fetch("/api/services/restart", {
+      var res = await T.request("/api/services/restart", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ target: "backends" })
       });
-      var j = await res.json().catch(function () { return {}; });
-      if (!res.ok) throw new Error(j.detail || j.error || ("HTTP " + res.status));
+      var j = await res.json().catch(function () { return {}; }) || {};
+      if (!res.ok) throw T.httpError(res.status, JSON.stringify(j));
       var seq = j.restart_seq || 0;
       var deadline = Date.now() + 90000;
       var started = Date.now();
@@ -2301,7 +2298,7 @@
       });
     } catch (e) {
       restoreBtn();
-      T.toast("Restart failed: " + (e && e.message ? e.message : "check local/logs"), true);
+      T.toast("Restart failed: " + T.userText(e, { source: "The terminal" }) + " Details are in local/logs.", true);
       active.forEach(function (b) { b.up = false; b.service = "offline"; watchBackend(b); });
       paintStatus();
     }
@@ -2350,7 +2347,7 @@
     fitSidebar();
     window.addEventListener("resize", T.debounce(fitSidebar, 150));
     try {
-      var resps = await Promise.all([fetch("/api/config"), fetch("/api/state"), fetch("/api/dashboards")]);
+      var resps = await Promise.all([T.request("/api/config"), T.request("/api/state"), T.request("/api/dashboards", { timeout: 60000 })]);
       var cfgr = resps[0], sr = resps[1], gr = resps[2];
       var parsed = await Promise.all([
         cfgr.json(),

@@ -60,9 +60,11 @@ terminal/option_math.py      implied volatility and Greeks for substitute option
 terminal/redact.py           strips key material from logs and error text
 terminal/local_paths.py      where local/ is and what goes in it (the only place those paths are defined)
 terminal/health.json         data functions broken upstream (shown in Data Explorers > Data status)
-terminal/static/             app.js (layout, state, routing, startup), widgets.js (cards, errors, sources),
-                             table.js, statements.js (financial statements), grid.js, controls.js, md.js,
-                             securities.js (search), app.css
+terminal/static/             request.js (T.request: the only fetch() caller, bounded waits; T.httpError and
+                             T.renderError: one error renderer keyed on error.kind; T.asOfText), app.js (layout,
+                             state, routing, startup), widgets.js (cards, errors, sources; every card footer shows
+                             sources, data as-of, status and notes from the envelope), table.js, statements.js
+                             (financial statements), grid.js, controls.js, md.js, securities.js (search), app.css
 config/                      key template, lock files (requirements-v5/v4), MCP example
 ruff.toml                    static bug-check configuration for terminal/ and scripts/
 ```

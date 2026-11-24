@@ -140,7 +140,7 @@
       if (typeof cfg.options === "function") {
         loading = true; draw();
         Promise.resolve().then(cfg.options).then(function (res) { known = opts = normOpts(res); loading = false; paint(); if (document.body.contains(box)) draw(); })
-          .catch(function (e) { loading = false; err = "Could not load options: " + (e && e.message || e); if (document.body.contains(box)) draw(); });
+          .catch(function (e) { loading = false; err = "Could not load options: " + T.userText(e); if (document.body.contains(box)) draw(); });
       }
     }
     btn.addEventListener("click", function () { if (openPop && openPop.anchor === btn) T.closePop(); else open(); });

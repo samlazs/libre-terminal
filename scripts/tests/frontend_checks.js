@@ -464,6 +464,61 @@ window.__fcPromise = (async function (T) {
     ok(T.cleanMessage("Traceback (most recent call last)") === null && T.cleanMessage("x (HTTPError 503)") === "x", "cleanMessage drops technical tails or refuses");
   })();
 
+  // P4-06: one error renderer for every card type, fed the server's own error envelopes for each fault kind
+  (function () {
+    var FORBID = /Traceback|Error:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception)\b/;
+    var src = [{ name: "Yahoo Finance", detail: "quotes", url: "https://finance.yahoo.com/" }];
+    function env(kind, msg, status, extra) {
+      return [status, JSON.stringify(Object.assign({ error: { kind: kind, message: msg, retryable: kind !== "input" && kind !== "not_covered" && kind !== "internal" }, detail: msg, sources: src, user_message: true }, extra || {}))];
+    }
+    var FAULTS = {
+      timeout: env("timeout", "OpenBB V5 backend did not answer in time.", 504),
+      refused: env("upstream", "OpenBB V5 backend is not reachable (<urlopen error [WinError 10061] No connection could be made>).", 502),
+      http429: env("rate_limited", "Too many requests", 429, { error: { kind: "rate_limited", message: "Too many requests", retryable: true, retry_after: 30 } }),
+      http5xx: env("upstream", "HTTP 503 from http://127.0.0.1:6900/api/v1/equity/price/quote", 502),
+      http404: env("not_covered", "Yahoo Finance has nothing for 'ZZZZQ9'. Check the ticker.", 404),
+      html_body: env("upstream", "OpenBB V5 backend answered with an HTML page instead of data.", 502),
+      internal: env("internal", "Internal error in the terminal (ref q1w2e3; details in local/logs/ui.log).", 500),
+      raw_html: [502, "<!DOCTYPE html><html><body>Bad Gateway</body></html>"]
+    };
+    var TYPES = ["chart", "table", "news", "frame", "statements"], drawn = 0;
+    TYPES.forEach(function (ty) {
+      Object.keys(FAULTS).forEach(function (fk) {
+        var err = T.httpError(FAULTS[fk][0], FAULTS[fk][1]);
+        var box = document.createElement("div");
+        var c = T.renderError(box, err, { source: "Yahoo Finance", symbol: "SAP.DE", userMessage: err.userMessage, cardType: ty });
+        ok(box.textContent && !FORBID.test(box.textContent), ty + "/" + fk + ": no raw text in the card (" + box.textContent.slice(0, 100) + ")");
+        if (fk !== "raw_html") ok(box.firstChild.getAttribute("data-error-kind") === JSON.parse(FAULTS[fk][1]).error.kind, ty + "/" + fk + ": drawn by error.kind");
+        ok(c && c.text, ty + "/" + fk + ": classification returned");
+        drawn++;
+      });
+    });
+    ok(drawn === TYPES.length * Object.keys(FAULTS).length, "every card type x fault kind drawn (" + drawn + ")");
+    var e429 = T.httpError(429, FAULTS.http429[1]);
+    ok(e429.errorKind === "rate_limited" && e429.retryAfter === 30 && e429.sources.length === 1 && e429.userMessage, "httpError reads kind, retry_after, sources");
+    ok(T.httpError(502, "<html>").rawBackend === true && !T.httpError(502, "<html>").errorKind, "a raw non-envelope answer is marked rawBackend");
+    ok(!FORBID.test(T.userText(T.httpError(500, FAULTS.internal[1]))) && /ref q1w2e3/.test(T.userText(T.httpError(500, FAULTS.internal[1]))), "userText keeps the ref, no raw text");
+    var tE = new Error("x"); tE.timedOut = true;
+    ok(T.classifyFailure(tE, { source: "SEC" }).text === "SEC did not answer in time.", "a client-side timeout reads as timeout");
+    ok(T.classifyFailure(new TypeError("Failed to fetch"), {}).text === "The terminal is busy or restarting.", "a dropped connection reads as unavailable");
+
+    // footer: data as-of from the envelope, generic notes and status
+    ok(T.asOfText({ as_of: "2026-01-05" }, "10:00").text === "data as of 2026-01-05", "as_of date in the footer");
+    ok(T.asOfText({ as_of: "2026-02-03T15:30:00Z" }, "10:00").text === "data as of 2026-02-03 15:30 UTC", "as_of datetime in UTC");
+    var na = T.asOfText({ as_of_na: "This answer has no dated data points." }, "10:00");
+    ok(na.text === "updated 10:00" && /no dated/.test(na.title), "as_of_na: fetch time, with the reason as the title");
+    ok(T.asOfText(null, "10:00").text === "updated 10:00", "a raw backend answer keeps the fetch time");
+    var f1 = document.createElement("div");
+    T.renderTrust(f1, { stale: "Old copy", notes: ["Old copy", "Euro area rate substituted for Germany"], status: "stale" });
+    ok((f1.textContent.match(/Old copy/g) || []).length === 1 && /ⓘ Euro area rate substituted for Germany/.test(f1.textContent), "notes drawn once each, generically");
+    var f2 = document.createElement("div");
+    T.renderTrust(f2, { status: "partial" });
+    ok(/partial answer/.test(f2.textContent), "status partial without a note gets a badge");
+    var f3 = document.createElement("div");
+    T.renderTrust(f3, { status: "ok", notes: [] });
+    ok(f3.textContent === "", "status ok draws nothing");
+  })();
+
   ok(T.classifyError("CIK not found for symbol SAP.DE", 400, { source: "SEC", provider: "sec", symbol: "SAP.DE" }).cls === "covered", "CIK not found classifies as not covered");
   var xmlErr = T.classifyError("Invalid URL. Please a SEC URL that directs specifically to a HTM or HTML file.", 400, { source: "SEC", provider: "sec" });
   ok(xmlErr.cls === "input" && xmlErr.kind === "info", "sec/htm_file XML rejection classifies as input info, not bug");
@@ -1370,6 +1425,27 @@ window.__fcPromise = (async function (T) {
     await new Promise(function (r) { setTimeout(r, 50); });
   }
   ok(!!T.S.booted, "UI booted before async integration checks");
+
+  // P4-06: T.request bounds every wait and relays the caller's abort
+  await (async function () {
+    var saved = window.fetch;
+    window.fetch = function (u, init) {
+      return new Promise(function (res, rej) { init.signal.addEventListener("abort", function () { var a = new Error("aborted"); a.name = "AbortError"; rej(a); }); });
+    };
+    try {
+      var te = null;
+      try { await T.request("/never", { timeout: 40 }); } catch (e) { te = e; }
+      ok(te && te.timedOut && te.name === "TimeoutError" && te.errorKind === "timeout", "T.request times out with a typed error");
+      var outer = new AbortController(), ae = null;
+      var pr = T.request("/never", { timeout: 0, signal: outer.signal });
+      outer.abort();
+      try { await pr; } catch (e) { ae = e; }
+      ok(ae && ae.name === "AbortError" && !ae.timedOut, "the caller's abort is relayed, not reported as a timeout");
+    } finally {
+      window.fetch = saved;
+    }
+  })();
+
 
   // Awaited getJSON retry, non-OK preservation, OECD no-retry & hidden-tab needPlotResize checks
   var origFetch = window.fetch;

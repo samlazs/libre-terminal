@@ -121,6 +121,16 @@ check('caches.delete("obb-slow-v1")' in wjs and 'caches.open("obb-slow-v1")' not
       "W8: widgets.js retires obb-slow-v1 with one-time caches.delete cleanup")
 idx_html = (STATIC / "index.html").read_text(encoding="utf-8")
 check('<link rel="icon"' in idx_html, "index.html defines inline icon so browsers do not log 404 /favicon.ico")
+# P4-06: one request wrapper, no raw error text in user-visible strings
+src_js = {f.name: f.read_text(encoding="utf-8") for f in STATIC.glob("*.js")}
+fetch_calls = [(name, i + 1) for name, txt in src_js.items() for i, line in enumerate(txt.splitlines())
+               if re.search(r"(?<![\w.])fetch\(", line) and not line.lstrip().startswith(("*", "//", "/*"))]
+check(fetch_calls == [("request.js", next(i + 1 for i, ln in enumerate(src_js["request.js"].splitlines()) if "return fetch(url, init)" in ln))],
+      f"fetch( is called only inside T.request ({fetch_calls})")
+leaks = [(name, i + 1) for name, txt in src_js.items() for i, line in enumerate(txt.splitlines())
+         if re.search(r"\+\s*\(?\s*\w+\s*(?:&&\s*\w+\s*)?\.message|\.message\s*\+(?!\+)", line)]
+check(not leaks, f"no user-visible string concatenates e.message ({leaks})")
+check(idx_html.index("/static/request.js") < idx_html.index("/static/md.js"), "request.js loads before every script that uses T.request")
 # count the browser checks as checks of this file
 import _common  # noqa: E402
 _common._count[0] += n - 1

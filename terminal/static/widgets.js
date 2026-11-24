@@ -51,7 +51,7 @@
 
   function errText(status, body) {
     var d = body;
-    try { var j = JSON.parse(body); d = j.detail != null ? j.detail : j; } catch (e) { /* plain text */ }
+    try { var j = JSON.parse(body); d = j.error && typeof j.error.message === "string" ? j.error.message : j.detail != null ? j.detail : j; } catch (e) { /* plain text */ }
     if (Array.isArray(d)) d = d.map(function (x) { return (x.loc ? x.loc.slice(1).join(".") + ": " : "") + (x.msg || JSON.stringify(x)); }).join("; ");
     else if (typeof d === "object" && d) d = d.loc && d.msg ? d.loc.slice(1).join(".") + ": " + d.msg : JSON.stringify(d);
     d = T.redact(String(d || "HTTP " + status)).replace(/Unexpected Error -> /g, "").replace(/\s*For further information visit \S+/g, "");
@@ -172,6 +172,12 @@
       if (typeof lj[k[0]] === "string" && lj[k[0]]) foot.appendChild(el("span", { class: "stale-note", title: lj[k[0]] }, k[1] + lj[k[0]]));
     });
     if (typeof lj.delayed === "string" && lj.delayed) foot.appendChild(el("span", { class: "delay-note", title: lj.delayed }, "delayed"));
+    // the envelope's notes and status (core/contract.py), drawn generically: a view that adds a note needs no change here
+    var said = [lj.stale, lj.cached, lj.fallback, lj.truncated, lj.delayed].filter(function (x) { return typeof x === "string" && x; });
+    var extra = (Array.isArray(lj.notes) ? lj.notes : []).filter(function (n) { return typeof n === "string" && n && said.indexOf(n) < 0; });
+    extra.forEach(function (n) { foot.appendChild(el("span", { class: "stale-note", title: n }, "ⓘ " + n)); });
+    if ((lj.status === "partial" || lj.status === "fallback") && !extra.length && !lj.fallback)
+      foot.appendChild(el("span", { class: "stale-note", title: "Part of this answer is missing or came from a substitute source." }, lj.status === "partial" ? "⚠ partial answer" : "↻ substitute source"));
   };
   T.chartFooterNote = function (d) {
     var hasAnnot = !!(d && d.layout && Array.isArray(d.layout.annotations) && d.layout.annotations.length);
@@ -242,7 +248,8 @@
   }
   function isRateLimited(url) { return !!rateLimitKey(url); }
   function fetchOptions(force, signal) {
-    return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" } } : { signal: signal };
+    // timeout 0: getJSON and postText bound the wait themselves (T.requestTimeout per route)
+    return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" }, timeout: 0 } : { signal: signal, timeout: 0 };
   }
   T._reqSlots = { acquire: acquire, release: release, slots: slots, rateLimitKey: rateLimitKey, isRateLimited: isRateLimited, fetchOptions: fetchOptions, max: MAX_PARALLEL };
   // Server CACHE_POLICY is now the sole authoritative persistent cache; remove any legacy browser Cache API store once on boot.
@@ -265,22 +272,13 @@
   async function postText(url, bodyObj, outerSignal) {
     var host = /^https?:\/\/[^/]+/.exec(url); host = host ? host[0] : "self";
     await acquire(host, outerSignal);
-    var timeoutMs = T.requestTimeout(url, true);
-    var ctl = new AbortController(), timedOut = false;
-    var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, timeoutMs);
-    function relay() { ctl.abort(); }
-    if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
     try {
-      var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj), signal: ctl.signal });
+      var r = await T.request(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj),
+        signal: outerSignal, timeout: T.requestTimeout(url, true) });
       var txt = await r.text();
-      if (!r.ok) { var err = new Error(errText(r.status, txt)); err.status = r.status; throw err; }
+      if (!r.ok) throw T.httpError(r.status, txt, errText(r.status, txt));
       return txt;
-    } catch (e) {
-      if (timedOut) throw new Error("No answer after " + Math.round(timeoutMs / 1000) + " seconds. The source is slow or not responding.");
-      throw e;
     } finally {
-      clearTimeout(timer);
-      if (outerSignal) outerSignal.removeEventListener("abort", relay);
       release(host);
     }
   }
@@ -304,13 +302,9 @@
     if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
     var fetchOpts = fetchOptions(force, signal);
     function throwHttpErr(resp, bodyTxt) {
-      var err = new Error(errText(resp.status, bodyTxt)); err.status = resp.status;
+      var err = T.httpError(resp.status, bodyTxt, errText(resp.status, bodyTxt));
       var subE = resp.headers && resp.headers.get("X-Terminal-Source");
-      if (subE) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
-      try {
-        var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources;
-        if (ej.error && typeof ej.error.kind === "string") { err.errorKind = ej.error.kind; err.retryAfter = +ej.error.retry_after || 0; err.retryable = ej.error.retryable === true; }
-      } catch (e3) { /* not JSON */ }
+      if (subE && !err.sources) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
       if (rlKey && (err.errorKind === "rate_limited" || resp.status === 429 || (!err.errorKind && /rate limit|too many requests|temporarily blocked/i.test(err.message)))) {
         var rlSecs = err.retryAfter || +((/~(\d+)\s*s\b/.exec(err.message) || [])[1] || 0);
         limitedBy[limKey] = { until: Date.now() + (rlSecs ? rlSecs * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
@@ -320,16 +314,16 @@
     try {
       if (signal && signal.aborted) { var ab = new Error("aborted"); ab.name = "AbortError"; throw ab; }
       var r;
-      try { r = await fetch(url, fetchOpts); }
+      try { r = await T.request(url, fetchOpts); }
       catch (e) {
         // one automatic retry for a dropped connection, but only while the backend itself still answers (never for OECD)
         if (e && e.name === "AbortError") throw e;
         var base = /^https?:\/\/[^/]+/.exec(url);
-        var alive = base ? await fetch(base[0] + "/", { mode: "no-cors", signal: signal }).then(function () { return true; }, function () { return false; }) : true;
+        var alive = base ? await T.request(base[0] + "/", { mode: "no-cors", signal: signal, timeout: 5000 }).then(function () { return true; }, function () { return false; }) : true;
         if (!alive) { var down = new Error("BACKEND_DOWN"); down.backendDown = true; throw down; }
         if (slow) throw e;
         await wait(1500, signal);
-        r = await fetch(url, fetchOpts);
+        r = await T.request(url, fetchOpts);
       }
       if (!r.ok) {
         var etxt = await r.text();
@@ -341,7 +335,7 @@
           || ((r.status === 502 || r.status === 503 || r.status === 504) && !isUserMsg && !/rate limit|too many requests/i.test(etxt)));
         if (shouldRetry) {
           await wait(1200 + Math.random() * 1200, signal);
-          r = await fetch(url, fetchOpts);
+          r = await T.request(url, fetchOpts);
           etxt = r.ok ? null : await r.text();
         }
       }
@@ -352,7 +346,7 @@
       var txt = await r.text();
       if (!txt && !slow && /[?&]provider=yfinance(&|$)|\/api\/v1\/yfinance\/|\/x\/chart\b/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
         await wait(1200, signal);
-        r = await fetch(url, fetchOpts);
+        r = await T.request(url, fetchOpts);
         if (!r.ok) throwHttpErr(r, await r.text());
         txt = await r.text();
       }
@@ -362,7 +356,7 @@
         } catch (parseErr) {
           if (slow) throw new Error("The source returned an incomplete response. Try reloading this card.");
           await wait(800, signal);
-          r = await fetch(url, fetchOpts);
+          r = await T.request(url, fetchOpts);
           if (!r.ok) throwHttpErr(r, await r.text());
           txt = await r.text();
           if (!txt) {
@@ -622,7 +616,7 @@
     var rz = el("div", { class: "w-resize", title: "Resize" });
     node.appendChild(head); node.appendChild(strip); node.appendChild(pbar); node.appendChild(body); node.appendChild(foot); node.appendChild(rz);
 
-    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, chartMsgHandler = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
+    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, lastEnvelope = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, chartMsgHandler = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
     var fileParam = def.params.filter(function (p) { return (p.roles || []).indexOf("fileSelector") >= 0; })[0] || null;
     var lastFileSig = null;          // the other parameters the current document pick was made for
     var isFrame = def.type === "iframe" || def.type === "html";
@@ -745,16 +739,9 @@
         var q = T.optionsQuery(p.optionsParams, eff());
         var url = (/^https?:/.test(p.optionsEndpoint) ? "" : base) + p.optionsEndpoint + qs(q);
         if (!optCache.has(url)) {
-          var oCtl = new AbortController(), oTimer = setTimeout(function () { oCtl.abort(); }, 30000);
-          optCache.set(url, fetch(url, { signal: oCtl.signal }).then(function (r) {
-            return r.text().then(function (txt) {
-              if (!r.ok) throw new Error(errText(r.status, txt));
-              if (!txt || !txt.trim()) return [];
-              return JSON.parse(txt);
-            });
-          }).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) {
+          optCache.set(url, getJSON(url, false).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) {
             optCache.delete(url); throw e;
-          }).finally(function () { clearTimeout(oTimer); }));
+          }));
         }
         return optCache.get(url);
       };
@@ -928,14 +915,16 @@
         ? "Switch to a free source with the selector at the top of this card."
         : "Try another source with the selector at the top of this card (" + (alts ? alts.length : list.length + 1) + " available).";
     }
+    /** Every card type's footer: sources, status and notes from the envelope, and the data's own as-of date. */
     function stamp(extra) {
       foot.textContent = "";
-      var chartShown = plotNode && ((def.type === "chart" && item.view !== "table") || item.view === "chart");
-      var line = chartShown ? T.sourceLine(sources()) : "";
+      var env = lastEnvelope || lastJson;
+      var line = T.sourceLine(sources());
       if (line) foot.appendChild(el("span", { class: "src-line", title: line }, line));      // part of the card, never clipped; PNG exports carry it too
-      T.renderTrust(foot, lastJson);
+      T.renderTrust(foot, env);
       if (extra) foot.appendChild(el("span", { class: "foot-note", title: extra }, extra));
-      foot.appendChild(el("span", { style: { marginLeft: "auto" } }, "updated " + T.mtlNow()));
+      var asOf = T.asOfText(env, T.mtlNow());
+      foot.appendChild(el("span", { class: "as-of", title: asOf.title, style: { marginLeft: "auto" } }, asOf.text));
     }
 
     // ---------- export (same ⤓ menu on every card that shows data) ----------
@@ -1213,7 +1202,7 @@
           if (item.view === "chart") renderQuickChart(data); else renderTable(data);
         }
       } catch (e) {
-        var rc = T.classifyError("render: " + (e && e.message || e), 0, {});
+        var rc = T.classifyError("render: " + T.errDetail(e), 0, {});
         reportBug(rc);
         message("err", rc.text, rc.hint);
       }
@@ -1272,26 +1261,15 @@
             // a terminal view picks the document ({frame} or {message}); the frame then loads the backend's viewer directly,
             // since Firefox calls a redirected frame load cross-site and the backend's request guard refuses it
             message("load", "Loading…");
-            var fCtl = new AbortController(), fTimedOut = false, fMs = T.requestTimeout(frameSrc, false);
-            var fTmo = setTimeout(function () { fTimedOut = true; fCtl.abort(); }, fMs);
-            var onMainAbort = function () { fCtl.abort(); };
-            abort.signal.addEventListener("abort", onMainAbort, { once: true });
-            var fr, fj;
-            try {
-              fr = await fetch(frameSrc, { headers: { Accept: "application/json" }, signal: fCtl.signal });
-              fj = await fr.json().catch(function () { return null; });
-            } catch (fe) {
-              if (fTimedOut) throw new Error("No answer after " + Math.round(fMs / 1000) + " seconds. The source is slow or not responding.");
-              throw fe;
-            } finally {
-              clearTimeout(fTmo);
-              abort.signal.removeEventListener("abort", onMainAbort);
-            }
+            var fr = await T.request(frameSrc, { headers: { Accept: "application/json" }, signal: abort.signal, timeout: T.requestTimeout(frameSrc, false) });
+            var ftxt = await fr.text().catch(function () { return ""; }), fj = null;
+            try { fj = JSON.parse(ftxt); } catch (fe) { /* not JSON */ }
             if (my !== seq || !alive) return;
-            if (!fr.ok || !fj) throw new Error((fj && fj.detail) || "The terminal could not pick a document (HTTP " + fr.status + ").");
+            if (!fr.ok || !fj) throw T.httpError(fr.status, ftxt, fj ? null : "The terminal could not pick a document (HTTP " + fr.status + ").");
+            lastEnvelope = fj;
             if (Array.isArray(fj.sources)) answerSources = fj.sources;
             if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+\/api\/v1\/sec\/filing_viewer_app\?/.test(fj.frame || "")) {
-              clearBody(); drawTools(); foot.textContent = "";
+              clearBody(); drawTools(); stamp();
               return message("info", fj.message || "Nothing to show for this choice.");
             }
             frameSrc = fj.frame;
@@ -1353,7 +1331,7 @@
             if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
             if (!alive || my !== seq) return;
             if (base && ctx.backendDown && ctx.backend) {
-              fetch(base + "/", { mode: "no-cors" }).catch(function () { ctx.backendDown(ctx.backend.id); });
+              T.request(base + "/", { mode: "no-cors", timeout: 5000 }).catch(function () { ctx.backendDown(ctx.backend.id); });
             }
             clearBody();
             body.appendChild(el("div", { class: "msg err center" }, [el("b", null, "Could not load"), el("span", null, "This view did not load."),
@@ -1362,7 +1340,7 @@
           fr2.src = frameSrc;
           body.appendChild(waitBox);
           body.appendChild(fr2);
-          foot.textContent = ""; drawTools();
+          drawTools(); stamp();                         // frames too: sources and as-of in the footer
           return;
         }
         if (item.manual && !force) {
@@ -1421,7 +1399,7 @@
         }
         var json = await getJSON(endpoint + qs(p), force, abort.signal);
         if (my !== seq || !alive) return;
-        lastJson = json;
+        lastJson = json; lastEnvelope = json && typeof json === "object" && !Array.isArray(json) ? json : null;
         if (json && Array.isArray(json.sources)) answerSources = json.sources;
         else if (ctx.backend.id !== "x") answerSources = null;      // the named source answers again
         paintSource();
@@ -1446,7 +1424,7 @@
         foot.textContent = ""; drawTools();
         var backendGone = e && e.backendDown;
         if (!backendGone && /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
-          var up = await fetch(base + "/", { mode: "no-cors" }).then(function () { return true; }, function () { return false; });
+          var up = await T.request(base + "/", { mode: "no-cors", timeout: 5000 }).then(function () { return true; }, function () { return false; });
           if (my !== seq || !alive) return;
           backendGone = !up;
           if (up) msg = "upstream failed: the source did not answer (Bad Gateway)";
