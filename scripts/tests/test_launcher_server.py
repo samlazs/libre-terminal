@@ -510,7 +510,7 @@ import version as _ver  # noqa: E402
 
 st_cfg, cfg_raw = req("GET", "/api/config")
 cfg_json = json.loads(cfg_raw)
-check(st_cfg == 200 and cfg_json.get("version") == _ver.VERSION == "0.7.0", "/api/config reports VERSION 0.7.0")
+check(st_cfg == 200 and cfg_json.get("version") == _ver.VERSION == "0.8.0", "/api/config reports VERSION 0.8.0")
 check(_ver.VERSION in server.Handler.server_version, "Handler.server_version includes VERSION")
 
 strict_bytes = server.Handler._dumps_strict({"a": float("nan"), "b": [1.5, float("inf"), float("-inf")]})
