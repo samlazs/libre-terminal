@@ -189,7 +189,7 @@ def snapshot(symbol="AAPL", **_):
             got = dict(zip(jobs, ex.map(lambda k: C._first(jobs[k][0], sym, **jobs[k][1]), jobs)))
         p, m, q, st, cal = (got[k] for k in ("profile", "metrics", "quote", "street", "cal"))
         if not p and not q:
-            raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.")
+            raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.", kind="not_covered")
         ccy = q.get("currency") or p.get("currency") or ""
         last, prev = q.get("last_price"), q.get("prev_close")
         ok_last = isinstance(last, (int, float)) and not isinstance(last, bool) and math.isfinite(last)

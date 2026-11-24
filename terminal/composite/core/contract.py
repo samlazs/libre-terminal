@@ -29,7 +29,7 @@ _RATE_RE = re.compile(r"\b429\b|too many requests|rate.?limit", re.I)
 _TIMEOUT_RE = re.compile(r"did not answer in time|timed? ?out\b|\btimeout\b|slow to answer the first request", re.I)
 _INPUT_RE = re.compile(r"^(?:Click|Enter|Choose|Pick|Type|Select|Give|Provide|Please)\b|\bis required\b|^Bad parameters", re.I)
 _NOT_COVERED_RE = re.compile(r"\bnot found\b|not covered|\bno (?:data|options|results|price history|filings?|quotes?)\b|covers U\.S\.|"
-                             r"is not (?:supported|available) for|\bhas no\b|\bunknown (?:symbol|ticker|series|country)", re.I)
+                             r"is not (?:supported|available) for|\bhas no\b|\bhas nothing for\b|\bunknown (?:symbol|ticker|series|country)", re.I)
 
 _ISO = re.compile(r"^\d{4}-\d{2}(?:-\d{2})?(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
 _DATE_KEYS = ("as_of", "date", "period", "time", "datetime", "timestamp", "last_trade", "updated")

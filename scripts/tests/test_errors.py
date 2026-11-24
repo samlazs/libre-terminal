@@ -69,6 +69,7 @@ for msg, kind in (("Click a bond's CUSIP in the table or the curve above (or typ
                   ("Enter a symbol to load this card.", "input"),
                   ("SHEL.L was not found in the Cboe options directory.", "not_covered"),
                   ("SEC company facts cover U.S. filers only; SAP.DE has no XBRL facts.", "not_covered"),
+                  ("Yahoo Finance has nothing for 'ZZZZQ9'. Check the ticker.", "not_covered"),
                   ("OECD rate limit reached; try again in ~600 s", "rate_limited"),
                   ("Nasdaq did not answer in time.", "timeout"),
                   ("FRED changed its download format.", "upstream")):
