@@ -218,6 +218,11 @@ def _sec_rows(sym, tags, instant=False, cache_key=None):
     return C.cached_disk(C.disk_name("secval3_", sym + "_" + (cache_key or tags[0])), 12 * 3600, run)
 
 
+class SplitsUnavailable(C.CompositeError):
+    """The split history did not answer and no saved copy exists: SEC per-share history cannot be split-adjusted, so a
+    per-share figure (and every band built on it) is left blank with this note instead of being drawn on a wrong basis."""
+
+
 def _splits(sym):
     def run():
         try:
@@ -271,7 +276,14 @@ def sec_figures(sym, items=None):
         if k in got:
             out[k] = instants(got[k])
     if "shares" in got:
-        splits = _splits(sym)
+        try:
+            splits = _splits(sym)                     # a saved list is served (flagged stale) when the fetch fails
+        except C.CompositeError as e:
+            raise SplitsUnavailable(
+                f"Bands not drawn: Yahoo Finance's split history for {sym} did not answer and no saved copy exists, so SEC "
+                "share counts cannot be split-adjusted (a wrong per-share basis would shift the bands). Reload in a minute.",
+                kind=C.kind_of(e) if C.kind_of(e) in ("rate_limited", "timeout", "unavailable") else "upstream",
+                retry_after=e.retry_after) from None
         sh = {}
         # the backend derives a fiscal Q4 "quarter" as annual minus three quarters, which is meaningless for an average share
         # count (AAPL Q4 2026: -30 million): quarters from 10-Q filings only, and the annual average at the fiscal year end
@@ -384,6 +396,8 @@ def _figures(sym, px_ccy, prof=None, items=None, last_px=None):
         try:
             figs = sec_figures(sym, items=items)
             return figs, "SEC filings (each figure from its filing date or deadline)", [SEC_SRC, YAHOO_SRC], True
+        except SplitsUnavailable:
+            raise                                     # blank with the note, never a silent switch of basis
         except C.CompositeError:
             pass
     yfigs, basis, sources = _yahoo_pack(sym, px_ccy, prof=prof, last_px=last_px)

@@ -231,4 +231,71 @@ try:
 finally:
     v.sec_figures, v._profile, c.history = saved
 
+# ---- P2-05: a 10:1 split on 2024-06-10 (NVDA-like). Hand-computed: price 100 (Yahoo, split-adjusted), TTM net income
+# 4 x 25 = 100, diluted shares 2.5 filed before the split (x10 = 25 on today's basis) and 25 after -> EPS 100 / 25 = 4,
+# P/E 100 / 4 = 25 on every day. Without the split adjustment the pre-split days would show 100 / (100 / 2.5) = 2.5.
+import json  # noqa: E402
+
+TODAY_S = dt.date(2025, 9, 30)
+Q_ENDS = [dt.date(y, m, 28) for y in (2021, 2022, 2023, 2024, 2025) for m in (1, 4, 7, 10) if dt.date(y, m, 28) < dt.date(2025, 8, 1)]
+
+
+def split_api(base, path, **p):
+    fact = p.get("fact")
+    if path.endswith("historical_splits"):
+        raise c.CompositeError("HTTP 429 Too Many Requests", kind="rate_limited", retry_after=30.0)
+    rows = []
+    for end in Q_ENDS:
+        filed = end + dt.timedelta(days=31)
+        row = {"span": "quarter", "period_ending": end.isoformat(), "period_beginning": (end - dt.timedelta(days=89)).isoformat(),
+               "reported_date": filed.isoformat(), "form": "10-Q"}
+        if fact == "NetIncomeLoss":
+            rows.append(dict(row, value=25.0, unit="USD"))
+        elif fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+            rows.append(dict(row, value=2.5 if filed.isoformat() < "2024-06-10" else 25.0, unit="shares"))
+    return rows
+
+
+CLOSES_S = [((TODAY_S - dt.timedelta(days=i)).isoformat(), 100.0) for i in range(3 * 366, 0, -1)
+            if (TODAY_S - dt.timedelta(days=i)).weekday() < 5]
+saved = c.api, v._splits, v._profile, c.history
+try:
+    c.reset_runtime_caches()
+    c.api = split_api
+    v._profile = lambda sym: {"currency": "USD", "industry": "Semiconductors"}
+    c.history = lambda syms, start, interval="1d": c.PriceHistory({s: list(CLOSES_S) for s in syms})
+    v._splits = lambda sym: [("2024-06-10", 10.0)]
+    sh = v.sec_figures("NVSX", items=["net_income", "shares"])["shares"]
+    check({x[1] for x in sh} == {25.0}, f"every share count on today's basis: 2.5 filed before the split x10 = 25 ({sorted({x[1] for x in sh})})")
+    out = v.bands("NVSX", "pe", "3", today=TODAY_S)
+    s = out["summary"]
+    check(s["p10"] == s["median"] == s["p90"] == 25.0, f"P/E continuous across the split: 25.0 everywhere ({s})")
+    v._splits = lambda sym: []
+    s_raw = v.bands("NVSX", "pe", "3", today=TODAY_S)["summary"]
+    check(s_raw["p10"] == 2.5 and s_raw["p90"] == 25.0, f"(control) without the adjustment the pre-split P/E would be 2.5 ({s_raw})")
+
+    # the split fetch fails and nothing is saved: blank with the note (typed, retryable), never Yahoo figures in silence
+    c.reset_runtime_caches()
+    v._splits = saved[1]
+    split_file = c.CACHE_DIR / (c.disk_name("splits_", "NVSX") + ".json")
+    split_file.unlink(missing_ok=True)
+    try:
+        v.bands("NVSX", "pe", "3", today=TODAY_S)
+        err = None
+    except c.CompositeError as e:
+        err = e
+    check(isinstance(err, v.SplitsUnavailable) and err.kind == "rate_limited" and str(err).startswith("Bands not drawn")
+          and "split history" in str(err), f"no split list: bands blank with the note ({err})")
+    check(not split_file.exists(), "nothing saved for the failed split fetch")
+
+    # the split fetch fails, a saved list exists (8 days old, past its 7-day life): it is used, and the answer says stale
+    split_file.write_text(json.dumps({"t": c.time.time() - 8 * 86400, "v": [["2024-06-10", 10.0]]}), encoding="utf-8")
+    c.reset_runtime_caches()
+    got = c._collect(lambda: v.bands("NVSX", "pe", "3", today=TODAY_S))
+    check(isinstance(got, c.Partial) and len(got.stale) == 1 and got.value["summary"]["median"] == 25.0,
+          f"saved split list used (bands right), flagged stale ({got!r})")
+finally:
+    c.api, v._splits, v._profile, c.history = saved
+    c.reset_runtime_caches()
+
 done("test_valuation")
