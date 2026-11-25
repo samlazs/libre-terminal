@@ -40,6 +40,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -280,9 +281,113 @@ def restart_decision(code: int, crashes: list, now: float) -> tuple:
     return True, RESTART_DELAYS[min(len(crashes) - 1, len(RESTART_DELAYS) - 1)], why
 
 
+# ------------------------------------------------------------------ service logs
+LOG_LIMIT = 5 * 1024 * 1024         # rotate <name>.log beyond this size
+LOG_KEEP = 2                        # generations kept: <name>.log.1 and <name>.log.2
+
+
+class RotatingLog:
+    """local/logs/<name>.log, owned by a background supervisor (`run --log`).
+
+    The supervisor's own lines and its child's output (read from a pipe) are written here, and the file is rotated
+    by size at every child (re)start and while the child runs, so a long session cannot grow it without bound. Only
+    the supervisor holds the file open, so the rename also works on Windows; when a reader holds it there, writing
+    continues and the rename is tried again after retry_s seconds. The children redact their own output before it
+    gets here, so this copies bytes unchanged."""
+
+    def __init__(self, path: Path, limit: int | None = None, keep: int = LOG_KEEP, retry_s: float = 60.0):
+        self.path, self.limit, self.keep, self.retry_s = Path(path), limit or LOG_LIMIT, keep, retry_s
+        self.lock = threading.Lock()
+        self.next_try = 0.0
+        self._open()
+
+    def _open(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fh = open(self.path, "ab")  # noqa: SIM115  (held open for the life of the log; closed by _rotate/close)
+        self.size = self.fh.tell()
+
+    def generation(self, i: int) -> Path:
+        return self.path.with_name(f"{self.path.name}.{i}")
+
+    def _rotate(self):                      # caller holds self.lock
+        if time.monotonic() < self.next_try:
+            return
+        self.fh.close()
+        try:
+            for i in range(self.keep, 1, -1):
+                if self.generation(i - 1).exists():
+                    self.generation(i - 1).replace(self.generation(i))
+            self.path.replace(self.generation(1))
+        except OSError:
+            self.next_try = time.monotonic() + self.retry_s
+        self._open()
+
+    def rotate_if_large(self):
+        with self.lock:
+            if self.size > self.limit:
+                self._rotate()
+
+    def write(self, data: bytes):
+        if not data:
+            return
+        with self.lock:
+            try:
+                self.fh.write(data)
+                self.fh.flush()
+            except (OSError, ValueError):
+                return
+            self.size += len(data)
+            if self.size > self.limit:
+                self._rotate()
+
+    def close(self):
+        with self.lock:
+            self.fh.close()
+
+
+class _LogText:
+    """sys.stdout/sys.stderr of a logging supervisor: text into its RotatingLog."""
+    encoding = "utf-8"
+
+    def __init__(self, log: RotatingLog):
+        self.log = log
+
+    def write(self, s: str) -> int:
+        self.log.write(s.encode("utf-8", "replace"))
+        return len(s)
+
+    def flush(self):
+        pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def pump_output(stream, log: RotatingLog):
+    """Copy a child's piped output into the log until the child closes it."""
+    fd = stream.fileno()
+    while True:
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        log.write(chunk)
+
+
 def cmd_run(a):
-    """Run one service in the foreground; restart it after any abnormal exit (capped, see restart_decision)."""
+    """Run one service in the foreground; restart it after any abnormal exit (capped, see restart_decision).
+
+    With --log (how `start` runs it in the background), output goes to local/logs/<service>.log with size rotation."""
     name, p = a.service, resolve_ports(a)
+    log = None
+    if getattr(a, "log", False):
+        try:
+            log = RotatingLog(LOGS / f"{name}.log")
+            sys.stdout = sys.stderr = _LogText(log)
+        except OSError:
+            log = None
     py = venv_python("v5" if name == "ui" else name)
     if not py.exists():
         fail(f"{ENVS['v5' if name == 'ui' else name]} is missing.", "Run the install first (Install.cmd / install.sh).")
@@ -294,8 +399,14 @@ def cmd_run(a):
     except OSError:
         pass
     while True:
+        if log:
+            log.rotate_if_large()
         say(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {NAMES[name]} -> http://{HOST}:{p[name]}")
-        proc = subprocess.Popen(cmd, cwd=ROOT, env=child_env(p))
+        pipe = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT} if log else {}
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=child_env(p), **pipe)
+        pump = threading.Thread(target=pump_output, args=(proc.stdout, log), daemon=True, name=f"{name}-log") if log else None
+        if pump:
+            pump.start()
         _write_atomic(pidfile(name), json.dumps({"supervisor": os.getpid(), "child": proc.pid, "port": p[name], "root": str(ROOT)}))
         try:
             code = proc.wait()
@@ -303,6 +414,9 @@ def cmd_run(a):
             proc.terminate()
             code = proc.wait()
             break
+        finally:
+            if pump:
+                pump.join(5)            # the child's last lines land before the supervisor's own
         if code > 2 ** 31:
             code -= 2 ** 32                 # Windows reports a killed process as 4294967295: show it as -1
         again, delay, why = restart_decision(code, crashes, time.time())
@@ -359,24 +473,18 @@ def resolve_service_targets(target: str = "all") -> list[str]:
 
 
 def spawn(name: str, p: dict):
-    """Start `launcher.py run <name>` in the background, detached from this console, logging to local/logs/<name>.log."""
-    log_path = LOGS / f"{name}.log"
-    try:
-        if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
-            log_path.replace(log_path.with_suffix(".log.1"))
-    except OSError:
-        pass
-    cmd = [str(venv_python("v5")), str(THIS), "run", name, "--ui-port", str(p["ui"]), "--v5-port", str(p["v5"]), "--v4-port", str(p["v4"])]
-    with open(log_path, "ab") as log:
-        kw = dict(cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, env=child_env(p), close_fds=True)
-        if WIN:
-            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-            try:
-                subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)       # CREATE_BREAKAWAY_FROM_JOB: survive the console closing
-            except OSError:
-                subprocess.Popen(cmd, creationflags=flags, **kw)
-        else:
-            subprocess.Popen(cmd, start_new_session=True, **kw)
+    """Start `launcher.py run <name> --log` in the background, detached from this console. The supervisor writes
+    local/logs/<name>.log itself (RotatingLog), so nothing else holds that file open."""
+    cmd = [str(venv_python("v5")), str(THIS), "run", name, "--log", "--ui-port", str(p["ui"]), "--v5-port", str(p["v5"]), "--v4-port", str(p["v4"])]
+    kw = dict(cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=child_env(p), close_fds=True)
+    if WIN:
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        try:
+            subprocess.Popen(cmd, creationflags=flags | 0x01000000, **kw)       # CREATE_BREAKAWAY_FROM_JOB: survive the console closing
+        except OSError:
+            subprocess.Popen(cmd, creationflags=flags, **kw)
+    else:
+        subprocess.Popen(cmd, start_new_session=True, **kw)
 
 
 def supervisor_alive(name: str) -> bool:
@@ -1085,6 +1193,7 @@ def main():
     s.add_argument("paths", nargs="*", help="optional path filters")
     s = sub.add_parser("run", parents=[ports], help="run one service in the foreground")
     s.add_argument("service", choices=["v5", "v4", "ui"])
+    s.add_argument("--log", action="store_true", help="write to local/logs/<service>.log with size rotation (how start runs it)")
     a = ap.parse_args()
     local_paths.ensure()        # create local/ (or move an old layout into it) before anything reads or writes there
     handler = {"install": cmd_install, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "status": cmd_status,

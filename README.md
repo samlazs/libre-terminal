@@ -239,7 +239,7 @@ To update a git clone, stop the terminal, run `git pull`, and re-run `Install.cm
 
 ### Local data folder
 
-Everything personal lives in `local/`, which git ignores. The terminal writes `local/README.txt` describing its contents on each start. Logs are in `local/logs/` (`ui.log`, `v5.log`, `v4.log`, and freeze dumps).
+Everything personal lives in `local/`, which git ignores. The terminal writes `local/README.txt` describing its contents on each start. Logs are in `local/logs/` (`ui.log`, `v5.log`, `v4.log`, and freeze dumps). A log that passes 5 MB is renamed to `.log.1` (the one before that to `.log.2`), also while the terminal keeps running, so logs never grow without bound.
 
 ### For contributors
 
