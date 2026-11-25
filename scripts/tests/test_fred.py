@@ -152,4 +152,43 @@ try:
 finally:
     c._fred, c._fred_csv = saved
 
+# ---- P2-04: a 429 from the public download is a rate limit: one request, no retry, a cooldown that honours Retry-After
+from _fixtures import fault, no_retry_delays  # noqa: E402
+
+for ra, want in ((45, 45.0), (5000, 600.0)):
+    fp.reset()
+    with no_retry_delays(), fault("http429", retry_after=ra) as rec:
+        try:
+            fp.observations("DGS10", start="2026-01-01")
+            e1 = None
+        except fp.FredPublicError as e:
+            e1 = e
+        n = rec.calls
+        try:
+            fp.observations("DGS2", start="2026-01-01")
+            e2 = None
+        except fp.FredPublicError as e:
+            e2 = e
+        from composite.core import http as _H  # noqa: E402
+        left = _H._cool.get(_H._cool_key(fp.CSV_URL, "fred"), 0) - c.time.monotonic()      # (the harness clears it on exit)
+    check(e1 is not None and e1.kind == "rate_limited" and n == 1, f"429 (Retry-After {ra}): rate_limited after one request, no retry ({n})")
+    check("limiting requests" in str(e1) and "did not answer" not in str(e1), f"called a rate limit, not an outage: {e1}")
+    check(rec.calls == 1 and e2 is not None and e2.kind == "rate_limited" and e2.retry_after and e2.retry_after <= want,
+          "during the cooldown the next series asks nothing and is rate limited too")
+    check(want - 2 <= left <= want, f"cooldown honours Retry-After {ra} (capped at 600): {left:.0f} s")
+fp.reset()
+saved_obs = fp.observations
+try:
+    fp.observations = lambda sid, start=None: (_ for _ in ()).throw(fp.FredPublicError("limited", kind="rate_limited", retry_after=40.0))
+    c.reset_runtime_caches()
+    try:
+        c._fred_csv("DGS10", "2026-01-01")
+        ce = None
+    except c.CompositeError as e:
+        ce = e
+    check(ce is not None and c.kind_of(ce) == "rate_limited" and ce.retry_after == 40.0, "the terminal keeps the kind and retry hint")
+finally:
+    fp.observations = saved_obs
+    c.reset_runtime_caches()
+
 done("test_fred")

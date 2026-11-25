@@ -20,8 +20,10 @@ Usage: python scripts/run_backend.py <name> [openbb-api arguments...]
 from __future__ import annotations
 
 import atexit
+import collections
 import contextlib
 import faulthandler
+import itertools
 import json
 import math
 import os
@@ -4433,7 +4435,9 @@ _NASDAQ_BLOCK_MARKERS = (
     "access denied",
     "too many requests",
 )
-NASDAQ_DEFAULT_TIMEOUT_SEC = 10.0
+NASDAQ_DEFAULT_TIMEOUT_SEC = 10.0   # also the longest wait for a request slot when the request gives no timeout
+# The gate's limits above are also declared in terminal/composite/core/http.py PROVIDERS["nasdaq"]["backend_gate"] (this
+# process cannot import terminal/); test_nasdaq_etf asserts the two copies are equal.
 
 _nasdaq_rl_lock = threading.Lock()
 _nasdaq_blocked_until = 0.0
@@ -4443,6 +4447,12 @@ _nasdaq_loop_gates: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _nasdaq_slot_lock = threading.Lock()
 _nasdaq_inflight = 0
 _nasdaq_next_at = 0.0
+_nasdaq_queue: collections.deque = collections.deque()      # tickets of requests waiting for a slot, in arrival order
+_nasdaq_last_start = 0.0                                     # when the last request actually went out
+_nasdaq_seq_next = 0                                         # start order handed out with each slot (arrival order)
+_nasdaq_turn = 0                                             # the start order whose turn it is
+_nasdaq_abandoned: set = set()                               # start orders given up before starting (skipped)
+_nasdaq_tickets = itertools.count(1)
 _nasdaq_sessions_lock = threading.Lock()
 _nasdaq_sessions: dict[int, dict] = {}
 _nasdaq_classes_cache = None
@@ -4508,28 +4518,74 @@ def _get_nasdaq_loop_gate() -> dict:
 
 
 @contextlib.asynccontextmanager
-async def _nasdaq_network_slot():
-    """Hold one of NASDAQ_MAX_CONCURRENCY process-wide slots, spaced NASDAQ_MIN_GAP_SEC apart, across all event loops."""
+async def _nasdaq_network_slot(wait_s: float | None = None):
+    """Hold one of NASDAQ_MAX_CONCURRENCY process-wide slots, spaced NASDAQ_MIN_GAP_SEC apart, across all event loops.
+
+    Slots are given in arrival order (a ticket queue: a later request never overtakes a waiting one), and the wait is
+    bounded by wait_s (default NASDAQ_DEFAULT_TIMEOUT_SEC): past it the request fails with a rate-limit message and a
+    retry hint, never a hang or a generic timeout. A cooldown that starts while waiting ends the wait at once."""
     import asyncio
 
-    global _nasdaq_inflight, _nasdaq_next_at
+    global _nasdaq_inflight, _nasdaq_next_at, _nasdaq_last_start, _nasdaq_seq_next, _nasdaq_turn
     _check_nasdaq_cooldown()
-    while True:
-        with _nasdaq_slot_lock:
-            if _nasdaq_inflight < NASDAQ_MAX_CONCURRENCY:
-                _nasdaq_inflight += 1
-                break
-        await asyncio.sleep(0.02)
-        _check_nasdaq_cooldown()
+    limit_s = float(wait_s) if wait_s and wait_s > 0 else NASDAQ_DEFAULT_TIMEOUT_SEC
+    give_up = time.monotonic() + limit_s
+    with _nasdaq_slot_lock:
+        ticket = next(_nasdaq_tickets)
+        _nasdaq_queue.append(ticket)
     try:
-        _check_nasdaq_cooldown()
+        while True:
+            with _nasdaq_slot_lock:
+                if _nasdaq_queue and _nasdaq_queue[0] == ticket and _nasdaq_inflight < NASDAQ_MAX_CONCURRENCY:
+                    _nasdaq_queue.popleft()
+                    _nasdaq_inflight += 1
+                    seq, _nasdaq_seq_next = _nasdaq_seq_next, _nasdaq_seq_next + 1
+                    now = time.monotonic()
+                    slot_at = max(now, _nasdaq_next_at)          # start times in arrival order, NASDAQ_MIN_GAP_SEC apart
+                    _nasdaq_next_at = slot_at + NASDAQ_MIN_GAP_SEC
+                    wait = slot_at - now
+                    break
+                ahead = _nasdaq_queue.index(ticket) if ticket in _nasdaq_queue else 0
+            if time.monotonic() >= give_up:
+                raise _nasdaq_error(
+                    f"Nasdaq rate limit: no request slot within {limit_s:.0f}s ({ahead} requests ahead, at most "
+                    f"{NASDAQ_MAX_CONCURRENCY} at a time). Try again shortly or switch source on this card."
+                )
+            await asyncio.sleep(0.01)
+            _check_nasdaq_cooldown()
+    except BaseException:                         # timed out, cooled down or cancelled while queued: leave the queue
         with _nasdaq_slot_lock:
-            now = time.monotonic()
-            slot_at = max(now, _nasdaq_next_at)
-            _nasdaq_next_at = slot_at + NASDAQ_MIN_GAP_SEC
-            wait = slot_at - now
-        if wait > 0:
-            await asyncio.sleep(wait)
+            with contextlib.suppress(ValueError):
+                _nasdaq_queue.remove(ticket)
+        raise
+    try:
+        started = False
+        try:
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # starts go out in the same order, each at least NASDAQ_MIN_GAP_SEC after the previous one actually went out
+            # (a timer that fired early, or a neighbour that started late, never shortens the gap)
+            while True:
+                with _nasdaq_slot_lock:
+                    while _nasdaq_turn in _nasdaq_abandoned:
+                        _nasdaq_abandoned.discard(_nasdaq_turn)
+                        _nasdaq_turn += 1
+                    now = time.monotonic()
+                    # not our turn yet: at least one gap per start still ahead of us (no busy polling under load)
+                    short = (_nasdaq_last_start + NASDAQ_MIN_GAP_SEC - now if _nasdaq_turn == seq
+                             else max(0.005, (seq - _nasdaq_turn) * NASDAQ_MIN_GAP_SEC - (now - _nasdaq_last_start)))
+                    if _nasdaq_turn == seq and short <= 0:
+                        _nasdaq_last_start = now
+                        _nasdaq_turn += 1
+                        started = True
+                        break
+                await asyncio.sleep(max(0.002, short))
+        except BaseException:
+            if not started:
+                with _nasdaq_slot_lock:
+                    if seq >= _nasdaq_turn:
+                        _nasdaq_abandoned.add(seq)       # cancelled before its turn: the ones behind it are not held up
+            raise
         _check_nasdaq_cooldown()
         yield
     finally:
@@ -4738,7 +4794,8 @@ def _get_nasdaq_session_classes():
             t = kwargs.get("timeout")
             if isinstance(t, (int, float)) and not isinstance(t, bool):
                 kwargs["timeout"] = aiohttp.ClientTimeout(total=float(t))
-            async with _nasdaq_network_slot():
+            total = getattr(kwargs.get("timeout"), "total", None) or getattr(self.timeout, "total", None)
+            async with _nasdaq_network_slot(total):      # the slot wait is bounded by the request's own timeout
                 return await super()._request(method, str_or_url, *args, **kwargs)
 
     try:
@@ -4894,13 +4951,19 @@ async def close_nasdaq_sessions(loop=None) -> None:
 
 
 def reset_nasdaq_rate_limit_state() -> None:
-    global _nasdaq_blocked_until, _nasdaq_blocked_reason, _nasdaq_inflight, _nasdaq_next_at
+    global _nasdaq_blocked_until, _nasdaq_blocked_reason, _nasdaq_inflight, _nasdaq_next_at, _nasdaq_last_start
+    global _nasdaq_seq_next, _nasdaq_turn
     with _nasdaq_rl_lock:
         _nasdaq_blocked_until = 0.0
         _nasdaq_blocked_reason = ""
     with _nasdaq_slot_lock:
         _nasdaq_inflight = 0
         _nasdaq_next_at = 0.0
+        _nasdaq_last_start = 0.0
+        _nasdaq_seq_next = 0
+        _nasdaq_turn = 0
+        _nasdaq_abandoned.clear()
+        _nasdaq_queue.clear()
     _nasdaq_loop_gates.clear()
     with _nasdaq_sessions_lock:
         entries = list(_nasdaq_sessions.values())

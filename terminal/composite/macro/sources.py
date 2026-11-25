@@ -222,7 +222,8 @@ def _fred_csv(sid, start):
         try:
             rows = fred_public.observations(sid, start=start[:4] + "-01-01")
         except fred_public.FredPublicError as e:
-            raise C.CompositeError(f"FRED has no series '{sid}'." if e.missing else str(e)) from None
+            raise C.CompositeError(f"FRED has no series '{sid}'." if e.missing else str(e),
+                                   kind="not_covered" if e.missing else e.kind, retry_after=e.retry_after) from None
         return [[d, v] for d, v in rows if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
     pts = C.cached_disk("fredcsv_" + re.sub(r"[^A-Za-z0-9]+", "_", sid) + "_" + start[:4], 3 * 3600, run)
     return [p for p in pts if p[0] >= start[:10]]

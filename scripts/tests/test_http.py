@@ -18,8 +18,9 @@ for url, want in ((C.V5 + "/equity/price/quote?symbol=AAPL&provider=yfinance", "
                   ("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10", "fred"), ("https://www.multpl.com/s-p-500-pe-ratio/table/by-month", "multpl"),
                   ("https://news.google.com/rss/search?q=x", "google_news"), ("https://www.ecb.europa.eu/rss/press.html", "default")):
     check(H.provider_of(url) == want, f"provider_of {url[:60]} -> {want}")
-check(all(set(p) == {"timeout", "attempts", "retry_on", "max_concurrency", "min_interval", "cooldown_on_429", "down_for", "ua"}
-          for p in H.PROVIDERS.values()), "every policy states every field")
+FIELDS = {"timeout", "attempts", "retry_on", "max_concurrency", "min_interval", "cooldown_on_429", "down_for", "ua"}
+check(all(set(p) - {"backend_gate"} == FIELDS for p in H.PROVIDERS.values()), "every policy states every field")
+check([k for k, p in H.PROVIDERS.items() if "backend_gate" in p] == ["nasdaq"], "only Nasdaq declares the data service's own gate")
 check(H.PROVIDERS["oecd"]["attempts"] == 1 and H.PROVIDERS["nasdaq"]["attempts"] == 1, "OECD and Nasdaq are never retried")
 check(429 not in H.PROVIDERS["fred"]["retry_on"] and not any(429 in p["retry_on"] for p in H.PROVIDERS.values()), "no provider retries a 429")
 check(H.PROVIDERS["multpl"]["attempts"] == 1 and H.PROVIDERS["multpl"]["down_for"] == 120,

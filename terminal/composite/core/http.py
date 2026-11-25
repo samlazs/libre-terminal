@@ -56,7 +56,12 @@ PROVIDERS = {
     "oecd":        dict(timeout=60, attempts=1, retry_on=(), max_concurrency=None, min_interval=0.0, cooldown_on_429=600,
                         down_for=0, ua="openbb-terminal-ui"),
     "nasdaq":      dict(timeout=45, attempts=1, retry_on=(), max_concurrency=None, min_interval=0.0, cooldown_on_429=120,
-                        down_for=0, ua="openbb-terminal-ui"),
+                        down_for=0, ua="openbb-terminal-ui",
+                        # the data service's own gate in front of Nasdaq (scripts/run_backend.py NASDAQ_*; a test keeps them equal):
+                        # slots in flight, seconds between starts, cooldown after a 429 (Retry-After kept within min..max),
+                        # longest wait for a slot when the request gives no timeout
+                        backend_gate=dict(max_concurrency=4, min_gap=0.15, cooldown=120.0, retry_after_min=30.0,
+                                          retry_after_max=600.0, slot_wait=10.0)),
     # FRED's edge stalls browser-like agents and answers the plain Python one; it is not retried on 429
     "fred":        dict(timeout=(15, 25), attempts=2, retry_on=(408, 500, 502, 503, 504, _NET), max_concurrency=4,
                         min_interval=0.0, cooldown_on_429=60, down_for=120,

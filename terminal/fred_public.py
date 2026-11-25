@@ -34,9 +34,11 @@ AGG = {"avg", "sum", "eop"}
 class FredPublicError(Exception):
     """The public download could not serve this request (missing series, or FRED not answering)."""
 
-    def __init__(self, msg, missing=False):
+    def __init__(self, msg, missing=False, kind=None, retry_after=None):
         super().__init__(msg)
         self.missing = missing
+        self.kind = kind                    # contract error kind when known (rate_limited for a 429)
+        self.retry_after = retry_after
 
 
 def valid_id(sid):
@@ -94,6 +96,11 @@ def _get(url):
         status = getattr(e, "http_status", None)
         if status in (400, 404):
             raise FredPublicError("FRED has no such series.", missing=True) from None
+        if e.kind == "rate_limited":        # a 429, or its cooldown: not retried, not called an outage
+            wait = int(e.retry_after or 0) + 1 if e.retry_after else None
+            raise FredPublicError("FRED's public download is limiting requests" + (f"; try again in ~{wait} s." if wait else "; try again shortly.")
+                                  + " The free FRED key (Setup-Keys.cmd or setup-keys.sh) avoids this limit.",
+                                  kind="rate_limited", retry_after=e.retry_after) from None
         why = f"HTTP {status}" if status else "no answer in time" if e.kind == "timeout" else "not reachable"
         raise FredPublicError(f"FRED's public download did not answer ({why}). Try again in a minute, or add the free FRED key "
                               "with Setup-Keys.cmd (or setup-keys.sh).") from None
