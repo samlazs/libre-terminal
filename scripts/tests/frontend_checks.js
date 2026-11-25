@@ -1757,6 +1757,118 @@ window.__fcPromise = (async function (T) {
     window.fetch = origFetch;
   }
 
+  // ---- long session (P1-09): 200 tab switches through the real tab bar leave no window/document listener, interval
+  // or DOM growth; the browser heap after 200 switches is within 20% of the value after 20; the popover anchor check
+  // runs only while a popover is open and the page is visible
+  await (async function () {
+    var proto = EventTarget.prototype, addL = proto.addEventListener, remL = proto.removeEventListener;
+    var setI = window.setInterval, clrI = window.clearInterval, origFetch = window.fetch;
+    var entries = [], live = new Set();
+    function capOf(o) { return typeof o === "boolean" ? o : !!(o && o.capture); }
+    function find(t, type, fn, c) {
+      for (var i = 0; i < entries.length; i++) { var e = entries[i]; if (e.t === t && e.type === type && e.fn === fn && e.c === c) return i; }
+      return -1;
+    }
+    function drop(t, type, fn, c) { var i = find(t, type, fn, c); if (i >= 0) entries.splice(i, 1); }
+    var keepCurId = T.S.cur && T.S.cur.id, keepTab = T.S.tabId, keepDefs = T.S.widgets.x;
+    var tabsEl = document.getElementById("tabs");
+    try {
+      proto.addEventListener = function (type, fn, o) {
+        var t = this, c = capOf(o);
+        if ((t === window || t === document) && fn && !(o && o.once) && find(t, type, fn, c) < 0) {
+          entries.push({ t: t, type: type, fn: fn, c: c });
+          if (o && o.signal) addL.call(o.signal, "abort", function () { drop(t, type, fn, c); });
+        }
+        return addL.apply(this, arguments);
+      };
+      proto.removeEventListener = function (type, fn, o) {
+        if (this === window || this === document) drop(this, type, fn, capOf(o));
+        return remL.apply(this, arguments);
+      };
+      window.setInterval = function () { var id = setI.apply(window, arguments); live.add(id); return id; };
+      window.clearInterval = function (id) { live.delete(id); return clrI.apply(window, arguments); };
+      var probe = function () {};
+      window.addEventListener("resize", probe);
+      var counted = entries.length;
+      window.removeEventListener("resize", probe);
+      ok(counted === 1 && entries.length === 0, "the listener count sees a window listener come and go");
+
+      // the popover anchor check: no interval while nothing is open or the page is hidden
+      var anchor = document.createElement("button");
+      document.body.appendChild(anchor);
+      var before = live.size;
+      T.popover(anchor, document.createElement("div"));
+      ok(live.size === before + 1, "an open popover runs one anchor check");
+      Object.defineProperty(document, "hidden", { configurable: true, get: function () { return true; } });
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(live.size === before, "the anchor check pauses while the page is hidden");
+      delete document.hidden;
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(live.size === before + 1, "it resumes when the page is visible again with the popover still open");
+      anchor.remove();
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(!document.querySelector("#pop-root .pop") && live.size === before, "a popover whose anchor is gone closes and its check stops");
+      T.closePop();
+      ok(live.size === before, "closing a popover leaves no interval");
+
+      // a dashboard with four identical tabs of real cards: two tables (one with auto-refresh) and one failing source
+      T.S.widgets.x = Object.assign({}, keepDefs, {
+        x_soak_a: { widgetId: "x_soak_a", name: "Soak A", endpoint: "/x/soak_a", type: "table", params: [], source: ["SEC"], refetchInterval: 60000 },
+        x_soak_b: { widgetId: "x_soak_b", name: "Soak B", endpoint: "/x/soak_b", type: "table", params: [], source: ["FRED"] },
+        x_soak_c: { widgetId: "x_soak_c", name: "Soak C", endpoint: "/x/soak_c", type: "table", params: [], source: ["ECB"] }
+      });
+      var rows = JSON.stringify([{ date: "2026-11-20", value: 1.5 }, { date: "2026-11-21", value: 1.6 }]);
+      window.fetch = async function (u, opts) {
+        var su = String(u);
+        if (su.indexOf("/x/soak_c") >= 0) return { ok: false, status: 502, headers: new Headers({ "Content-Type": "application/json" }), text: async function () { return JSON.stringify({ error: { kind: "upstream", message: "ECB did not answer" }, sources: ["ECB"] }); } };
+        if (su.indexOf("/x/soak_") >= 0) return { ok: true, status: 200, headers: new Headers({ "Content-Type": "application/json" }), text: async function () { return rows; } };
+        return origFetch(u, opts);
+      };
+      var tabs = [0, 1, 2, 3].map(function (i) {
+        return { id: "s" + i, name: "S" + i, items: ["a", "b", "c"].map(function (k, j) { return { uid: "s" + i + k, backend: "x", widgetId: "x_soak_" + k, x: j * 4, y: 0, w: 4, h: 6, params: {} }; }) };
+      });
+      T.S.state.dashboards["user:soak"] = { id: "user:soak", name: "Soak", description: "", source: "user", groups: [], tabs: tabs };
+      ok(T.openDashboard("user:soak", "s0"), "the long-session dashboard opens");
+      var settle = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+      var heap = function () {
+        if (window.gc) { window.gc(); window.gc(); }
+        return performance.memory ? performance.memory.usedJSHeapSize : null;
+      };
+      var measure = function () {
+        return { listeners: entries.length, intervals: live.size, nodes: document.getElementsByTagName("*").length, heap: heap() };
+      };
+      var first = null, at20 = null;
+      for (var k = 1; k <= 200; k++) {
+        var tabNodes = [].slice.call(tabsEl.querySelectorAll(".tab:not(.add)"));
+        tabNodes[k % 4].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await settle(k === 1 || k === 20 || k === 200 ? 60 : 4);
+        if (k === 1) first = measure();
+        if (k === 20) at20 = measure();
+      }
+      // switch 200 lands on tab 0 and switch 1 on tab 1: one more switch compares the same tab
+      [].slice.call(tabsEl.querySelectorAll(".tab:not(.add)"))[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await settle(60);
+      var last = measure();
+      ok(T.S.tabId === "s1" && T.S.cards.length === 3 && document.querySelectorAll("#canvas .w").length >= 3, "the cards of the last tab are on the page (" + T.S.cards.length + ")");
+      ok(last.listeners === first.listeners, "window/document listeners after 200 switches equal those after the first (" + first.listeners + " -> " + last.listeners + ")");
+      ok(last.intervals === first.intervals && first.intervals >= 1, "live intervals after 200 switches equal those after the first (" + first.intervals + " -> " + last.intervals + ")");
+      ok(last.nodes === first.nodes, "DOM nodes after 200 switches equal those after the first (" + first.nodes + " -> " + last.nodes + ")");
+      ok(!!performance.memory && at20.heap > 0, "the browser reports its heap");
+      var growth = (last.heap - at20.heap) / at20.heap;
+      ok(growth <= 0.2, "heap after 200 switches within 20% of the value after 20 (" + at20.heap + " -> " + last.heap + ")");
+      window.__fcNotes = (window.__fcNotes || []).concat(["long session: listeners " + first.listeners + "->" + last.listeners + ", intervals " + first.intervals + "->" + last.intervals
+        + ", DOM nodes " + first.nodes + "->" + last.nodes + ", heap after 20 " + (at20.heap / 1048576).toFixed(2) + " MB, after 200 " + (last.heap / 1048576).toFixed(2)
+        + " MB (" + (growth >= 0 ? "+" : "") + (growth * 100).toFixed(1) + "%)" + (window.gc ? "" : ", no forced GC")]);
+    } finally {
+      proto.addEventListener = addL; proto.removeEventListener = remL;
+      window.setInterval = setI; window.clearInterval = clrI; window.fetch = origFetch;
+      delete T.S.state.dashboards["user:soak"];
+      T.S.widgets.x = keepDefs;
+      if (keepCurId && T.openDashboard(keepCurId, keepTab)) { /* back where the checks started */ }
+      else { (T.S.cards || []).forEach(function (c) { try { c.destroy(); } catch (e) { /* already gone */ } }); }
+    }
+  })();
+
   console.log("frontend checks: " + n + " passed");
   return n;
 })(window.T);

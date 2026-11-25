@@ -56,6 +56,9 @@ REPORT = """
     var out = document.createElement("pre"); out.id = "frontend-result";
     out.textContent = window.__fcError ? "FRONTEND FAILED: " + window.__fcError : (window.__fc || "FRONTEND FAILED: no result");
     document.body.appendChild(out);
+    var notes = document.createElement("pre"); notes.id = "frontend-notes";
+    notes.textContent = (window.__fcNotes || []).join(" | ");
+    document.body.appendChild(notes);
   }
   var p = window.__fcPromise;
   if (p && typeof p.then === "function") {
@@ -99,6 +102,7 @@ threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 profile = tempfile.mkdtemp(prefix="terminal-edge-")
 cmd = [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+       "--enable-precise-memory-info", "--js-flags=--expose-gc",      # heap figures for the long-session check
        f"--user-data-dir={profile}", "--virtual-time-budget=30000", "--dump-dom", f"http://127.0.0.1:{port}/__checks.html"]
 try:
     r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
@@ -111,6 +115,9 @@ m = re.search(r'id="frontend-result">([^<]*)<', dom)
 tail = (r.stderr or "").strip().splitlines()
 result = m.group(1) if m else "no result in the page" + (f" ({tail[-1][:200]})" if tail else "")
 check(m is not None, "the browser ran the page: " + result)
+notes = re.search(r'id="frontend-notes">([^<]*)<', dom)
+if notes and notes.group(1):
+    print("  " + notes.group(1))
 mm = re.match(r"frontend checks: (\d+) passed", result)
 check(mm is not None, result)
 n = int(mm.group(1))

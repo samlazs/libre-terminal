@@ -6,6 +6,7 @@
 
   T.closePop = function () {
     if (openPop) { openPop.node.remove(); if (openPop.onClose) openPop.onClose(); openPop = null; }
+    watchAnchor();
   };
 
   document.addEventListener("mousedown", function (e) {
@@ -18,7 +19,16 @@
   document.addEventListener("scroll", function (e) {
     if (openPop && !(e.target && e.target.nodeType === 1 && openPop.node.contains(e.target))) T.closePop();
   }, true);
-  setInterval(function () { if (openPop && openPop.anchor && !openPop.anchor.isConnected) T.closePop(); }, 400);
+  // The anchor check runs only while a popover is open and the page is visible, so a long
+  // session keeps no timer running for nothing (P1-09).
+  var anchorTimer = null;
+  function anchorGone() { if (openPop && openPop.anchor && !openPop.anchor.isConnected) T.closePop(); }
+  function watchAnchor() {
+    var want = !!(openPop && openPop.anchor) && !document.hidden;
+    if (want && !anchorTimer) anchorTimer = setInterval(anchorGone, 400);
+    else if (!want && anchorTimer) { clearInterval(anchorTimer); anchorTimer = null; }
+  }
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) anchorGone(); watchAnchor(); });
 
   /** Show `node` as a popover under `anchor`. */
   T.popover = function (anchor, node, opts) {
@@ -34,6 +44,7 @@
     if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
     node.style.left = left + "px"; node.style.top = top + "px";
     openPop = { node: node, anchor: anchor, onClose: opts.onClose };
+    watchAnchor();
     return node;
   };
 
