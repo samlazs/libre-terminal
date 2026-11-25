@@ -82,34 +82,52 @@ WINDOWS_README_TEXT = f"""\
 Libre Terminal v{VERSION} - Windows Quick Guide
 ===========================================
 
+You need Windows 10 or 11, an internet connection and about 1 GB of free space.
 No Python, coding tools, or accounts are required.
 
-1. EXTRACT FIRST (important)
-   Make sure you extracted this folder from the ZIP file before running anything.
-   (Right-click the ZIP -> Extract All... -> Extract.)
+1. EXTRACT FIRST
+   If you are looking at this file inside the ZIP window, close it first:
+   right-click Libre-Terminal-Windows.zip, choose "Extract All...", click Extract,
+   and open the extracted Libre-Terminal folder.
+   Tip: a short folder such as C:\\Libre-Terminal works best (not OneDrive).
 
-2. INSTALL (once, takes 2-5 minutes, needs internet & ~1 GB free space)
-   Double-click:  Install.cmd
-   - If Windows shows "Windows protected your PC", click "More info" -> "Run anyway".
-     (This only appears once; Install.cmd unblocks the other scripts automatically.)
-   - Wait until it says "Done. Double-click Start.cmd to open the terminal."
+2. INSTALL (once, 2 to 5 minutes)
+   Double-click  Install.cmd
+   - If Windows shows "Windows protected your PC", click "More info", then "Run anyway".
+   - A black window opens and shows download progress. Leave it open.
+   - Done when it says "Install finished". Close that window.
 
-3. LAUNCH
-   Double-click:  Start.cmd
-   - First launch warms initial market data and charts (15-60 seconds), then opens
-     your browser automatically at http://127.0.0.1:6950.
+3. START
+   Double-click  Start.cmd
+   - The first start takes about a minute. Then your browser opens the terminal
+     at http://127.0.0.1:6950 (you can bookmark it).
+   - The black window can be closed; the terminal keeps running in the background.
+   - After restarting your computer, double-click Start.cmd again.
 
-4. STOP / OPTIONAL FREE API KEYS
-   - Double-click  Stop.cmd        to shut down cleanly when finished.
-   - Double-click  Setup-Keys.cmd  later if you want to add free API keys
-     (FRED, EIA, BLS, Congress.gov). Most dashboards work without any keys.
+4. STOP
+   Double-click  Stop.cmd  when you are finished.
+
+5. OPTIONAL FREE API KEYS
+   Double-click  Setup-Keys.cmd  to add free keys (FRED, EIA, BLS, Congress.gov).
+   Most dashboards work without any keys.
+
+IF SOMETHING GOES WRONG
+   - Read the red or yellow lines in the black window: they say what to do.
+   - Install stops partway: usually a company proxy, firewall, VPN or antivirus.
+     Try another network, then double-click Install.cmd again (it carries on).
+   - Blank cards on the first start: wait a minute, then click Refresh in the top bar.
+   - Logs are in the local\\logs folder inside Libre-Terminal.
+   - More help: https://github.com/samlazs/libre-terminal#updating-and-troubleshooting
 
 UPDATING FROM AN EARLIER VERSION
-   Stop the old version first (double-click Stop.cmd in the old folder).
-   To keep your saved layouts and API keys, copy the "local" folder from the old
-   folder into this new folder, then double-click Install.cmd and Start.cmd.
+   Double-click Stop.cmd in the old folder. To keep your saved layouts and API keys,
+   copy the "local" folder from the old folder into this new folder, then
+   double-click Install.cmd and Start.cmd.
 
-Full documentation & updates: https://github.com/samlazs/libre-terminal
+UNINSTALL
+   Double-click Stop.cmd, then delete the Libre-Terminal folder.
+
+Project page: https://github.com/samlazs/libre-terminal
 """
 
 _AI_TERMS = (

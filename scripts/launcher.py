@@ -62,7 +62,7 @@ PY_VERSION = "3.12"
 DEFAULT_PORTS = {"v5": 6900, "v4": 6901, "ui": 6950}
 ENV_PORT = {"v5": "TERMINAL_V5_PORT", "v4": "TERMINAL_V4_PORT", "ui": "TERMINAL_UI_PORT"}
 ENVS = {"v5": ".venv-v5", "v4": ".venv-v4"}
-NAMES = {"v5": "Data backend (OpenBB Platform 5)", "v4": "Legacy data backend (OpenBB 4.7)", "ui": "Terminal UI"}
+NAMES = {"v5": "Data service (OpenBB Platform 5)", "v4": "Legacy data service (OpenBB 4.7)", "ui": "Terminal page"}
 PROBE = {"v5": "/", "v4": "/", "ui": "/api/config"}
 START_TIMEOUT = 300                     # seconds; the very first start builds OpenBB's command index
 WARM_WAIT_TIMEOUT = 90                  # seconds to wait for initial landing data and charts before opening the browser
@@ -187,8 +187,8 @@ def probe(name: str, port: int) -> str:
 
 
 # ------------------------------------------------------------------ install
-def run_step(cmd, what, hint=None, env=None):
-    say(f"  > {' '.join(str(c) for c in cmd)}")
+def run_step(cmd, what, hint=None, env=None, note=""):
+    say(f"  {what}{note}...")
     try:
         r = subprocess.run([str(c) for c in cmd], cwd=ROOT, env=env)
     except OSError as e:
@@ -225,12 +225,12 @@ def cmd_install(a):
     use_v4 = want_v4(a)
     targets = ["v5", "v4"] if use_v4 else ["v5"]
     if any(supervisor_alive(s) for s in DEFAULT_PORTS):
-        say("Stopping the running terminal first (its files are in use while it runs)...")
+        say("Stopping the running terminal first (its files are in use while it runs).")
         cmd_stop(a)
-    say("Installing the terminal. Everything goes into this folder (.venv-v5" + (", .venv-v4" if use_v4 else "") + ") plus uv's download cache.")
-    say("The first install downloads several hundred MB and needs about " + ("1.5 GB" if use_v4 else "1 GB") + " of disk. Re-running it is safe and quick.\n")
-    net_hint = ("Most install failures are network related (proxy, firewall, VPN) or antivirus locking files.\n"
-                "Fix that and run the install again; it continues where it stopped.")
+    say("Installing Python and the data packages into this folder (about " + ("1.5 GB" if use_v4 else "1 GB") + " of disk).")
+    say("You will see a lot of download lines; that is normal. Running the install again later is safe and quick.\n")
+    net_hint = ("This is usually the network (a company proxy or firewall, a VPN) or antivirus blocking files.\n"
+                "Try another network or pause the antivirus, then run the install again: it carries on where it stopped.")
     for i, env in enumerate(targets, 1):
         venv, py = ROOT / ENVS[env], venv_python(env)
         say(f"[{i}/{len(targets)}] {NAMES[env]}  ->  {ENVS[env]}")
@@ -238,24 +238,22 @@ def cmd_install(a):
             warn(f"{ENVS[env]} exists but is broken or incomplete; recreating it")
             shutil.rmtree(venv, ignore_errors=True)
         if not py.exists():
-            run_step([uv, "venv", venv, "--python", PY_VERSION, "--seed"], f"Creating {ENVS[env]} (uv downloads Python {PY_VERSION} if needed)", net_hint)
+            run_step([uv, "venv", venv, "--python", PY_VERSION, "--seed"], f"Setting up Python {PY_VERSION} in {ENVS[env]}", net_hint, note=" (downloaded if needed)")
         if a.upgrade:
             write_lock(uv, env)
         lock = ROOT / "config" / f"requirements-{env}.lock.txt"
         if not lock.exists():
             fail(f"{lock.relative_to(ROOT)} is missing.", "Restore it from the repository (git checkout -- config) or run with --upgrade.")
-        run_step([uv, "pip", "sync", "--compile-bytecode", "--python", py, lock], f"Installing packages into {ENVS[env]}", net_hint)
-        say("  Preparing OpenBB (builds its command index; up to a minute)...")
+        run_step([uv, "pip", "sync", "--compile-bytecode", "--python", py, lock], "Downloading and installing the data packages", net_hint, note=" (the longest step, 1 to 4 minutes)")
         run_step([py, "-c", "from openbb import obb; print('  providers:', len(obb.coverage.providers), ' commands:', len(obb.coverage.commands))"],
-                 f"Loading OpenBB in {ENVS[env]}", "Run the install again; if it keeps failing, delete the " + ENVS[env] + " folder and retry.", env=child_env())
+                 f"Preparing OpenBB in {ENVS[env]}", "Run the install again; if it keeps failing, delete the " + ENVS[env] + " folder and retry.",
+                 env=child_env(), note=" (up to a minute)")
         ok(f"{ENVS[env]} ready")
-    say("\nInstall complete.")
-    if not use_v4:
-        say("Installed single-backend V5 (default). Optional legacy V4 sources (FMP, Finviz, EconDB, Intrinio) can be added any time with --with-v4.")
-    starter = "Start.cmd (double-click)" if WIN else "sh start.sh"
+    say("\nInstall finished.")
+    starter = "double-click Start.cmd" if WIN else "run sh start.sh"
     keys = "Setup-Keys.cmd" if WIN else "sh setup-keys.sh"
-    say(f"Next: start the terminal with {starter}.")
-    say(f"Optional: free API keys unlock more data; run {keys} (the terminal works without any).")
+    say(f"Next: {starter} to open the terminal.")
+    say(f"Optional, any time later: free API keys add more U.S. data ({keys}). The terminal works without any.")
 
 
 # ------------------------------------------------------------------ run one service (supervisor)
@@ -466,7 +464,12 @@ def rebuild_dashboards(p: dict, quiet=False, with_v4: bool | None = None) -> boo
         last = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["unknown error"]
         warn(f"dashboards: could not rebuild ({last[0][:200]}); using the previous set")
         return False
-    for line in r.stdout.strip().splitlines()[: (2 if quiet else 1000)]:
+    lines = r.stdout.strip().splitlines()
+    if quiet:      # start: one plain line; `launcher.py dashboards` prints the full coverage report
+        if lines:
+            ok(f"Dashboards ready ({lines[0].split(',')[0]})")
+        return True
+    for line in lines:
         say(f"  dashboards: {line}")
     return True
 
@@ -611,10 +614,10 @@ def wait_for_warm(port: int, timeout: float = WARM_WAIT_TIMEOUT, poll: float = 1
                 if announced:
                     _report_steps(data)
                     elapsed = data.get("elapsed_s") if data.get("elapsed_s") is not None else (time.time() - started)
-                    ok(f"Initial data ready ({elapsed:.0f} s); secondary caches continue in the background.")
+                    ok(f"First data loaded ({elapsed:.0f} s); the rest keeps loading in the background.")
                 return data
             if not announced:
-                say("Preparing initial market data and charts (first start fills the local cache)...")
+                say("Loading the first market data and charts (up to 90 seconds; faster on later starts)...")
                 announced = True
                 last_tick = time.time()
             if _report_steps(data):
@@ -622,11 +625,11 @@ def wait_for_warm(port: int, timeout: float = WARM_WAIT_TIMEOUT, poll: float = 1
             elif time.time() - last_tick >= 12:
                 cur = data.get("current") or "building caches"
                 elapsed = data.get("elapsed_s") if data.get("elapsed_s") is not None else (time.time() - started)
-                say(f"  ... still preparing: {cur} ({elapsed:.0f} s)")
+                say(f"  ... still loading: {cur} ({elapsed:.0f} s)")
                 last_tick = time.time()
         if time.time() >= deadline:
             if announced or last_data is not None:
-                warn(f"Still building initial caches after {int(timeout)} s; opening the terminal now (cards finish loading automatically).")
+                warn(f"Still loading after {int(timeout)} s; opening the terminal now. Cards finish loading on their own.")
             return last_data
         time.sleep(poll)
 
@@ -659,7 +662,8 @@ def cmd_start(a):
         elif state == "busy" and not supervisor_alive(s):
             blocked.append(s)
             warn(f"Port {p[s]} is used by another program, so the {NAMES[s]} cannot start there.")
-            say(f"     Close that program, or pick another port: {'Start.cmd' if WIN else 'sh start.sh'} --{s}-port {p[s] + 100}")
+            say("     Close that program and start again, or use another port: open a command prompt in this folder and run")
+            say(f"     {'Start.cmd' if WIN else 'sh start.sh'} --{s}-port {p[s] + 100}")
         elif state == "down" and not supervisor_alive(s):
             spawn(s, p)
 
@@ -683,13 +687,13 @@ def cmd_start(a):
         if up[s]:
             ok(f"{NAMES[s]:<34} {url}")
         else:
-            warn(f"{NAMES[s]:<34} {url}  NOT responding. Last lines of {LOGS / f'{s}.log'}:")
+            warn(f"{NAMES[s]:<34} {url}  did not start. Last lines of {LOGS / f'{s}.log'}:")
             say("       " + tail(LOGS / f"{s}.log").replace("\n", "\n       "))
 
     backends = [s for s in services if s != "ui"]
     for s in backends:
         launch(s)
-    say(f"Waiting for the data backends (the first start can take a few minutes; logs in {LOGS})...")
+    say("Starting the data service. The first start takes about a minute, longer on a slow computer.")
     for s in backends:
         wait_for(s)
     # The UI pre-loads its boards from the backends as soon as it starts, so it starts once they answer.
@@ -702,9 +706,13 @@ def cmd_start(a):
     if up.get("ui") and up.get("v5") and not getattr(a, "no_wait", False):
         wait_for_warm(p["ui"])
     url = f"http://{HOST}:{p['ui']}"
-    say(f"\nTerminal: {url}")
-    if up.get("ui") and not a.no_browser:
-        webbrowser.open(url)
+    if up.get("ui"):
+        say(f"\nLibre Terminal is running at {url}")
+        if not a.no_browser:
+            say("Your browser should open it now. If it does not, copy that address into your browser.")
+            webbrowser.open(url)
+    else:
+        say(f"\nTerminal: {url}")
     return 0 if all(up.values()) else 1
 
 
@@ -863,7 +871,7 @@ def cmd_stop(a):
             else:
                 prog = (cmdline.split()[0] if cmdline else "unknown program").strip('"')
                 warn(f"port {p[name]} is used by PID {pid} ({Path(prog).name or prog}), which this terminal did not start; not stopped.")
-    say("Stopped." if stopped else "Nothing was running.")
+    say("Libre Terminal is stopped." if stopped else "Libre Terminal was not running.")
     return 0
 
 
@@ -993,7 +1001,7 @@ def cmd_keys(a):
         fail("The terminal is not installed yet.", "Run the install first, then this again.")
     r = subprocess.run([str(py), str(ROOT / "scripts" / "apply_keys.py")], cwd=ROOT, env=child_env())
     if r.returncode == 0:
-        say("Restart the terminal to use the keys: stop it, then start it again.")
+        say("To use the keys, double-click Stop.cmd and then Start.cmd." if WIN else "To use the keys, stop the terminal and start it again.")
     return r.returncode
 
 

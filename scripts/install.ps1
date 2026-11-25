@@ -39,8 +39,8 @@ function Find-Uv {
 
 $uv = Find-Uv
 if (-not $uv) {
-    Write-Host "uv is not installed. uv is a small, free tool (by Astral) that downloads Python and this project's packages." -ForegroundColor Cyan
-    Write-Host "Installing it for your Windows user only (no administrator rights needed) from https://astral.sh/uv ..." -ForegroundColor Cyan
+    Write-Host "First, getting the free download helper 'uv' (by Astral), which fetches Python and the data packages." -ForegroundColor Cyan
+    Write-Host "It is installed for your Windows user only; no administrator rights needed. Source: https://astral.sh/uv" -ForegroundColor Cyan
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"
@@ -49,7 +49,11 @@ if (-not $uv) {
     }
     $uv = Find-Uv
     if (-not $uv) {
-        Write-Host "Could not install uv automatically. Install it from https://docs.astral.sh/uv/getting-started/installation/ then run this again." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "Could not download the helper 'uv' from https://astral.sh." -ForegroundColor Red
+        Write-Host "This is almost always the network: a company proxy or firewall, a VPN, or antivirus blocking the download." -ForegroundColor Yellow
+        Write-Host "Try again on another network (a home connection or phone hotspot), or ask your IT team to allow astral.sh, github.com and pypi.org." -ForegroundColor Yellow
+        Write-Host "Nothing was installed in this folder."
         exit 1
     }
 }
@@ -64,6 +68,15 @@ foreach ($a in $args) {
         default { $launcherArgs += $a }
     }
 }
+# OneDrive (and similar sync folders) upload every installed file and can lock files mid-install: warn, but carry on.
+$syncRoots = @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer) | Where-Object { $_ }
+if ($syncRoots | Where-Object { $root.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) {
+    Write-Host ""
+    Write-Host "Note: this folder is inside OneDrive, which will try to upload about 1 GB of program files and can block the install." -ForegroundColor Yellow
+    Write-Host "If the install fails or the computer slows down, move the Libre-Terminal folder to C:\Libre-Terminal and run Install.cmd again." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 # uv finds (or downloads) Python 3.12 just to run the installer; the environments themselves are created by the launcher.
 & $uv run --no-project --python 3.12 "$root\scripts\launcher.py" @launcherArgs
 exit $LASTEXITCODE

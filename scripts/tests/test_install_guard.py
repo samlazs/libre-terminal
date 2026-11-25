@@ -54,6 +54,6 @@ if sys.platform == "win32":
               "the message says why, where to move the folder, and that nothing changed")
         check(sorted(p.name for p in root.iterdir()) == ["scripts"] and not (root / ".venv-v5").exists(),
               "nothing was created next to the installer")
-        check(not re.search(r"uv is not installed|Installing it for your Windows user", out), "uv was not looked for or installed")
+        check(not re.search(r"download helper|Installing it for your Windows user|for your Windows user only", out), "uv was not looked for or installed")
 
 done("test_install_guard")
