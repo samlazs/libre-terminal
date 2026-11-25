@@ -274,6 +274,58 @@ def process_rss_mb(pid: int) -> float | None:
     return next((v for v in (parse_tasklist_kb(ln) for ln in lines) if v is not None), None) if rc == 0 else None
 
 
+def tree_rss_mb(rows, pid: int) -> float | None:
+    """MB used by `pid` and all its descendants, from (pid, parent pid, bytes) rows; None when `pid` is not running.
+    On Windows a venv's python.exe is a small launcher that runs the real interpreter as its child, so the PID a
+    supervisor records measures only the launcher (about 4 MB): the server is the process under it."""
+    size, kids = {}, {}
+    for p, parent, b in rows:
+        size[p] = b
+        kids.setdefault(parent, []).append(p)
+    if pid not in size:
+        return None
+    total, todo, seen = 0, [pid], set()
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        total += size.get(p, 0)
+        todo += kids.get(p, [])
+    return total / (1024.0 * 1024.0)
+
+
+def process_rows() -> list[tuple[int, int, int]]:
+    """(pid, parent pid, resident bytes) for every process this user can see."""
+    rows = []
+    if os.name == "nt":
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,WorkingSetSize | ConvertTo-Json -Compress"],
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            data = json.loads(r.stdout or "[]")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return rows
+        for d in data if isinstance(data, list) else [data]:
+            try:
+                rows.append((int(d["ProcessId"]), int(d["ParentProcessId"]), int(d.get("WorkingSetSize") or 0)))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return rows
+    for st in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            parent = int(st.read_text().rsplit(")", 1)[1].split()[1])
+            rss = next((int(ln.split()[1]) * 1024 for ln in (st.parent / "status").read_text().splitlines() if ln.startswith("VmRSS:")), 0)
+            rows.append((int(st.parent.name), parent, rss))
+        except (OSError, ValueError, IndexError):
+            continue
+    return rows
+
+
+def process_tree_rss_mb(pid: int) -> float | None:
+    return tree_rss_mb(process_rows(), pid)
+
+
 def ui_pid() -> int | None:
     try:
         return int(json.loads((local_dir() / "run" / "ui.json").read_text(encoding="utf-8"))["child"])
@@ -282,21 +334,25 @@ def ui_pid() -> int | None:
 
 
 def soak(ctx) -> tuple[bool, str]:
-    """Loop the route probe for ctx.soak_minutes and measure the UI process's memory growth."""
+    """Loop the route probe for ctx.soak_minutes and measure the memory growth of the UI process tree (the recorded
+    child and the interpreter it runs). Every round must pass with the same allowed statuses as the G2 probe."""
     pid = ui_pid()
-    before = process_rss_mb(pid) if pid else None
+    before = process_tree_rss_mb(pid) if pid else None
     if before is None:
         return False, "soak: the UI process (local/run/ui.json) could not be measured"
-    end, rounds = time.monotonic() + ctx.soak_minutes * 60, 0
+    end, rounds, failed, last = time.monotonic() + ctx.soak_minutes * 60, 0, 0, []
     while time.monotonic() < end:
-        probe_all(ctx)
+        rc, lines = probe_all(ctx, "--assert-envelope", "--allow", "200,204,400,404,429,502,503,504")
         rounds += 1
-    after = process_rss_mb(pid)
+        if rc != 0:
+            failed, last = failed + 1, lines[-2:]
+    after = process_tree_rss_mb(pid)
     if after is None:
         return False, f"soak: the UI process ended during the soak ({rounds} rounds)"
     growth = after - before
-    return growth < SOAK_RSS_LIMIT_MB, (f"soak {ctx.soak_minutes:g} min ({rounds} probe rounds): UI RSS {before:.0f} -> {after:.0f} MB "
-                                        f"({growth:+.0f} MB, limit {SOAK_RSS_LIMIT_MB:.0f})")
+    why = (f"soak {ctx.soak_minutes:g} min ({rounds} probe rounds, {failed} failed): UI process tree RSS {before:.0f} -> {after:.0f} MB "
+           f"({growth:+.0f} MB, limit {SOAK_RSS_LIMIT_MB:.0f})") + (f"; last failure: {' / '.join(last)}" if failed else "")
+    return growth < SOAK_RSS_LIMIT_MB and failed == 0, why
 
 
 def gate_g2(ctx) -> tuple[str, list[str]]:

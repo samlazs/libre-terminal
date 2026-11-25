@@ -172,6 +172,15 @@ check(not ok_ and "could not be measured" in why_, "a soak without a UI process 
 import os as _os  # noqa: E402
 rss = G.process_rss_mb(_os.getpid())
 check(rss is not None and rss > 5, f"this process's RSS is readable ({rss})")
+# the UI is measured as a process tree: launcher stub 10 (4 MB) -> interpreter 11 (200 MB) -> helper 12 (6 MB);
+# 20 is another process and 13 a child of it
+MB_ = 1024 * 1024
+rows_ = [(10, 1, 4 * MB_), (11, 10, 200 * MB_), (12, 11, 6 * MB_), (20, 1, 50 * MB_), (13, 20, 9 * MB_)]
+check(G.tree_rss_mb(rows_, 10) == 210.0, "tree RSS: 4 + 200 + 6 MB under the recorded PID")
+check(G.tree_rss_mb(rows_, 11) == 206.0 and G.tree_rss_mb(rows_, 99) is None, "a subtree; a PID that is gone -> None")
+check(G.tree_rss_mb([(5, 6, MB_), (6, 5, MB_)], 5) == 2.0, "a parent-PID cycle (PID reuse) is counted once")
+tree = G.process_tree_rss_mb(_os.getpid())
+check(tree is not None and tree >= rss * 0.5, f"this process's tree RSS is readable ({tree})")
 
 # ---- launcher wiring
 r = subprocess.run([sys.executable, str(ROOT / "scripts" / "launcher.py"), "gate", "--help"], capture_output=True, text=True, timeout=60)
