@@ -143,7 +143,7 @@ def saved_ports() -> dict:
         return {}
 
 
-PROTECTED_CACHE = ("curvestore_", "catalog-", "earnings_consensus.json", "health-history.json", "yahoo_meta.json")
+PROTECTED_CACHE = ("curvestore_", "cdsday_", "catalog-", "earnings_consensus.json", "health-history.json", "yahoo_meta.json")
 
 
 def _is_protected_cache(path: Path) -> bool:
@@ -153,7 +153,7 @@ def _is_protected_cache(path: Path) -> bool:
 
 def prune_local(now: float | None = None, max_cache_mb: float = 150.0) -> int:
     """Disk caches and freeze dumps do not grow for ever: drop cache files untouched for 30 days (the history stores
-    curvestore_*, catalog snapshots and earnings/health history stay), backend cache entries after 14 days, freeze dumps
+    curvestore_* and cdsday_*, catalog snapshots and earnings/health history stay), backend cache entries after 14 days, freeze dumps
     after 14; then trim non-protected files under local/cache/ oldest-first to stay within max_cache_mb."""
     now = now or time.time()
     gone = 0

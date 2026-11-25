@@ -54,13 +54,9 @@ def _est_raw(sym):
             if failed:
                 raise C.CompositeError("Yahoo Finance did not answer just now (it may be throttling). Press reload in a minute.")
             raise C.CompositeError(f"Yahoo Finance has no estimates for '{sym}'. Non-U.S. listings need their exchange suffix (7203.T, SAP.DE).")
-        return out
-    key = ("est_raw", sym)
-    hit = C._cache.get(key)
-    if hit and hit[1].get("_failed") and time.monotonic() - hit[0] > 60:
-        with C._guard:                              # a partial answer is kept one minute, not ten: never taken for the whole picture
-            C._cache.pop(key, None)
-    return C.cached(key, 600, run)
+        # a partial answer is kept one minute, not ten: never taken for the whole picture
+        return C.Partial(out, [f"Yahoo Finance estimates ({k})" for k in failed]) if failed else out
+    return C.cached(("est_raw", sym), 600, run)
 
 
 def _report_info(sym, date):
@@ -69,7 +65,8 @@ def _report_info(sym, date):
     def run():
         try:
             return C.api(C.V5, "equity/calendar/earnings", provider="nasdaq", start_date=date, end_date=date) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "Nasdaq earnings calendar")
             return []
     r = next((x for x in C.cached(("nasdaq_earn_cal", date), 3600, run) if str(x.get("symbol") or "").upper() == sym), None)
     if not r:
@@ -105,7 +102,8 @@ def _earnings_release(sym, date):
     def run():
         try:
             rows = C.api(C.V5, "equity/fundamental/filings", provider="sec", symbol=sym, form_type="8-K", limit=60) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "SEC 8-K filings")
             return []
         return [{"url": r.get("filing_detail_url") or r.get("report_url"), "doc": r.get("report_url"), "filed": str(r.get("accepted_date") or r.get("filing_date") or ""),
                  "date": str(r.get("filing_date") or "")[:10]} for r in rows if "2.02" in str(r.get("items") or "")]
@@ -119,7 +117,8 @@ def _filing_documents(url):
     def run():
         try:
             res = C.api(C.V5, "sec/filing_headers", url=url)
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "SEC filing documents")
             return []
         res = res[0] if isinstance(res, list) and res else res if isinstance(res, dict) else {}
         return [{"type": str(x.get("type") or "").upper(), "url": x.get("url")} for x in res.get("document_urls") or [] if x.get("url")]
@@ -132,7 +131,8 @@ def _last_price(sym):
         try:
             rows = C.api(C.V5, "equity/price/historical", symbol=sym, provider="yfinance", interval="5m", extended_hours=True,
                        start_date=(dt.date.today() - dt.timedelta(days=4)).isoformat()) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "Yahoo Finance intraday price")
             return None
         rows = [(str(r.get("date"))[:19], float(r["close"])) for r in rows
                 if isinstance(r.get("close"), (int, float)) and not isinstance(r.get("close"), bool) and math.isfinite(r["close"])]
@@ -216,14 +216,9 @@ def _yahoo_quarter_chart(sym):
             qs = [(q.get("date"), raw(q.get("revenue")), eps.get(q.get("date")))
                   for q in (e.get("financialsChart") or {}).get("quarterly") or [] if q.get("date")]
         except Exception:                         # noqa: BLE001  (module missing, network, throttling, odd JSON: no figure)
-            return None
-        return {"currency": e.get("financialCurrency"), "quarters": qs} if qs else None
-    key = ("yahoo_qchart", sym)
-    hit = C._cache.get(key)
-    if hit and hit[1] is None and time.monotonic() - hit[0] > 60:
-        with C._guard:
-            C._cache.pop(key, None)
-    return C.cached(key, 600, run)
+            return C.Partial(None)                # no figure: kept one minute (not reported: the views say what is blank)
+        return {"currency": e.get("financialCurrency"), "quarters": qs} if qs else C.Partial(None)
+    return C.cached(("yahoo_qchart", sym), 600, run)
 
 
 def _summary_revenue(chart, reported_eps, statement, ccy):

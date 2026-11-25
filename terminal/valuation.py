@@ -222,7 +222,9 @@ def _splits(sym):
     def run():
         try:
             rows = C.api(C.V5, "equity/fundamental/historical_splits", provider="yfinance", symbol=sym) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            if C.kind_of(e) not in ("not_covered", "input"):
+                raise                                 # a failed fetch is never saved as "no splits" (the saved list is served)
             rows = []
         return [(str(r.get("date"))[:10], float(r["numerator"]) / float(r["denominator"])) for r in rows
                 if r.get("numerator") and r.get("denominator")]
@@ -293,7 +295,8 @@ def sec_figures(sym, items=None):
 def _yahoo(sym, kind):
     try:
         return C.api(C.V5, f"equity/fundamental/{kind}", provider="yfinance", symbol=sym, period="annual", limit=5) or []
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, f"Yahoo Finance {kind.replace('_', ' ')}")
         return []
 
 
@@ -333,7 +336,8 @@ def yahoo_figures(sym, rate=1.0):
 def _profile(sym):
     try:
         return (C._profiles([sym]) or {}).get(sym) or {}
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "Yahoo Finance profile")
         return {}
 
 

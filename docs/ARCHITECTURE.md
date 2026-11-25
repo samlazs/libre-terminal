@@ -292,6 +292,14 @@ the negative cache) are `LRUDict`/`LRUSet` capped at 2,000 entries. `cached()` r
 rate limit: its retry_after), so callers queued on a failing key get the same typed error without another upstream
 call. `launcher.py gate` G2 ends with a 30-minute probe soak that must grow the UI process by less than 50 MB.
 
+Completeness: `cache(key, ttl, fn, disk=False, partial_ttl=None)` is the one caching primitive (memory, or memory ->
+`local/cache/<name>.json` -> fetch with the saved copy served when the fetch fails). A fn that lost one of its sources
+returns `Partial(value, missing=[...])`, or calls `partial_from(e, "what")` where it carries on without that part (a
+source with nothing for the input, `not_covered`/`input`, is a complete answer). A Partial is never written to disk, is
+held 60 s, and the view answers `status: "partial"` with a note naming what is missing; a cache whose fn used a partial
+answer is partial itself. `_safe` catches `CompositeError` only. `test_cache_lint` fails on any new
+`except CompositeError` that turns a failure into `[]`/`{}`/`None` silently.
+
 Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
 http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
 for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the

@@ -57,7 +57,8 @@ def _facts(symbols, fact):
         for tag in tags:
             try:
                 rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=",".join(symbols), fact=tag, instantaneous="true" if instant else None)
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, f"SEC {tag}")
                 continue
             for r in rows or []:
                 if r.get("value") is None or not r.get("period_ending") or r.get("symbol") not in symbols:

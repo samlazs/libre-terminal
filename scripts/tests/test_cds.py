@@ -1,6 +1,7 @@
 """HANDOFF P3-2 CDS indices (terminal/cds.py): quote conventions, on-the-run series, changes at the same maturity, rolls."""
 
 import datetime as dt
+import json
 
 from _common import check, done, make_tmp_dir
 
@@ -33,10 +34,35 @@ DAYS = {
 calls = []
 
 
+FAIL = set()                    # dates whose file the repository does not serve just now
+
+
 def fake_api(base, path, tenor=None, date=None, **_):
     calls.append(date)
     assert path == "cftc/cds_index_trades" and tenor == "5Y"
+    if date in FAIL:
+        raise c.CompositeError("The data service answered HTTP 502", kind="upstream")
     return DAYS.get(date, [])
+
+
+def day_file(d):
+    return c.CACHE_DIR / f"{cds.day_name(d)}.json"
+
+
+def forget(*dates):
+    """Drop days from the store: disk entry, memory entry and remembered failure."""
+    for d in dates:
+        day_file(d).unlink(missing_ok=True)
+        c._cache.pop(("disk", cds.day_name(d)), None)
+        c._backoff.pop(cds.day_name(d), None)
+
+
+def age(d, secs):
+    """Make the saved summary of d `secs` older, and drop its memory entry (as after a restart)."""
+    rec = json.loads(day_file(d).read_text(encoding="utf-8"))
+    rec["t"] -= secs
+    day_file(d).write_text(json.dumps(rec), encoding="utf-8")
+    c._cache.pop(("disk", cds.day_name(d)), None)
 
 
 tmp = make_tmp_dir("cds-") / "cds_index_days.json"
@@ -80,17 +106,50 @@ try:
     check(min(calls) == "2026-10-14" and max(calls) == "2026-11-18", f"window: one month and four days back from yesterday: {min(calls)}..{max(calls)}")
     check("stale" not in t and t["sources"][0]["name"] == "CFTC", "sources, not stale")
 
-    # ---- disk cache: final days kept, recent days refreshed after 30 minutes
+    # ---- day store on the shared cache: final days kept, recent days and empty days refreshed after 30 minutes
     n = len(calls)
     cds.day("2026-11-17", TODAY)
     cds.day("2026-11-18", TODAY)
     check(len(calls) == n, "cached days not fetched again")
-    cds._days["2026-11-18"]["t"] -= 4000
-    cds._days["2026-11-17"]["t"] -= 4000
+    age("2026-11-18", 4000)
+    age("2026-11-17", 4000)
     cds.day("2026-11-18", TODAY)
     cds.day("2026-11-17", TODAY)
-    check(calls[n:] == ["2026-11-18"], "yesterday refreshed after 30 min, an older day is final")
-    check(tmp.exists(), "summaries written to the cache file")
+    check(calls[n:] == ["2026-11-18"], "yesterday refreshed after 30 min, an older day with prints is final")
+    check(day_file("2026-11-17").exists() and not tmp.exists(), "summaries written through the shared cache, one entry per day")
+    import local_paths
+    check(local_paths._is_protected_cache(day_file("2026-11-17")), "the day store is a history store: not pruned after 30 days")
+    check(json.loads(day_file("2026-10-20").read_text(encoding="utf-8"))["v"] == {}, "a day with no prints is saved empty")
+    n = len(calls)
+    age("2026-10-20", 1000)
+    cds.day("2026-10-20", TODAY)
+    check(calls[n:] == [], "an empty final day is kept 30 minutes")
+    age("2026-10-20", 1000)
+    cds.day("2026-10-20", TODAY)
+    check(calls[n:] == ["2026-10-20"], "an empty final day is fetched again after 30 minutes, not kept for good")
+
+    # ---- the old one-file store seeds final days with prints (no fetch), never empty ones
+    tmp.write_text(json.dumps({"2026-11-03": {"t": 0, "s": {"CDX.NA.IG": {NEW: {"level": 61.0}}}}, "2026-11-04": {"t": 0, "s": {}}}), encoding="utf-8")
+    cds._days = None
+    forget("2026-11-03", "2026-11-04")
+    n = len(calls)
+    check(cds.day("2026-11-03", TODAY) == {"CDX.NA.IG": {NEW: {"level": 61.0}}} and calls[n:] == [], "old store: a final day with prints is reused")
+    cds.day("2026-11-04", TODAY)
+    check(calls[n:] == ["2026-11-04"], "old store: an empty day is fetched")
+    check(json.loads(day_file("2026-11-03").read_text(encoding="utf-8"))["v"]["CDX.NA.IG"][NEW]["level"] == 61.0, "reused day moved to the new store")
+    forget("2026-11-03")
+    tmp.unlink()
+    cds._days = None
+
+    # ---- a day the repository does not serve: left out, the answer is partial (held a minute, nothing saved for it)
+    forget("2026-11-12")
+    FAIL.add("2026-11-12")
+    got = c._collect(lambda: cds.table(today=TODAY))
+    check(isinstance(got, c.Partial) and got.missing == ["CFTC swap file of 2026-11-12"], f"failed day named: {got!r}")
+    check(not day_file("2026-11-12").exists(), "no entry saved for the failed day")
+    FAIL.clear()
+    c._backoff.pop(cds.day_name("2026-11-12"), None)
+    check(not isinstance(c._collect(lambda: cds.table(today=TODAY)), c.Partial), "after the backoff the day is fetched: complete again")
 
     # ---- history: roll leaves a gap, price on its own axis
     hist = cds.history(family="CDX.NA.IG,CDX.NA.HY,BOGUS", range="1M", today=TODAY)
@@ -109,7 +168,9 @@ try:
     st = cds.table(today=dt.date(2026, 12, 1))
     check(st.get("stale") == "Latest index CDS prints are from 2026-11-18", f"stale: {st.get('stale')}")
     DAYS.clear()
-    cds._days = {}
+    for f in c.CACHE_DIR.glob(cds.day_name("*") + ".json"):
+        f.unlink()
+    c.reset_runtime_caches()
     try:
         c.dispatch("cds_indices", {})
         check(False, "no prints raises")

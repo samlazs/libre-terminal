@@ -123,8 +123,8 @@ def _symbols(symbols, symbol=None, peers=None):
         if len(lst) == 1:
             try:
                 lst += [p for p in C._peers(lst[0])[:8] if p != lst[0]]
-            except C.CompositeError:
-                pass
+            except C.CompositeError as e:
+                C.partial_from(e, "peers")
         return lst
     return C._syms(symbols or DEFAULT, 20) or C._syms(DEFAULT, 20)
 
@@ -190,7 +190,8 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
     try:
         tb, _ = C._fred(["DGS3MO"], start.isoformat())
         bills = [v for d, v in tb.get("DGS3MO", []) if v is not None and d >= start.isoformat()]
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "3-month T-bill rate (FRED)")
         bills = []
     rf_pct = _mean(bills)
     rf = rf_pct / 100 if rf_pct is not None else None

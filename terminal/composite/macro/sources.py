@@ -170,7 +170,8 @@ def _fred_any(ids, start):
         def one(sid):
             try:
                 return C._fred_csv(sid, start)
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, f"FRED {sid}")
                 return []
         got.update(zip(ids[1:], ex.map(one, ids[1:])))
     return got, {}

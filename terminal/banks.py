@@ -103,7 +103,8 @@ def holding_company(symbol="JPM"):
     sym = str(symbol or "JPM").strip().upper().split(",")[0]
     try:
         inst = C.api(C.V5, "federal_reserve/ffiec/institutions", ticker=sym) or []
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "FFIEC institution directory")
         inst = []
     if not inst:
         raise C.CompositeError(f"No U.S. bank holding company found for '{sym}' in the FFIEC directory. Use the ticker of a "

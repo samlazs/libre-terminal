@@ -93,7 +93,8 @@ def policy_rates(**_):
     data = C._bis_policy()
     try:
         daily = C._bis_policy_daily()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "BIS daily policy rates")
         daily = {}
     cutoff = (dt.date.today() - dt.timedelta(days=C.DAILY_POLICY_MAX_AGE)).isoformat()
     rows = []
@@ -131,7 +132,8 @@ def policy_rate_history(central_bank="US,XM,GB,JP", start="2015", country=None, 
     data = C._bis_policy()
     try:
         daily = C._bis_policy_daily()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "BIS daily policy rates")
         daily = {}
     codes = [c.upper() for c in C._split(central_bank)][:8]
     if country:                                   # a dashboard country (e.g. "japan") overrides the list

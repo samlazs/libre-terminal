@@ -31,7 +31,8 @@ def _oecd_series(duration):
 def _oecd_latest(duration):
     try:
         return C._oecd_series(duration)
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, f"OECD {duration} interest rates")
         return {}
 
 

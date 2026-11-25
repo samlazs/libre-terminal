@@ -21,6 +21,7 @@ from .core.cache import (  # noqa: F401
     CACHE_DIR, _cache, _locks, _guard, cached, _backoff, disk_name, _STALE_SINCE, _STALE_NOTES, _SWR_NOTES, _CtxPool,
     _CfShim, cf, _note_stale, _note_stale_ts, _note_swr_ts, _age_text, stale_text, cached_text, mtl_time, cached_disk,
     _write_json, cached_complete, _curve_store, reset_runtime_caches, LRUDict, LRUSet, STATE_CAP, NEG_TTL, _neg, _mono,
+    cache, Partial, PARTIAL_HOLD, _PARTIAL_NOTES, note_partial, partial_from, partial_text, _collect, _serve,
 )
 from .core.dates import (  # noqa: F401
     minus_months, HORIZON_MONTHS, horizon_date, RANGE_YEARS, DAILY_RANGES, MONTHLY_RANGES,
@@ -98,6 +99,7 @@ from .equity.filings import (  # noqa: F401
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
 from .warm import _safe, warm, warm_status  # noqa: F401
 from .core import contract as _contract
+from .core.contract import kind_of  # noqa: F401
 
 def dispatch(name, params):
     """Run a view and answer inside the envelope of core/contract.py (sources, as_of or as_of_na, status, notes)."""
@@ -107,16 +109,25 @@ def dispatch(name, params):
     why = _contract.bad_params(fn, params)
     if why:
         raise CompositeError("Bad parameters for this view: " + why[:200], kind="input", status=400)
-    notes, swr_notes = [], []
+    notes, swr_notes, missing = [], [], []
     token = _STALE_NOTES.set(notes)
     swr_token = _SWR_NOTES.set(swr_notes)
+    part_token = _PARTIAL_NOTES.set(missing)
     try:
         out = fn(**params)
     finally:
+        _PARTIAL_NOTES.reset(part_token)
         _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)
+    if isinstance(out, Partial):                        # a view that reports its own missing parts directly
+        missing += [m for m in out.missing if m not in missing]
+        out = out.value
     if not isinstance(out, dict):
         out = {"results": out}
+    if missing:                                         # some source failed: never presented as the whole answer
+        prior = out.get("status")
+        out = dict(out, status="partial" if prior in (None, "ok", "stale") else prior,
+                   notes=list(out.get("notes") or []) + [partial_text(missing)])
     if not out.get("sources"):
         out = dict(out, sources=static_sources(name, params))       # the cached object itself is never changed
     if isinstance(out, dict) and notes:

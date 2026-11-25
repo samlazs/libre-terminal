@@ -94,9 +94,13 @@ def finish(out: dict) -> dict:
             add["as_of_na"] = NO_DATE
     if "status" not in out:
         add["status"] = "stale" if out.get("stale") else "ok"
+    have = out.get("notes")
     notes = [str(out[k]) for k in ("stale", "cached", "delayed") if out.get(k)]
-    if notes and not out.get("notes"):
-        add["notes"] = notes
+    if not have:
+        if notes:
+            add["notes"] = notes
+    elif isinstance(have, list) and any(n not in have for n in notes):   # a view's own notes (a partial answer) keep these too
+        add["notes"] = have + [n for n in notes if n not in have]
     return dict(out, **add) if add else out
 
 

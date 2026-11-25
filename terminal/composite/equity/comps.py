@@ -50,7 +50,8 @@ def _profiles(symbols):
         def one(ch):
             try:
                 return C.api(C.V5, "equity/profile", symbol=",".join(ch), provider="yfinance") or []
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, "Yahoo Finance company profiles")
                 return []
         with C.cf.ThreadPoolExecutor(max_workers=3) as ex:
             for rows in ex.map(one, chunks):
@@ -80,15 +81,15 @@ def _peers(sym):
         subj = (C._profiles([sym]) or {}).get(sym)
         if not subj:
             raise C.CompositeError(f"Yahoo Finance has no company profile for {sym}, so peers cannot be found. Press Peers on the card to type them.")
-        r1 = C._safe(C._yahoo_recs, sym) or []
+        r1 = C._safe(C._yahoo_recs, sym, missing="Yahoo Finance recommendations") or []
         with C.cf.ThreadPoolExecutor(max_workers=5) as ex:
-            r2 = [s for lst in ex.map(lambda s: C._safe(C._yahoo_recs, s) or [], r1) for s in lst]
+            r2 = [s for lst in ex.map(lambda s: C._safe(C._yahoo_recs, s, missing="Yahoo Finance recommendations") or [], r1) for s in lst]
         pool = []
         if subj["sector"]:
             sk = C._slug(subj["sector"])
             for path, extra in (("yfinance/sectors/top_companies", {}), ("yfinance/industry/top_performing", {"industry": C._slug(subj["industry"])}),
                                 ("yfinance/industry/top_growth", {"industry": C._slug(subj["industry"])})):
-                rows = C._safe(lambda: C.api(C.V5, path, sector=sk, provider="yfinance", **extra)) or []
+                rows = C._safe(lambda: C.api(C.V5, path, sector=sk, provider="yfinance", **extra), missing="Yahoo Finance sector lists") or []
                 pool += [r.get("symbol") for r in rows if r.get("symbol")]
         cand = [s for s in dict.fromkeys(r1 + r2 + pool) if s and s != sym]
         prof = C._profiles(cand)
@@ -230,9 +231,11 @@ def comps(symbol="AAPL", peers=None, **_):
             break
         try:
             rows = C.api(C.V5, "equity/fundamental/metrics", symbol=",".join(need), provider="yfinance") or []
-        except C.CompositeError:
+        except C.CompositeError as e:
             if attempt and not met:
                 raise
+            if attempt:
+                C.partial_from(e, "Yahoo Finance key metrics")
             rows = []
         with _METRICS_LOCK:
             for r in rows:
@@ -248,7 +251,8 @@ def comps(symbol="AAPL", peers=None, **_):
     meta = C._meta(syms)
     try:
         prof = C._profiles(syms)
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "Yahoo Finance company profiles")
         prof = {}
     fx = C._usd_rates({(meta.get(s) or {}).get("currency") for s in syms} | {(met.get(s) or {}).get("currency") for s in syms} - {None})
 

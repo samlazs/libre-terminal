@@ -184,7 +184,8 @@ def enrich(rows, curve=None):
 def _par_curve():
     try:
         return C._src_fred_us()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "U.S. Treasury par curve (FRED)")
         return {}
 
 
@@ -325,13 +326,19 @@ def maturity_wall(company="AAPL", **_):
         raise C.CompositeError("The debt maturity wall uses SEC 10-K figures: type the U.S. ticker of the issuer (for example AAPL, T, F).")
 
     def run():
-        out = {}
+        out, failed, first = {}, [], None
         for tag, _ in WALL:
             try:
                 out[tag] = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=sym, fact=tag, instantaneous="true") or []
-            except C.CompositeError:
-                out[tag] = []
-        return out
+            except C.CompositeError as e:
+                if C.kind_of(e) in ("not_covered", "input"):
+                    out[tag] = []                         # the company does not tag this year: a complete answer
+                    continue
+                failed.append(tag)
+                first = first or e
+        if failed and len(failed) == len(WALL):
+            raise first                                   # an SEC outage is never saved as "no maturities"
+        return C.Partial(out, [f"SEC {t}" for t in failed]) if failed else out
     got = wall_points(C.cached_disk(C.disk_name("debtwall_", sym), 12 * 3600, run))
     if not got:
         raise C.CompositeError(f"No debt maturity schedule in {sym}'s SEC filings (non-U.S. filers and companies that do not tag it have none).")

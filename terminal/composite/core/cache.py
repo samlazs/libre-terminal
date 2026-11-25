@@ -24,6 +24,74 @@ CACHE_DIR = local_paths.CACHE_DIR
 # (time.time()) is kept only for disk records and the ages shown to the user. _mono() converts a disk stamp.
 STATE_CAP = 2000                       # most entries any process-lifetime map below may hold (least recently used go first)
 NEG_TTL = 10.0                         # seconds a failed fetch is answered from memory instead of being run again
+PARTIAL_HOLD = 60.0                    # seconds an incomplete answer (Partial) is held before the sources are asked again
+
+
+# ---------------------------------------------------------------- completeness: an answer with parts missing
+# A cached fn returns Partial(value, missing=[...]) when some of its sources failed, or calls partial_from(e, what) where it
+# swallows a failure. A Partial is never written to disk, is held at most partial_ttl seconds, and every request it serves
+# answers status=partial with a note naming what is missing. A cache whose fn used a partial answer is partial itself
+# (the inner notes are collected while fn runs), so nesting caches never turns an incomplete answer into a complete one.
+class Partial:
+    """value with parts missing. missing names them for the reader ("FRED DGS10", "Germany"); an empty list only holds
+    the answer short without reporting it (a background refresh is already on its way)."""
+
+    __slots__ = ("value", "missing")
+
+    def __init__(self, value, missing=()):
+        self.value = value
+        self.missing = list(dict.fromkeys(str(m) for m in (missing or ()) if m))
+
+    def __repr__(self):
+        return f"Partial(missing={self.missing!r})"
+
+
+_PARTIAL_NOTES = contextvars.ContextVar("partial_notes", default=None)
+
+
+def note_partial(missing):
+    """Record, for the request (or the cache fetch) running now, that these parts of its answer are missing."""
+    notes = C._PARTIAL_NOTES.get()
+    if notes is not None:
+        for m in missing or ():
+            if m and m not in notes:
+                notes.append(str(m))
+
+
+def partial_from(e, what):
+    """Where a failure is swallowed and the answer goes on without `what`: mark the answer partial, unless the source
+    simply has nothing for this input (not_covered / input), which is a complete answer. Returns None."""
+    from .contract import kind_of
+    if kind_of(e) not in ("not_covered", "input"):
+        C.note_partial([what])
+
+
+def partial_text(missing):
+    names = ", ".join(missing[:6]) + (f" and {len(missing) - 6} more" if len(missing) > 6 else "")
+    return f"Partial answer: no data from {names} just now (asked again within a minute)"
+
+
+def _collect(fn):
+    """Run fn and return its answer as a Partial when fn, or any cache it used, reported a missing part."""
+    inner = []
+    token = C._PARTIAL_NOTES.set(inner)
+    try:
+        val = fn()
+    finally:
+        C._PARTIAL_NOTES.reset(token)
+    if isinstance(val, Partial):
+        if inner:
+            val.missing = list(dict.fromkeys(val.missing + inner))
+        return val
+    return Partial(val, inner) if inner else val
+
+
+def _serve(val):
+    """A cached value as callers see it: a Partial is unwrapped and its missing parts noted on the request."""
+    if isinstance(val, Partial):
+        C.note_partial(val.missing)
+        return val.value
+    return val
 
 
 class LRUDict(OrderedDict):
@@ -103,24 +171,43 @@ def _neg_store(key, e):
         C._neg[key] = (time.monotonic() + max(0.0, min(hold, 600.0)), kind, str(e), ra)
 
 
-def cached(key, ttl, fn):
+def cache(key, ttl, fn, *, disk=False, partial_ttl=None):
+    """The one caching primitive. fn() returns a value or Partial(value, missing=[...]).
+
+    ttl      seconds an answer is good (disk: a callable value -> seconds may choose it per answer)
+    disk     False: memory only. True or a file name: memory -> local/cache/<name>.json -> fetch, and when the fetch
+             fails the last saved copy is served however old (status=stale with its age)
+    A Partial is never written to disk and is held at most partial_ttl seconds (PARTIAL_HOLD by default); a failure
+    (CompositeError) is remembered NEG_TTL seconds in memory, or backs off the source when on disk."""
+    if disk:
+        name = disk if isinstance(disk, str) else C.disk_name("c_", repr(key))
+        return C.cached_disk(name, ttl, fn, partial_ttl=partial_ttl)
+    return C.cached(key, ttl, fn, partial_ttl=partial_ttl)
+
+
+def cached(key, ttl, fn, partial_ttl=None):
     """fn() once per key per ttl seconds; concurrent callers wait for the one fetch. A failure (CompositeError) is
-    remembered for NEG_TTL seconds, so callers queued on a failing key do not each re-run it."""
-    now = time.monotonic()
+    remembered for NEG_TTL seconds, so callers queued on a failing key do not each re-run it. A Partial answer is held
+    partial_ttl seconds (PARTIAL_HOLD by default) and reported on every request it serves."""
+    hold = C.PARTIAL_HOLD if partial_ttl is None else partial_ttl
+
+    def fresh(hit):                              # a Partial is good for at most `hold` seconds after it was fetched
+        return hit and time.monotonic() - hit[0] < (min(ttl, hold) if isinstance(hit[1], Partial) else ttl)
+
     with C._guard:
         hit = C._cache.get(key)
-        if hit and now - hit[0] < ttl:
-            return hit[1]
+        if fresh(hit):
+            return _serve(hit[1])
         lock = C._locks.setdefault(key, threading.Lock())
     _neg_check(key)
     with lock:                                   # one fetch per key at a time
         with C._guard:
             hit = C._cache.get(key)
-            if hit and time.monotonic() - hit[0] < ttl:
-                return hit[1]
+            if fresh(hit):
+                return _serve(hit[1])
         _neg_check(key)
         try:
-            val = fn()
+            val = _collect(fn)
         except C.CompositeError as e:
             _neg_store(key, e)
             raise
@@ -134,10 +221,10 @@ def cached(key, ttl, fn):
                         continue                 # someone is refreshing it: dropping its lock would allow a second fetch
                     C._cache.pop(k, None)
                     C._locks.pop(k, None)
-        return val
+        return _serve(val)
 
 
-_backoff = LRUDict()                   # dataset name -> (monotonic time the fetch may run again, message)
+_backoff = LRUDict()                   # dataset name -> (monotonic time the fetch may run again, message[, error kind])
 
 
 def disk_name(prefix, ident, suffix=""):
@@ -219,12 +306,15 @@ def mtl_time(t):
         return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def cached_disk(name, ttl, fn):
+def cached_disk(name, ttl, fn, partial_ttl=None):
     """Memory -> disk -> fetch. If the fetch fails, serve the last saved copy however old it is.
 
-    Used for sources that change slowly and limit how often they may be called (OECD, BIS).
+    Used for sources that change slowly and limit how often they may be called (OECD, BIS). ttl may be a callable
+    (value -> seconds) when how long an answer stays good depends on the answer (an empty day vs. a full one). A Partial
+    answer is not written to disk and is held in memory partial_ttl seconds (PARTIAL_HOLD by default).
     """
-    mem_ttl = min(ttl, 1800)
+    ttl_of = ttl if callable(ttl) else (lambda _v: ttl)
+    mem_ttl = 1800.0 if callable(ttl) else min(ttl, 1800)
     key = ("disk", name)
 
     def run():
@@ -233,11 +323,12 @@ def cached_disk(name, ttl, fn):
         now = time.time()
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))
-            if now - saved["t"] < ttl:
+            good = float(ttl_of(saved["v"]))
+            if now - saved["t"] < good:
                 with C._guard:
                     C._STALE_SINCE.pop(name, None)
-                return saved["v"], min(mem_ttl, max(1.0, ttl - (now - saved["t"])))
-        except (OSError, ValueError, KeyError):
+                return saved["v"], min(mem_ttl, max(1.0, good - (now - saved["t"])))
+        except (OSError, ValueError, KeyError, TypeError):
             saved = None
         with C._guard:
             blocked = C._backoff.get(name)
@@ -247,10 +338,11 @@ def cached_disk(name, ttl, fn):
                 with C._guard:
                     C._STALE_SINCE[name] = saved["t"]
                 return saved["v"], min(mem_ttl, max(0.0, blocked[0] - mnow))
-            raise C.CompositeError(blocked[1])
+            raise C.CompositeError(blocked[1], kind=blocked[2] if len(blocked) > 2 else None)
         try:
-            val = fn()
+            val = _collect(fn)
         except C.CompositeError as e:
+            from .contract import kind_of
             msg = str(e)
             low = msg.lower()
             if (
@@ -268,7 +360,7 @@ def cached_disk(name, ttl, fn):
                 wait = 120 if saved is not None else 30
             until = time.monotonic() + wait
             with C._guard:
-                C._backoff[name] = (until, msg)
+                C._backoff[name] = (until, msg, kind_of(e))
                 if saved is not None:
                     C._STALE_SINCE[name] = saved["t"]
             if saved is not None:
@@ -277,8 +369,11 @@ def cached_disk(name, ttl, fn):
         with C._guard:
             C._backoff.pop(name, None)
             C._STALE_SINCE.pop(name, None)
+        if isinstance(val, Partial):             # never saved as complete; asked again after partial_ttl
+            hold = C.PARTIAL_HOLD if partial_ttl is None else partial_ttl
+            return val, min(mem_ttl, max(1.0, float(hold)))
         C._write_json(path, {"t": time.time(), "v": val})
-        return val, float(mem_ttl)
+        return val, min(mem_ttl, float(ttl_of(val)))
 
     now = time.monotonic()
     with C._guard:
@@ -291,7 +386,7 @@ def cached_disk(name, ttl, fn):
             lock = C._locks.setdefault(key, threading.Lock())
     if hit_ok:
         C._note_stale(name)
-        return val
+        return _serve(val)
 
     with lock:
         now = time.monotonic()
@@ -304,7 +399,7 @@ def cached_disk(name, ttl, fn):
                 hit_ok = False
         if hit_ok:
             C._note_stale(name)
-            return val
+            return _serve(val)
         val, eff_ttl = run()
         stored_at = time.monotonic() - max(0.0, float(mem_ttl) - float(eff_ttl))
         with C._guard:
@@ -317,7 +412,7 @@ def cached_disk(name, ttl, fn):
                     C._cache.pop(k, None)
                     C._locks.pop(k, None)
         C._note_stale(name)
-        return val
+        return _serve(val)
 
 
 def reset_runtime_caches() -> dict:
@@ -371,17 +466,17 @@ def _write_json(path, obj):
 
 
 def cached_complete(key, ttl, fn, short=60):
-    """cached(), except that an answer flagged "_partial" (a dict key or a .partial attribute) is kept short seconds:
-    a throttled, incomplete answer must not stand for the full ttl (INFRASTRUCTURE W4)."""
-    val = C.cached(key, ttl, fn)
-    part = val.get("_partial") if isinstance(val, dict) else False
-    if part or getattr(val, "partial", False):
-        with C._guard:
-            hit = C._cache.get(key)
-            if hit and time.monotonic() - hit[0] > short:
-                C._cache.pop(key, None)
-        val = C.cached(key, ttl, fn)
-    return val
+    """cache() for answers that flag themselves incomplete: a "_partial" dict key or a .partial attribute makes the
+    answer a Partial held `short` seconds (a throttled, incomplete answer must not stand for the full ttl). What is
+    missing is named by a list in "_partial" or a .missing attribute; without names the hold is not reported."""
+    def run():
+        val = fn()
+        part = val.get("_partial") if isinstance(val, dict) else False
+        if part or getattr(val, "partial", False):
+            names = part if isinstance(part, (list, tuple)) else getattr(val, "missing", None) or ()
+            return Partial(val, names)
+        return val
+    return C.cached(key, ttl, run, partial_ttl=short)
 
 
 def _curve_store(name, fresh):

@@ -227,8 +227,11 @@ def history(symbols, start: dt.date, interval="1d"):
             out.stale_ts = min(fallback_times)
         if swr_times:
             out.swr_ts = min(swr_times)
-        # stale-while-revalidate or >50% empty: re-check bundle after PARTIAL_TTL (30 s) so background refresh lands
-        out.partial = bool(stale_syms) or sum(1 for s in symbols if out.get(s)) * 2 < len(symbols)
+        # stale-while-revalidate or >50% empty: re-check bundle after PARTIAL_TTL (30 s) so background refresh lands.
+        # Only the throttled case is reported (missing names the symbols); the SWR one already says "refreshing".
+        thin = sum(1 for s in symbols if out.get(s)) * 2 < len(symbols)
+        out.partial = bool(stale_syms) or thin
+        out.missing = [f"Yahoo Finance prices for {s}" for s in symbols if not out.get(s)] if thin else []
         return out
 
     # more than half the symbols empty (throttling) or SWR: kept 30 s, not 5 minutes, so a retry/refresh lands cleanly
@@ -306,7 +309,7 @@ def _usd_rates(currencies):
             need[c] = (major, mult)
     if need:
         pairs = sorted({m + "USD=X" for m, _ in need.values()})
-        hist = C._safe(C.history, pairs, dt.date.today() - dt.timedelta(days=14)) or {}
+        hist = C._safe(C.history, pairs, dt.date.today() - dt.timedelta(days=14), missing="FX rates (Yahoo Finance)") or {}
         for c, (major, mult) in need.items():
             ser = hist.get(major + "USD=X") or []
             if ser:

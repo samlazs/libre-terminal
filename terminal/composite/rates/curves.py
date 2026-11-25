@@ -48,6 +48,7 @@ def curves(countries, dates=None, us_source="auto"):
                     out[c] = {d: [tuple(p) for p in pts] for d, pts in (f.result() or {}).items()}
                 except C.CompositeError as e:
                     errors.append(f"{C.COUNTRIES[c][0]}: {e}")
+                    C.partial_from(e, C.COUNTRIES[c][0])     # the others are served; held a minute, not 15
         if not any(out.values()):
             raise C.CompositeError("No yield-curve data returned. " + "; ".join(errors))
         out["__src__"] = used
@@ -222,11 +223,12 @@ def global_yields(countries="", **_):
             try:
                 for c, by_d in C.curves(keys, [C.horizon_date(today, h)]).items():
                     past.setdefault(c, {}).update(by_d)
-            except C.CompositeError:
-                pass
+            except C.CompositeError as e:
+                C.partial_from(e, f"curves of {h} ago (change columns)")
         try:
             pol = C._policy_series()             # daily where current: a decision this month is the rate shown
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "policy rates (BIS)")
             pol = {}
         rows = []
         for c in keys:

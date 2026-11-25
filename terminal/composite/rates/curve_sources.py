@@ -297,8 +297,8 @@ def _src_boe():
                 if len(r) == 4 and re.match(r"\d{2} \w{3} \d{4}$", r[0]):
                     iso = dt.datetime.strptime(r[0], "%d %b %Y").date().isoformat()
                     out[iso] = [(y, v) for y, s in zip((5.0, 10.0, 20.0), r[1:]) if (v := C._num_or_none(s)) is not None]
-        except C.CompositeError:
-            pass
+        except C.CompositeError as e:
+            C.partial_from(e, "Bank of England database (days before this month)")
         z = zipfile.ZipFile(io.BytesIO(C._download("https://www.bankofengland.co.uk/-/media/boe/files/statistics/yield-curves/latest-yield-curve-data.zip", 60)))
         name = next(n for n in z.namelist() if "Nominal daily" in n)
         x = zipfile.ZipFile(io.BytesIO(z.read(name)))

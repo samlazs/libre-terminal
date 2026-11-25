@@ -191,7 +191,8 @@ def _imf_cpi(keys, start):
         for kw in calls:
             try:
                 rows = C.api(C.V5, "economy/cpi", provider="imf", start_date=start, **kw) or []
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, "IMF consumer prices" + (" (euro area)" if kw.get("harmonized") else ""))
                 continue
             names = kw["country"].split(",")
             for r in rows:
@@ -256,10 +257,11 @@ def country_monitor(**_):
     """Latest actuals by country: real GDP growth, inflation, unemployment, policy rate, 3-month and 10-year rates."""
     def run():
         start = f"{dt.date.today().year - 2}-01-01"
-        gdp, une = (C._safe(C._oecd_all, p, start) or {} for p in ("economy/gdp/real", "economy/unemployment"))
-        cpi = C._safe(C._imf_cpi, MONITOR, start) or {}
-        pol = C._safe(C._policy_series) or {}
-        gy = {r["key"]: r for r in (C._safe(C.global_yields) or {}).get("results", [])}
+        gdp, une = (C._safe(C._oecd_all, p, start, missing=label) or {}
+                    for p, label in (("economy/gdp/real", "OECD real GDP"), ("economy/unemployment", "OECD unemployment")))
+        cpi = C._safe(C._imf_cpi, MONITOR, start, missing="IMF consumer prices") or {}
+        pol = C._safe(C._policy_series, missing="policy rates (BIS)") or {}
+        gy = {r["key"]: r for r in (C._safe(C.global_yields, missing="3-month and 10-year rates") or {}).get("results", [])}
         rows = []
         for k in MONITOR:
             label, _, _, iso = C.COUNTRIES.get(k, (k.replace("_", " ").title(), None, None, None))
