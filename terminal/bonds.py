@@ -201,6 +201,7 @@ def _hidden_text(hidden):
 
 def lookup(company="AAPL", issuer="", cusip="", all_types="no", include_old="no", today=None, **_):
     """Table: one row per bond with the last reported sale."""
+    C.us_only(company, "FINRA TRACE")
     rows, how = resolve(company, issuer, cusip)
     kept, hidden = select(rows, _flag(all_types), _flag(include_old), today)
     if not kept:
@@ -211,6 +212,7 @@ def lookup(company="AAPL", issuer="", cusip="", all_types="no", include_old="no"
 
 def curve(company="AAPL", issuer="", cusip="", all_types="no", include_old="no", today=None, **_):
     """Chart: last-sale yield against maturity, one colour per issuer name."""
+    C.us_only(company, "FINRA TRACE")
     rows, how = resolve(company, issuer, cusip)
     kept, hidden = select(rows, _flag(all_types), _flag(include_old), today)
     pts = [r for r in kept if r["yield"] is not None and r["maturity"]]
@@ -252,6 +254,8 @@ def pricer(cusip="", price="", ytm="", today=None, **_):
     cu = str(cusip or "").strip().upper()
     if not cu:
         raise C.CompositeError("Click a bond's CUSIP in the table or the curve above (or type a CUSIP in the settings).")
+    if not cusip_ok(cu):                         # an ISIN or a typo: TRACE knows 9-character CUSIPs with a valid check digit
+        raise C.CompositeError(f"Enter a 9-character CUSIP with a valid check digit ('{cu[:20]}' is not one; TRACE covers U.S. bonds).", kind="input")
     rows = _prices(cusip=cu)
     if not rows:
         raise C.CompositeError(f"No TRACE bond with CUSIP {cu}.")
@@ -324,6 +328,7 @@ def _wall_sources(sym, cik=None):
 
 def maturity_wall(company="AAPL", **_):
     sym = str(company or "").strip().upper()
+    C.us_only(sym, "SEC 10-K filings")
     if not re.fullmatch(r"[A-Z][A-Z0-9\-]{0,6}", sym):
         raise C.CompositeError("The debt maturity wall uses SEC 10-K figures: type the U.S. ticker of the issuer (for example AAPL, T, F).")
 

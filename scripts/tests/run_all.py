@@ -19,13 +19,14 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+BROWSER_TESTS = {"test_frontend.py", "test_viewing.py"}          # headless Edge/Chrome: skipped by --fast
 
 
 def select_tests(all_tests: list[Path], patterns: list[str] | None = None, fast: bool = False) -> list[Path]:
     """Filter test_*.py paths by substring patterns (case-insensitive) and optional --fast (skipping test_frontend)."""
     selected = list(all_tests)
     if fast:
-        selected = [p for p in selected if p.name != "test_frontend.py"]
+        selected = [p for p in selected if p.name not in BROWSER_TESTS]
     if patterns:
         needles = [str(x).lower() for x in patterns if str(x).strip()]
         if needles:
@@ -56,7 +57,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Run offline checks in isolated subprocesses.")
     ap.add_argument("patterns", nargs="*", help="optional substring filters on test filenames (e.g. numbers sources)")
     ap.add_argument("-j", "--jobs", type=int, default=min(6, os.cpu_count() or 4), help="parallel worker processes")
-    ap.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend.py)")
+    ap.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend.py, test_viewing.py)")
     ap.add_argument("--fail-fast", action="store_true", help="stop queuing new tests after the first failure")
     ap.add_argument("--live", action="store_true", help="also run the live suites (isolated instance on spare ports; minutes)")
     a = ap.parse_args(argv)
@@ -66,8 +67,8 @@ def main(argv=None):
         avail = ", ".join(p.stem for p in all_tests)
         print(f"No test files matched {a.patterns!r}. Available: {avail}")
         return 2
-    if a.fast and any(p.name == "test_frontend.py" for p in all_tests):
-        print("  (--fast: skipping test_frontend.py headless browser checks)")
+    if a.fast and any(p.name in BROWSER_TESTS for p in all_tests):
+        print("  (--fast: skipping the headless browser checks: " + ", ".join(sorted(BROWSER_TESTS)) + ")")
 
     t0 = time.time()
     results = {}

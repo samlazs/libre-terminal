@@ -121,6 +121,7 @@ def bank_rssd(symbol="JPM", **_):
     sym = str(symbol or "").strip().upper().split(",")[0]
     if not sym:
         raise C.CompositeError("Enter a bank ticker (for example JPM, BAC, WFC, C, RY).")
+    C.us_only(sym, "The FFIEC bank directory")
 
     def run():
         hc = holding_company(sym)
@@ -169,7 +170,7 @@ def snapshot_rows(symbol):
 def bank_quality(symbol="JPM", **_):
     """Credit quality and capital of the bank behind a U.S.-listed bank holding company ticker, quarterly (FDIC)."""
     sym = str(symbol or "JPM").strip().upper().split(",")[0]
-
+    C.us_only(sym, "FDIC call reports")
     got = quality_data(sym)
     traces = []
     for i, (k, label, what) in enumerate(QUALITY):

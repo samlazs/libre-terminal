@@ -150,6 +150,7 @@ def yoy_pct(pts):
 def compare(group="hyperscalers", symbols=None, fact="capex", period="quarter", since="2019", measure="level", **_):
     """One reported line item (capex, revenue, debt...) or a ratio of two across companies over time, from SEC filings."""
     syms = [s.upper() for s in C._split(symbols)][:8] or C._split(COMPARE_GROUPS.get(group, COMPARE_GROUPS["hyperscalers"])[1])
+    C.us_only(syms, "SEC filings")
     measure = measure if measure in MEASURES else "level"
     if fact in DERIVED:
         label, fa, fb, how = DERIVED[fact]

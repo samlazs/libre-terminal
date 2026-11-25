@@ -270,8 +270,9 @@ def rolling_corr(spot, diff, window=CORR_WINDOW):
 
 
 def fx_rate_diff(pair="EURUSD", range="1Y", today=None, **_):
-    pair = str(pair or "EURUSD").upper().replace("/", "")
-    pair = pair if pair in PAIRS else "EURUSD"
+    pair = str(pair or "EURUSD").strip().upper().replace("/", "")
+    if pair not in PAIRS:                       # never another pair's figures under this name
+        raise C.CompositeError("Pick one of: " + ", ".join(PAIRS), kind="input")
     ysym, base_c, quote_c = PAIRS[pair]
     today = today or dt.date.today()
     with C.cf.ThreadPoolExecutor(max_workers=3) as ex:

@@ -1183,7 +1183,7 @@ def main():
     sub.add_parser("dashboards", parents=[ports], help="rebuild local/dashboards.json")
     s = sub.add_parser("test", help="offline checks (no network needed)")
     s.add_argument("patterns", nargs="*", help="optional substring filters on test filenames")
-    s.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend)")
+    s.add_argument("--fast", action="store_true", help="skip headless browser checks (test_frontend, test_viewing)")
     s.add_argument("-j", "--jobs", type=int, default=None, help="parallel worker count")
     s.add_argument("--fail-fast", action="store_true", help="stop after first failure")
     s.add_argument("--live", action="store_true", help="also run live suites on an isolated instance (e.g. test lifecycle --live)")

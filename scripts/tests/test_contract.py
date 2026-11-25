@@ -187,4 +187,28 @@ n_num = sum(1 for w in xw.values() for c in (((w.get("data") or {}).get("table")
             if c.get("cellDataType") == "number")
 check(n_num >= 190, f"the gate saw the /x/* number columns ({n_num})")
 
+# ---- P3-05: every route taking a symbol, company or currency declares its coverage, and the tests hold it to it
+import inspect  # noqa: E402
+import re  # noqa: E402
+
+from _common import NON_US_CCY, ROOT  # noqa: E402
+
+takes = {n for n in C.ROUTES if set(inspect.signature(K.target(C.ROUTES[n])).parameters) & set(K.COVERAGE_PARAMS)}
+check(takes == set(K.COVERAGE), f"coverage declared for exactly the routes that take a symbol, company or currency: "
+      f"undeclared {sorted(takes - set(K.COVERAGE))}, stale {sorted(set(K.COVERAGE) - takes)}")
+check(set(K.COVERAGE.values()) <= {"global", "us_only", "set"}, "coverage is global, us_only or set")
+markets, refusals = {}, {}
+for f in sorted((ROOT / "scripts" / "tests").glob("test_*.py")):
+    txt = f.read_text(encoding="utf-8")
+    for r, m in re.findall(r"\bcovered\(\s*[\"']([a-z0-9_]+)[\"']\s*,\s*[\"']([a-z]+)[\"']", txt):
+        markets.setdefault(r, set()).add(m)
+    for r, k in re.findall(r"\brefused\(\s*[\"']([a-z0-9_]+)[\"'].*?[\"'](not_covered|input)[\"']\s*\)", txt):
+        refusals.setdefault(r, set()).add(k)
+lacking = {r: sorted(markets.get(r, set())) for r, c in K.COVERAGE.items() if c == "global" and not ("us" in markets.get(r, set()) and markets.get(r, set()) & set(NON_US_CCY))}
+check(not lacking, f"global routes need a U.S. and a non-U.S. (EUR, GBp or JPY) fixture: {lacking}")
+want = {"us_only": "not_covered", "set": "input"}
+unrefused = sorted(r for r, c in K.COVERAGE.items() if c in want and want[c] not in refusals.get(r, set()))
+check(not unrefused, f"us_only routes need a not_covered test for a listing elsewhere, set routes an input test: {unrefused}")
+check(not (set(markets) - {r for r, c in K.COVERAGE.items() if c == "global"}), f"covered() only on global routes: {sorted(set(markets) - {r for r, c in K.COVERAGE.items() if c == 'global'})}")
+
 done("test_contract")

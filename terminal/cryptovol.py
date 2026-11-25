@@ -46,8 +46,9 @@ def _day(v):
 
 def chart(currency="BTC", range="1Y", today=None, **_):
     today = today or dt.datetime.now(dt.timezone.utc).date()
-    ccy = str(currency or "BTC").upper()
-    ccy = ccy if ccy in COINS else "BTC"
+    ccy = str(currency or "BTC").strip().upper()
+    if ccy not in COINS:                        # never another coin's figures under this name
+        raise C.CompositeError("Pick one of: " + ", ".join(COINS), kind="input")
     name, ticker = COINS[ccy]
     rng = str(range or "1Y").upper()
     rng = rng if rng in RANGES else "1Y"

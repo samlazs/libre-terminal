@@ -6,7 +6,7 @@ takes a company the data source covers)."""
 
 import datetime as dt
 
-from _common import check, check_as_of, done
+from _common import check, check_as_of, covered, done
 
 import composite as C
 import bonds
@@ -45,9 +45,11 @@ try:
     SNAP = snap_data("USD", {"last_price": 100.0, "prev_close": 99.0, "date": "2026-11-23", "timestamp": "2026-11-24T09:30:00-05:00",
                              "last_timestamp": "2026-11-24T16:00:00-05:00"})
     check_as_of("snapshot", C.dispatch("snapshot", {"symbol": "AAPL"}), "2026-11-24T16:00:00-05:00", "AAPL: newest of the quote's own times")
+    covered("snapshot", "us", C.dispatch("snapshot", {"symbol": "AAPL"}))
     fresh()
     SNAP = snap_data("EUR", {"last_price": 100.0, "prev_close": 99.0, "timestamp": "2026-11-20T17:35:00+01:00", "date": "2026-11-19"})
     check_as_of("snapshot", C.dispatch("snapshot", {"symbol": "SAP.DE"}), "2026-11-20T17:35:00+01:00", "SAP.DE: quote timestamp")
+    covered("snapshot", "eur", C.dispatch("snapshot", {"symbol": "SAP.DE"}))
     fresh()
     SNAP = snap_data("JPY", {"last_price": 100.0, "prev_close": 99.0})
     out = C.dispatch("snapshot", {"symbol": "7203.T"})
@@ -116,19 +118,26 @@ try:
     C._yahoo_quarter_chart = lambda sym: None
     fresh()
     check_as_of("earnings", C.dispatch("earnings", {"symbol": "AAPL"}), "2026-10-30", "AAPL: close after the 2026-10-29 report")
+    covered("earnings", "us", C.dispatch("earnings", {"symbol": "AAPL"}))
     fresh()
     check_as_of("earnings", C.dispatch("earnings", {"symbol": "SAP.DE"}), "2026-10-23", "SAP.DE: close after the 2026-10-22 report")
+    covered("earnings", "eur", C.dispatch("earnings", {"symbol": "SAP.DE"}))
     fresh()
     check_as_of("earnings_history", C.dispatch("earnings_history", {"symbol": "AAPL"}), "2026-10-30", "AAPL: close after the 2026-10-29 report")
+    covered("earnings_history", "us", C.dispatch("earnings_history", {"symbol": "AAPL"}))
     fresh()
     check_as_of("earnings_history", C.dispatch("earnings_history", {"symbol": "SAP.DE"}), "2026-10-23", "SAP.DE: close after the 2026-10-22 report")
+    covered("earnings_history", "eur", C.dispatch("earnings_history", {"symbol": "SAP.DE"}))
     fresh()
     check_as_of("earnings_reports", C.dispatch("earnings_reports", {"symbol": "AAPL"}), "2026-10-30", "AAPL: close after the 2026-10-29 report")
+    covered("earnings_reports", "us", C.dispatch("earnings_reports", {"symbol": "AAPL"}))
     fresh()
     check_as_of("earnings_reports", C.dispatch("earnings_reports", {"symbol": "SAP.DE"}), "2026-10-23", "SAP.DE: close after the 2026-10-22 report")
+    covered("earnings_reports", "eur", C.dispatch("earnings_reports", {"symbol": "SAP.DE"}))
     # a third input (Tokyo, JPY): the close after the 2026-11-06 report
     fresh()
     check_as_of("earnings", C.dispatch("earnings", {"symbol": "7203.T"}), "2026-11-09", "7203.T: close after the 2026-11-06 report")
+    covered("earnings", "jpy", C.dispatch("earnings", {"symbol": "7203.T"}))
 finally:
     for n, f in saved_e.items():
         setattr(C, n, f)
@@ -143,6 +152,7 @@ try:
     fresh()
     CLOSES = {"AAPL": [("2026-11-17", 50.0), ("2026-11-18", 51.0), ("2026-11-19", 52.0), ("2026-11-20", 53.0), ("2026-11-23", 54.0), ("2026-11-24", 55.0)]}
     check_as_of("valuation_bands", C.dispatch("valuation_bands", {"symbol": "AAPL", "measure": "pe"}), "2026-11-24", "AAPL (SEC figures): last close 2026-11-24")
+    covered("valuation_bands", "us", C.dispatch("valuation_bands", {"symbol": "AAPL", "measure": "pe"}))
     # non-U.S.: Yahoo annual statements in the trading currency
     C._first = lambda path, sym, **kw: {"currency": "EUR"}
     v._yahoo = lambda sym, kind: ([{"period_ending": "2024-12-31", "net_income_common_stockholders": 80.0}, {"period_ending": "2025-12-31", "net_income_common_stockholders": 100.0}]
@@ -151,6 +161,7 @@ try:
     fresh()
     CLOSES = {"SAP.DE": [("2026-11-13", 200.0), ("2026-11-16", 201.0), ("2026-11-17", 202.0), ("2026-11-18", 203.0), ("2026-11-19", 204.0), ("2026-11-20", 205.0)]}
     check_as_of("valuation_bands", C.dispatch("valuation_bands", {"symbol": "SAP.DE", "measure": "pe"}), "2026-11-20", "SAP.DE (Yahoo statements, EUR): last close 2026-11-20")
+    covered("valuation_bands", "eur", C.dispatch("valuation_bands", {"symbol": "SAP.DE", "measure": "pe"}))
 finally:
     v.sec_figures, v._profile, C.history, v._yahoo, C._first = saved_v
 
@@ -172,6 +183,7 @@ try:
     fresh()
     out = C.dispatch("roic_dupont", {"symbol": "AAPL"})
     check_as_of("roic_dupont", out, "2025-09-27", "AAPL (SEC 10-K): fiscal year ended 2025-09-27")
+    covered("roic_dupont", "us", out)
     check(out["results"][0]["fiscal_year_end"] == "2025-09-27", "roic_dupont AAPL: newest year first")
     # non-U.S.: Yahoo annual statements
     v._profile = lambda sym: {"industry": "Software", "currency": "EUR"}
@@ -185,6 +197,7 @@ try:
     fresh()
     out = C.dispatch("roic_dupont", {"symbol": "SAP.DE"})
     check_as_of("roic_dupont", out, "2025-12-31", "SAP.DE (Yahoo statements, EUR): fiscal year ended 2025-12-31")
+    covered("roic_dupont", "eur", out)
     check(out["results"][0]["fiscal_year_end"] == "2025-12-31", "roic_dupont SAP.DE: newest year first")
 finally:
     v._sec_rows, v._profile, v._yahoo, C._first = saved_r
@@ -226,6 +239,7 @@ try:
     out = C.dispatch("news", {"subject": "symbol", "symbol": "AAPL"})
     check(len(out["results"]) >= 1, "news AAPL: headlines kept")
     check_as_of("news", out, "2026-11-24T14:30:00Z", "AAPL: newest headline 2026-11-24 14:30 UTC")
+    covered("news", "us", out)
     ITEMS = [item("SAP-Aktie: Kurs gibt nach", "Handelsblatt", 2, dt.datetime(2026, 11, 21, 8, 5, tzinfo=UTC)),
              item("SAP-Aktie: Analysten heben Kursziel an", "Reuters", 2, dt.datetime(2026, 11, 24, 6, 45, tzinfo=UTC)),
              item("SAP-Aktie: Rueckblick auf das Quartal", "Handelsblatt", 2, dt.datetime(2026, 11, 20, 17, 0, tzinfo=UTC))]
@@ -233,6 +247,7 @@ try:
     out = C.dispatch("news", {"subject": "symbol", "symbol": "SAP.DE", "hours": "168"})
     check(len(out["results"]) == 3, "news SAP.DE: all three headlines kept")
     check_as_of("news", out, "2026-11-24T06:45:00Z", "SAP.DE: newest headline 2026-11-24 06:45 UTC")
+    covered("news", "eur", out)
 finally:
     news.collect, news._window, news.rank, C._profiles = saved_n
 

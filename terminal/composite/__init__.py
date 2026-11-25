@@ -85,7 +85,7 @@ from .macro.views import (  # noqa: F401
 )
 from .geo.gpr import _gpr, GPR_NAMES, gpr_table  # noqa: F401
 from .geo.shipping import PORTWATCH_FIELDS, _chokepoints, CHOKEPOINT_ORDER, chokepoint_monitor  # noqa: F401
-from .equity.lookup import TYPE_NAMES, MINOR_UNITS, _syms, search, META_TTL, _meta, _first, snapshot  # noqa: F401
+from .equity.lookup import TYPE_NAMES, MINOR_UNITS, _syms, non_us_listing, us_only, search, META_TTL, _meta, _first, snapshot  # noqa: F401
 from .equity.comps import (  # noqa: F401
     _slug, _norm_name, _profiles, _yahoo_recs, _peers, COMP_FIELDS, _METRICS, _ev_parts, _ev_figures, comps, is_bank, BANK_NA,
 )

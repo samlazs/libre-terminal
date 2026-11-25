@@ -27,6 +27,24 @@ def _syms(value, cap=40):
     return out[:cap]
 
 
+_LISTED_ELSEWHERE = re.compile(r"^[A-Z0-9\-&]+\.[A-Z]{1,4}$")      # SAP.DE, 7203.T, SHEL.L, RY.TO
+_SHARE_CLASS = re.compile(r"^[A-Z]{1,5}\.[A-C]$")                    # BRK.B, BF.B: U.S. share classes
+
+
+def non_us_listing(sym) -> bool:
+    """A Yahoo ticker with a non-U.S. exchange suffix (the rule the page uses, widgets.js T.nonUSNote)."""
+    s = str(sym or "").strip().upper()
+    return bool(_LISTED_ELSEWHERE.match(s)) and not _SHARE_CLASS.match(s)
+
+
+def us_only(syms, source):
+    """A U.S.-only source asked about a listing elsewhere: not_covered with a plain message, before any call is made."""
+    away = [s for s in ([syms] if isinstance(syms, str) else syms) if non_us_listing(s)]
+    if away:
+        raise C.CompositeError(f"{source} covers U.S. listings only: {', '.join(away)} {'is' if len(away) == 1 else 'are'} listed elsewhere. "
+                               "A company with a U.S. listing (an ADR such as SAP or TM) can be looked up by that ticker.", kind="not_covered")
+
+
 def cik_of(q):
     """The 10-digit SEC CIK typed as such: ten digits (0000320193) or 'CIK' with up to ten digits. Shorter bare numbers
     are tickers on some exchanges (7203 for Toyota), so they are not taken as a CIK."""

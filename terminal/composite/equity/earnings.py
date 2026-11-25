@@ -637,6 +637,7 @@ def earnings_release(symbol="AAPL", report=None, **_):
     """The picked (or latest) report's press release, 8-K exhibit 99.1, in the SEC filing viewer; the 8-K itself when it
     has no 99.1. Answered as {"_frame": viewer path} (the UI server answers the backend viewer's URL and the card's frame loads it) or {"_message": text}."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
+    C.us_only(sym, "SEC EDGAR earnings releases (Form 8-K)")
     try:
         m = C._earn_model(sym, report=report, need_implied=False)
     except C.CompositeError as e:

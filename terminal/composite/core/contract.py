@@ -41,6 +41,19 @@ UNDATED = {
     "comps": "Yahoo Finance key statistics carry no date: these are Yahoo's current figures (asked again every hour).",
     "consensus": "Yahoo Finance gives its analyst consensus no date: these are its current figures.",
 }
+# Which inputs a view taking a symbol, company or currency covers (P3-05; test_contract holds every such route to it):
+#   global: any market; offline fixtures for a U.S. input and a non-U.S. one quoted in another currency (EUR, GBp, JPY).
+#   us_only: U.S. sources (SEC, FINRA, FDIC/FFIEC, N-PORT, the Yahoo option chain); a non-U.S. listing answers not_covered.
+#   set: a closed list of choices (coins, currency pairs, central banks, CUSIPs); anything else answers an input error.
+COVERAGE = {
+    **dict.fromkeys(("board", "chart", "company_links", "comps", "consensus", "correlation", "earnings", "earnings_history",
+                     "earnings_reports", "news", "perf_bars", "performance", "risk_stats", "roic_dupont", "snapshot",
+                     "valuation_bands", "vol_cone", "watchlist"), "global"),
+    **dict.fromkeys(("bank_quality", "bank_rssd", "bond_curve", "bond_lookup", "compare", "debt_maturity_wall",
+                     "earnings_release", "etf_overlap", "gex_strike"), "us_only"),
+    **dict.fromkeys(("bond_pricer", "crypto_vol", "fx_rate_diff", "policy_path", "policy_path_table"), "set"),
+}
+COVERAGE_PARAMS = ("symbol", "symbols", "symbol2", "company", "currency", "pair", "cusip")
 NO_DATE_VIOLATION = "no data date: neither an as_of from the data nor a declared as_of_na reason (contract.UNDATED)"
 _RATE_RE = re.compile(r"\b429\b|too many requests|rate.?limit", re.I)
 _TIMEOUT_RE = re.compile(r"did not answer in time|timed? ?out\b|\btimeout\b|slow to answer the first request", re.I)

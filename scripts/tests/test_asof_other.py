@@ -5,7 +5,7 @@ with distinct dates; the expected as_of is typed by hand. Upstream is faked at t
 import datetime as dt
 import math
 
-from _common import check_as_of, done
+from _common import check_as_of, covered, done
 
 import composite as C
 import banks
@@ -160,12 +160,14 @@ try:
     optionsx._chain = lambda sym: spy_chain
     out = C.dispatch("vol_cone", {"symbol": "SPY", "today": dt.date(2026, 11, 23)})
     check_as_of("vol_cone", out, "2026-11-20", "SPY: last complete session, the 11/23 live bar is not used")
+    covered("vol_cone", "us", out)
 
     def nochain(sym):
         raise C.CompositeError("Yahoo Finance has no option chain for 7203.T.")
     optionsx._chain = nochain
     out = C.dispatch("vol_cone", {"symbol": "7203.T", "today": dt.date(2026, 11, 25)})
     check_as_of("vol_cone", out, "2026-11-24", "Toyota (Tokyo), no option chain: realised cone alone")
+    covered("vol_cone", "jpy", out)
 finally:
     C.history, optionsx._chain = saved
     reset()

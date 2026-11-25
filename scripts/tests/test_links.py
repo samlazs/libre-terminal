@@ -3,7 +3,7 @@
 import pathlib
 import re
 
-from _common import check, done
+from _common import check, covered, done
 
 import composite as c
 import links as L
@@ -43,6 +43,7 @@ try:
         return {l["key"]: l for l in L.links(symbol=sym)["results"]}
 
     a = keys("aapl")
+    covered("company_links", "us", c.dispatch("company_links", {"symbol": "AAPL"}))
     check(list(a) == ["options", "filings", "bonds", "news"], f"AAPL: every destination: {list(a)}")
     check(a["options"]["dash"] == "d:options" and a["options"]["value"] == "AAPL" and a["filings"]["dash"] == "d:filings", "AAPL: options and SEC filings by ticker")
     check(a["bonds"] == {"key": "bonds", "label": "Bonds", "dash": "d:credit", "tab": "bond-lookup-trace", "group": "Issuer", "value": "AAPL"}, f"AAPL bonds by ticker: {a['bonds']}")
@@ -51,6 +52,7 @@ try:
     check(("federal_reserve/ffiec/institutions", "AAPL") not in calls, "non-financial sector skips FFIEC lookup")
 
     s = keys("SHEL.L")
+    covered("company_links", "gbp", c.dispatch("company_links", {"symbol": "SHEL.L"}))
     check(list(s) == ["bonds", "news"], f"SHEL.L: no U.S. options, no SEC filer under this ticker: {list(s)}")
     check(s["bonds"]["value"] == "Shell plc", "SHEL.L bonds through the company name (FINRA: SHELL INTL FIN B V)")
     check(("equity/search", "SHEL.L") not in calls, "a non-U.S. listing is not looked up in the SEC list")

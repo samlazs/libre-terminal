@@ -97,6 +97,7 @@ def _rows(raw):
 
 def gex(symbol="SPY", expiry="monthly", today=None, **_):
     sym = (C._syms(symbol, 1) or ["SPY"])[0]
+    C.us_only(sym, "The Yahoo Finance option chain")
     today = today or dt.date.today()
     raw = _chain(sym)
     spot = next((r.get("underlying_price") for r in raw if isinstance(r.get("underlying_price"), (int, float))), None)
