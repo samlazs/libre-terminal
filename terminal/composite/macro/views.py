@@ -284,7 +284,7 @@ def country_monitor(**_):
                 dates.append(u[-1][0])
             ser = pol.get(iso) if iso else None
             if ser:
-                row["policy"] = ser[-1][1]
+                row["policy"], row["policy_d"] = ser[-1][1], str(ser[-1][0])[:10]      # the rate and its BIS series date
                 dates.append(ser[-1][0])
             y = gy.get(k)
             if y:
