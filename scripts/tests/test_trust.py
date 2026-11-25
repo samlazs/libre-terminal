@@ -60,9 +60,9 @@ finally:
 # ---- delayed: terminal views over Yahoo prices, backend price snapshots by path and provider
 saved = dict(c.ROUTES)
 try:
-    c.ROUTES["board"] = lambda **p: {"results": []}
-    c.ROUTES["chart"] = lambda **p: {"data": []}
-    c.ROUTES["gpr_table"] = lambda **p: {"results": []}
+    c.ROUTES["board"] = lambda **p: {"results": [{"symbol": "AAPL", "as_of": "2026-11-20"}]}
+    c.ROUTES["chart"] = lambda **p: {"data": [{"x": ["2026-11-19", "2026-11-20"], "y": [1, 2]}]}
+    c.ROUTES["gpr_table"] = lambda **p: {"results": [{"date": "2026-10-01", "gpr": 100}]}
     check(c.dispatch("board", {}).get("delayed") == c.DELAYED_YAHOO, "board: delayed")
     check("delayed" not in c.dispatch("chart", {"symbol": "FRED:DGS10"}) and c.dispatch("chart", {"symbol": "AAPL"}).get("delayed"), "FRED chart not delayed, AAPL chart delayed")
     check("delayed" not in c.dispatch("gpr_table", {}), "monthly index: not a price, no marker")
@@ -91,7 +91,7 @@ try:
     c._cache.clear()
     c._backoff.clear()
     c._STALE_SINCE.clear()
-    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1}], "sources": [{"name": "OECD", "detail": "d", "url": ""}]}}), encoding="utf-8")
+    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1, "date": "2026-11-20"}], "sources": [{"name": "OECD", "detail": "d", "url": ""}]}}), encoding="utf-8")
     saved_r = dict(c.ROUTES)
     try:
         def _fail_fn():

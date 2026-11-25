@@ -94,7 +94,7 @@ def fx_moves(period="1D", **_):
                          "title": {"text": f"Right = stronger<br>{res['dates'][0]} to {res['dates'][-1]}, 17:00 New York", "font": {"size": 10}}})
     lay["yaxis"].update({"showgrid": False, "tickfont": {"color": C.INK["text2"], "size": 10}})
     lay["legend"]["traceorder"] = "reversed"
-    return {"data": data, "layout": lay}
+    return {"data": data, "layout": lay, "as_of": C.newest_date(res["dates"])}
 
 
 def fx_trend(period="3M", **_):

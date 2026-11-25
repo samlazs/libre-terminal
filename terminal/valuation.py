@@ -630,7 +630,8 @@ def _dupont_out(sym, rows, bank, basis, sources):
     note = (f"{sym} · {basis} · ROE = net margin x asset turnover x equity multiplier (year-end balances)"
             + (" · bank: ROIC not computed (deposits are not invested capital)" if bank else
                " · ROIC = operating income x (1 - tax rate) / (debt + equity - cash); tax rate clipped to 0-35%"))
-    return {"results": rows, "sources": sources, "note": note, "convention": note}
+    return {"results": rows, "sources": sources, "note": note, "convention": note,
+            "as_of": C.newest_date(r["fiscal_year_end"] for r in rows)}      # the latest fiscal year shown
 
 
 def static_sources(name, p):

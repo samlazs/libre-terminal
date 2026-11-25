@@ -101,7 +101,7 @@ def yield_curves(country="united_states,euro_area,united_kingdom,japan", compare
         want = sorted({C.compare_target(c, C._latest(latest.get(c, {}))[0], today, h) for c in countries if c in C.COUNTRIES for h in horizons} |
                       {C.horizon_date(today, h) for h in horizons})
         past = C.curves(countries, want, us_source=source)
-    data, i, used, missing, kinds = [], 0, [], [], set()
+    data, i, used, missing, kinds, drawn = [], 0, [], [], set(), []
     for c in countries:
         if c not in C.COUNTRIES:
             continue
@@ -111,6 +111,7 @@ def yield_curves(country="united_states,euro_area,united_kingdom,japan", compare
         if not pts:
             missing.append(label)
             continue
+        drawn.append(d)
         code = latest["__src__"].get(c, src)
         used.append(C.curve_source(code, label))
         kinds.add(C.CURVE_KIND.get(code))
@@ -145,7 +146,7 @@ def yield_curves(country="united_states,euro_area,united_kingdom,japan", compare
         (["Par and zero-coupon curves are not directly comparable"] if "zero-coupon" in kinds and kinds & {"par", "bond yields"} else [])
     if notes:
         lay.setdefault("annotations", []).append(C._note("; ".join(notes)))
-    out = {"data": data, "layout": lay, "sources": C.uniq_sources(used)}
+    out = {"data": data, "layout": lay, "sources": C.uniq_sources(used), "as_of": C.newest_date(drawn)}
     if C._us_fallback(latest, source):
         out["fallback"] = C._us_fallback(latest, source)
     return out
@@ -254,7 +255,7 @@ def global_yields(countries="", **_):
                     row[field] = round((row["y10"] - old) * 100)
             ser = pol.get(iso) if iso else None
             if ser:
-                row["policy"] = ser[-1][1]
+                row["policy"], row["policy_as_of"] = ser[-1][1], ser[-1][0]      # the BIS series date of that rate
             row["age"] = (today - dt.date.fromisoformat(d)).days if d else 9999
             row["freq"] = "daily" + (" (interpolated)" if src == "tesouro" else "")
             rows.append(row)
@@ -316,4 +317,6 @@ def global_yields(countries="", **_):
     want = G10_KEYS if str(countries or "").strip().lower() == "g10" else C._split(countries)
     if want:
         out = dict(out, results=[r for r in out["results"] if r["key"] in want])
-    return out
+    # dated by the newest figure shown: a curve or monthly rate (row as_of) or a policy rate (its BIS date)
+    newest = C.newest_date([r.get("as_of") for r in out["results"]] + [r.get("policy_as_of") for r in out["results"]])
+    return dict(out, as_of=newest) if newest else out

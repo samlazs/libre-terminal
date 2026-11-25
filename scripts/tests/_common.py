@@ -39,3 +39,11 @@ def check(cond, what):
 
 def done(name):
     print(f"{name}: {_count[0]} checks passed")
+
+
+def check_as_of(route: str, out: dict, expected: str, label: str = ""):
+    """P3-03: a view's answer (through dispatch) is dated by the newest data point of its fixture input. expected is the
+    hand-picked newest date of that input, typed as a literal; test_asof.py counts these calls per route."""
+    got = out.get("as_of") if isinstance(out, dict) else None
+    na = out.get("as_of_na") if isinstance(out, dict) else None
+    check(got == expected and not na, f"{route}{' (' + label + ')' if label else ''}: as_of {expected} (got {got!r}, as_of_na {na!r})")

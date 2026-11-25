@@ -274,6 +274,11 @@ def snapshot(symbol="AAPL", **_):
                f"| Price target (mean, low – high) | {C._num(tgt)}{(' ' + t_ccy) if t_ccy and tgt is not None else ''}{upside} ({C._num(st.get('target_low'))} – {C._num(st.get('target_high'))}) |",
                f"| Ex-dividend date | {str(cal.get('ex_dividend_date') or '–')[:10]} |"]
         out = {"content": "\n".join(md)}
+        stamp = C.newest_date([q.get("last_timestamp"), q.get("timestamp"), q.get("date")])          # a quote's own time, when the feed sends one
+        if stamp:
+            out["as_of"] = stamp
+        else:
+            out["as_of_na"] = "Yahoo Finance dates neither its quote nor its key statistics: these are its current figures (asked again every 15 minutes)."
         gone = [n for n, v in (("Yahoo Finance profile", p), ("Yahoo Finance key metrics", m), ("Yahoo Finance quote", q)) if not v]
         if gone or fdic_missing:            # Yahoo dropped a part (throttling): not kept for 15 minutes (P0-6)
             out["_partial"] = gone + (["FDIC call report"] if fdic_missing else [])

@@ -30,6 +30,9 @@ DEFAULT_PORTS = {"ui": 6950, "v5": 6900, "v4": 6901}
 ENV_PORT = {"ui": "TERMINAL_UI_PORT", "v5": "TERMINAL_V5_PORT", "v4": "TERMINAL_V4_PORT"}
 SECRET_PARAMS = ("key", "token", "secret", "password", "auth")
 _NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+# The generic reason the server puts on an answer whose view neither dated its data nor declared why it has no date
+# (terminal/composite/core/contract.py NO_DATE; test_harness pins the two equal). A live audit counts it as missing.
+GENERIC_NO_DATE = "This answer has no dated data points (links, a directory or a prompt)."
 
 
 def port_of(service: str, override: int | None = None) -> int:
@@ -54,7 +57,7 @@ def parse_inputs(values: list[str] | None) -> list[dict]:
 
 def envelope_violations(status: int, body, require_as_of: bool = False) -> list[str]:
     """The response contract every /x/* answer must meet: a JSON object; on 200 a non-empty 'sources' list (and, with
-    require_as_of, an 'as_of' date or an 'as_of_na' reason); on any error status a 'detail' text."""
+    require_as_of, an 'as_of' date or a declared 'as_of_na' reason, never the generic one); on any error status a 'detail' text."""
     if not isinstance(body, dict):
         return [f"{status} body is not a JSON object"]
     out = []
@@ -62,6 +65,8 @@ def envelope_violations(status: int, body, require_as_of: bool = False) -> list[
         out.append("200 without sources")
     if status == 200 and require_as_of and not (body.get("as_of") or body.get("as_of_na")):
         out.append("200 without as_of or as_of_na")
+    elif status == 200 and require_as_of and not body.get("as_of") and body.get("as_of_na") == GENERIC_NO_DATE:
+        out.append("200 with only the generic no-date reason (neither a data date nor a declared reason)")
     if status >= 400 and not str(body.get("detail") or "").strip():
         out.append(f"{status} without detail")
     return out

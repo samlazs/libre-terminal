@@ -179,6 +179,21 @@ def _resolve_board(preset, symbols):
     return BOARDS[preset][1]
 
 
+def _dated(out, dates, none):
+    """out (a fresh answer) with as_of = the newest of dates, or as_of_na = none when no bar was dated."""
+    newest = C.newest_date(dates)
+    if newest:
+        out["as_of"] = newest
+    else:
+        out["as_of_na"] = none
+    return out
+
+
+def _last_bars(hist, syms):
+    """The date of the last bar of each symbol that has one."""
+    return [ser[-1][0] for s in syms for ser in [hist.get(s)] if ser]
+
+
 def board(preset="us_equity", symbols=None, **_):
     """Quote board with multi-horizon performance and a 3-month sparkline."""
     sections = C._resolve_board(preset, symbols)
@@ -195,6 +210,7 @@ def board(preset="us_equity", symbols=None, **_):
                 _fx_columns(row, s, hist[s])
             rows.append(row)
     out = C._with_convention({"results": C._mark_stale(rows), "sources": [C.yahoo_source(syms)]}, syms, basis)
+    _dated(out, [r.get("as_of") for r in rows], "No price history for these symbols right now.")
     if preset == "fx" and not symbols:          # no distributions to speak of: say which closes the changes run between
         days = [r["as_of"][:10] for r in rows if r.get("as_of")]
         if days:
@@ -402,7 +418,7 @@ def performance(symbols="^GSPC,^NDX,^DJI", period="YTD", preset=None, **_):
     text = "; ".join(([] if all_yields else [C.CONVENTION_SHORT[basis]]) + (["No data: " + ", ".join(notes)] if notes else []))
     if text:
         lay["annotations"] = [C._note(text)]
-    return {"data": data, "layout": lay}
+    return _dated({"data": data, "layout": lay}, [t["x"][-1] for t in data], "No price history for this choice.")
 
 
 def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
@@ -417,7 +433,7 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
     yields = [(label, s) for label, s in items if C.is_yield(s)]
     bp = bool(yields) and len(yields) == len(items)          # a board of yields ranks changes in basis points
     basis, divs = C.returns_basis([s for _, s in items if not C.is_yield(s)]), getattr(hist, "divs", {})
-    vals, left_out = [], []
+    vals, left_out, last_bars = [], [], []
     for label, s in items:
         ser = hist.get(s) or []
         if C.is_yield(s) and not bp:
@@ -430,6 +446,7 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
             r = None if r is None else r * 100
         if r is not None:
             vals.append((label, r))
+            last_bars.append(ser[-1][0])
     if not vals:
         raise C.CompositeError("No price history returned.")
     vals.sort(key=lambda x: x[1])
@@ -457,7 +474,7 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
         "marker": {"color": [C.UP if v[1] >= 0 else C.DOWN for v in vals]},
         "text": [fmt(v[1]) for v in vals], "textposition": where, "textfont": {"color": C.INK["text2"], "size": 11}, "cliponaxis": False,
         "hovertemplate": "%{y}: %{x:+.2f}" + unit + "<extra></extra>",
-    }], "layout": lay}
+    }], "layout": lay, "as_of": C.newest_date(last_bars)}
 
 
 STYLE_BOX = [("Large", ("IWD", "IWB", "IWF")), ("Mid", ("IWS", "IWR", "IWP")), ("Small", ("IWN", "IWM", "IWO"))]
@@ -474,7 +491,7 @@ def style_box(period="1D", **_):
         ser = hist.get(s) or []
         return C._ret(C.total_return(ser, divs.get(s)) if basis == "total" else ser, period)
     rows = [{"size": size, "value": ret(v), "core": ret(c), "growth": ret(g)} for size, (v, c, g) in STYLE_BOX]
-    return C._with_convention({"results": rows}, syms, basis, short=True)
+    return _dated(C._with_convention({"results": rows}, syms, basis, short=True), _last_bars(hist, syms), "No price history for the Russell funds right now.")
 
 
 BOARD_LABELS = {s: label for _, secs in BOARDS.values() for _, items in secs for label, s in items}
@@ -498,7 +515,7 @@ def watchlist(symbols=None, list=None, **_):  # noqa: A002
         row = C._quote_row(C.fx_pair_label(s) or m.get("name") or BOARD_LABELS.get(s) or s, s, hist.get(s) or [], divs.get(s) if basis == "total" else None)
         row["currency"] = m.get("currency")
         rows.append(row)
-    return C._with_convention({"results": C._mark_stale(rows)}, syms, basis)
+    return _dated(C._with_convention({"results": C._mark_stale(rows)}, syms, basis), [r.get("as_of") for r in rows], "No price history for these symbols right now.")
 
 
 # ---------------------------------------------------------------- currency cross matrix (Bloomberg FXC)

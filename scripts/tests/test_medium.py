@@ -198,7 +198,7 @@ try:
     def _view(**_):
         with c.cf.ThreadPoolExecutor(max_workers=2) as ex:
             v = list(ex.map(lambda _x: c.cached_disk("p2_test", 60, _fail), [0]))[0]
-        return {"results": v, "sources": [c.src("X")]}
+        return {"results": v, "sources": [c.src("X")], "as_of": "2026-11-20"}
     c.ROUTES["p2_test"] = _view
     c._cache.clear(); c._backoff.clear()
     _o = c.dispatch("p2_test", {})

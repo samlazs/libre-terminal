@@ -99,7 +99,7 @@ def _t_boom(**_):
 
 
 def _t_strict(a="1"):
-    return {"results": [], "sources": [{"name": "Terminal", "detail": "test", "url": ""}]}
+    return {"results": [], "sources": [{"name": "Terminal", "detail": "test", "url": ""}], "as_of_na": "A test view with no data."}
 
 
 def _frame_ok(**_):

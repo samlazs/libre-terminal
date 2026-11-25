@@ -99,7 +99,10 @@ def get(path):
 
 def stub_view(symbol="AAPL", **_):
     rows = C.api(C.V5, "equity/price/historical", symbol=symbol)
-    return {"results": rows if isinstance(rows, list) else [], "sources": [C.yahoo_source([symbol])]}
+    rows = rows if isinstance(rows, list) else []
+    newest = C.newest_date(str(r.get("date")) for r in rows if isinstance(r, dict))      # like a real view: dated by its rows,
+    return {"results": rows, "sources": [C.yahoo_source([symbol])],                     # or a reason when there are none
+            **({"as_of": newest} if newest else {"as_of_na": f"No price rows for {symbol}."})}
 
 
 saved = dict(C.ROUTES)

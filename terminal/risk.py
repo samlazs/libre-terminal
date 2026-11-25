@@ -172,7 +172,8 @@ def correlation(symbols=DEFAULT, range="1Y", freq="auto", today=None, **_):
     missing = [s for s in syms if s not in al]
     lay["annotations"] = [C._note(f"Correlation of {why.split(':')[0]} returns, {len(dates)} periods {dates[0]} to {dates[-1]} · {why}"
                                   + (f" · no prices: {', '.join(missing)}" if missing else ""))]
-    return {"data": [trace], "layout": lay, "sources": [YAHOO], "controls": {"ranges": list(RANGES), "range": rng}}
+    return {"data": [trace], "layout": lay, "sources": [YAHOO], "controls": {"ranges": list(RANGES), "range": rng},
+            "as_of": dates[-1]}                  # the last return date every symbol shares
 
 
 def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol=None, peers=None, today=None, **_):
@@ -223,7 +224,8 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
     n = max((r["periods"] for r in rows), default=0)
     conv = (f"{why}; up to {n} periods; Sharpe vs average 3M T-bill {rf * 100:.2f}%" if rf is not None else f"{why}; Sharpe not computed (3M T-bill not answered)") + \
         f"; beta vs {bench}; return = price change over the window ({rng})"
-    return {"results": rows, "sources": [YAHOO, TBILL], "convention": conv}
+    # the newest close among the price series the statistics were computed from
+    return {"results": rows, "sources": [YAHOO, TBILL], "convention": conv, "as_of": C.newest_date(series[s][-1][0] for s in rets if series.get(s))}
 
 
 # ---------------------------------------------------------------- FX: spot vs 2-year yield differential

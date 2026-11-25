@@ -57,6 +57,6 @@ def chokepoint_monitor(**_):
             if lab in ("total", "tanker"):
                 pre = avg("2022-12-31", "2023-10-31")
                 row[lab + "_pre"] = (now / pre - 1) if now is not None and pre else None
-            row["as_of"] = pts[-1][0]
+            row["as_of"] = max(row.get("as_of") or "", pts[-1][0])     # the newest series of the row, not the last one read
         rows.append(row)
     return {"results": rows}

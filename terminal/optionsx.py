@@ -91,7 +91,7 @@ def _rows(raw):
         k, t = r.get("strike"), str(r.get("option_type") or "").lower()
         if isinstance(k, (int, float)) and t in ("call", "put") and r.get("expiration"):
             out.append({"strike": float(k), "type": t, "oi": float(r.get("open_interest") or 0), "iv": r.get("implied_volatility"),
-                        "expiration": str(r["expiration"])[:10]})
+                        "expiration": str(r["expiration"])[:10], "traded": r.get("last_trade_time")})
     return out
 
 
@@ -126,8 +126,16 @@ def gex(symbol="SPY", expiry="monthly", today=None, **_):
     conv = f"{sym} spot {spot:,.2f} (dotted) · " + (f"Max Pain {mp:,.2f} for {exps[0]} (dashed)" if mp is not None else f"Max Pain n/a for {exps[0]} (no open interest)") + f" · {which} · dealers assumed long calls, short puts · Black-Scholes gamma from Yahoo IV"
     lay["annotations"] = [C._note(conv)]
     results = [{"strike": k, "gex_mn": v, "spot": spot, "max_pain": mp} for k, v in zip(xs, ys)]
-    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv,
-            "summary": {"spot": spot, "max_pain": mp, "net_gex_mn": round(total, 1), "expiries": exps}}
+    # The chain carries no quote time of its own: its newest data point is the latest contract trade time (the shown expiries
+    # first, else any contract in the chain); the underlying price in it is undated.
+    as_of = C.newest_date(r["traded"] for r in use) or C.newest_date(r["traded"] for r in rows)
+    out = {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv,
+           "summary": {"spot": spot, "max_pain": mp, "net_gex_mn": round(total, 1), "expiries": exps}}
+    if as_of:
+        out["as_of"] = as_of
+    else:
+        out["as_of_na"] = f"The Yahoo chain for {sym} gives no trade time for any contract, and its underlying price is undated."
+    return out
 
 
 def rolling_vol(closes, window):
@@ -208,7 +216,8 @@ def vol_cone(symbol="SPY", today=None, **_):
     lay["annotations"] = [C._note(conv)]
     results = [{"window_days": w, "min": round(c[w][0], 2), "p25": round(c[w][1], 2), "median": round(c[w][2], 2),
                 "p75": round(c[w][3], 2), "max": round(c[w][4], 2), "today_realised": round(c[w][5], 2)} for w in xs]
-    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv}
+    # the last complete session of the price history the cone is built from (the implied-volatility curve is the chain as of now)
+    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv, "as_of": closes[-1][0]}
 
 
 def static_sources(name, p):

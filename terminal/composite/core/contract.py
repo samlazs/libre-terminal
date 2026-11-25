@@ -12,6 +12,7 @@ Error (every non-2xx, /x/* and /api/*):
 from __future__ import annotations
 
 import contextvars
+import datetime as _dt
 import inspect
 import importlib
 import logging
@@ -27,6 +28,20 @@ KIND_BY_STATUS = {400: "input", 403: "input", 404: "input", 405: "input", 409: "
 STATUS_BY_KIND = {"input": 400, "not_covered": 404, "rate_limited": 429, "timeout": 504, "upstream": 502,
                   "unavailable": 503, "internal": 500}
 NO_DATE = "This answer has no dated data points (links, a directory or a prompt)."
+# Views whose answer is not dated data, with the reason the card shows. Every other view answers as_of = the newest data
+# point it used (derived from its rows or chart, or set by the view); one that does neither is a contract violation
+# (raised in strict mode, logged once in production, where the answer still carries NO_DATE).
+UNDATED = {
+    "data_status": "A status report on the data sources, not market data.",
+    "company_links": "Links to the company's own pages, not dated data.",
+    "search": "Search results (symbols and names), not dated data.",
+    "bank_rssd": "A directory lookup (bank identifiers), not dated data.",
+    "bond_pricer": "A calculation on the price or yield you entered, not market data.",
+    "earnings_release": "A filed document: its date is on the document.",
+    "comps": "Yahoo Finance key statistics carry no date: these are Yahoo's current figures (asked again every hour).",
+    "consensus": "Yahoo Finance gives its analyst consensus no date: these are its current figures.",
+}
+NO_DATE_VIOLATION = "no data date: neither an as_of from the data nor a declared as_of_na reason (contract.UNDATED)"
 _RATE_RE = re.compile(r"\b429\b|too many requests|rate.?limit", re.I)
 _TIMEOUT_RE = re.compile(r"did not answer in time|timed? ?out\b|\btimeout\b|slow to answer the first request", re.I)
 _INPUT_RE = re.compile(r"^(?:Click|Enter|Choose|Pick|Type|Select|Give|Provide|Please)\b|\bis required\b|^Bad parameters", re.I)
@@ -50,6 +65,17 @@ def strict() -> bool:
 
 def is_iso(v) -> bool:
     return isinstance(v, str) and bool(_ISO.match(v.strip()))
+
+
+def latest_possible() -> str:
+    """The latest day a data point can carry: tomorrow (a market east of here is already a day ahead). A later date is a
+    maturity, a meeting or a release date, never an observation."""
+    return (_dt.date.today() + _dt.timedelta(days=1)).isoformat()
+
+
+def newest(values) -> str | None:
+    """The newest ISO date or datetime among values (anything else is ignored), or None."""
+    return _newest(values)
 
 
 def _newest(values) -> str | None:
@@ -82,18 +108,20 @@ def derive_as_of(out: dict) -> str | None:
             xs = t.get("x") if isinstance(t, dict) else None
             if isinstance(xs, list) and xs:
                 cands += [xs[-1], xs[0]] + (xs if len(xs) <= 50 else [])
-    return _newest(cands)
+    limit = latest_possible()                     # a chart over maturities or meeting dates is not dated by them
+    return _newest(c for c in cands if not (is_iso(c) and c.strip()[:10] > limit))
 
 
-def finish(out: dict) -> dict:
-    """A copy of a successful answer with as_of (or as_of_na) and status filled in. Never changes the cached object."""
+def finish(out: dict, name: str | None = None) -> dict:
+    """A copy of a successful answer with as_of (or as_of_na) and status filled in. Never changes the cached object.
+    as_of comes from the data; as_of_na from the view itself or, for a view listed in UNDATED, its declared reason."""
     add = {}
     if not is_iso(out.get("as_of")) and not out.get("as_of_na"):
         derived = derive_as_of(out)
         if derived:
             add["as_of"] = derived
         else:
-            add["as_of_na"] = NO_DATE
+            add["as_of_na"] = UNDATED.get(name or "", NO_DATE)
     if "status" not in out:
         add["status"] = "stale" if out.get("stale") else "ok"
     have = out.get("notes")
@@ -118,6 +146,10 @@ def violations(out) -> list[str]:
         v.append("a source is not {name, detail, url}")
     if not is_iso(out.get("as_of")) and not (isinstance(out.get("as_of_na"), str) and out["as_of_na"].strip()):
         v.append("neither an ISO as_of nor an as_of_na reason")
+    elif not is_iso(out.get("as_of")) and out.get("as_of_na") == NO_DATE:
+        v.append(NO_DATE_VIOLATION)
+    elif is_iso(out.get("as_of")) and out["as_of"].strip()[:10] > latest_possible():
+        v.append(f"as_of {out['as_of'].strip()} is in the future (a maturity or an event date, not a data date)")
     if "status" in out and out["status"] not in STATUSES:
         v.append(f"status {out['status']!r} is not one of {', '.join(STATUSES)}")
     if "notes" in out and not (isinstance(out["notes"], list) and all(isinstance(n, str) for n in out["notes"])):

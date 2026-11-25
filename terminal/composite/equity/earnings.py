@@ -465,6 +465,7 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
     timing = info.get("timing") or C._timing_from_acceptance((release or {}).get("filed"), d)
     reaction = {"base_date": None, "base": None, "price": None, "move": None, "when": None}
     live = (today - dt.date.fromisoformat(d)).days <= 3 and (not pending or release is not None)
+    lp = None
     if live:
         base_rows = [p for p in closes if (p[0] <= d if timing == "after-hours" else p[0] < d)]
         lp = C._last_price(sym)
@@ -480,7 +481,8 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
             reaction["move"] = reaction["price"] / reaction["base"] - 1 if reaction["base"] else None
     elif not pending:
         reaction.update(move=C._two_day(closes, d), when="2-day move")
-    hist_rows = [dict(r, surprise=C._eps_surprise(r["actual"], r["est"], f"the {r['date']} report"), move_2d=C._two_day(closes, r["date"]))
+    hist_rows = [dict(r, surprise=C._eps_surprise(r["actual"], r["est"], f"the {r['date']} report"), move_2d=(mv := C._two_day(closes, r["date"])),
+                      move_end=next((x for x, _ in closes if x > r["date"]), None) if mv is not None else None)    # the close the move ends on
                  for r in reported[:12]]
     last8 = hist_rows[:8]
     moves = [abs(r["move_2d"]) for r in last8 if r["move_2d"] is not None]
@@ -503,8 +505,10 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
                 if moves:
                     implied["within"] = sum(1 for x in moves if x <= implied["move"])
                     implied["hist_n"] = len(moves)
+    # the newest data point used: the last close or live price, and the newest report already made
+    as_of = C.newest_date(([closes[-1][0]] if closes else []) + ([lp[0]] if lp else []) + [r["date"] for r in reported])
     return {"symbol": sym, "currency": ccy, "track": track, "history": hist_rows, "raw": raw, "is_latest": is_latest, "note": note,
-            "implied": implied,
+            "implied": implied, "as_of": as_of,
             "latest": {"date": d, "pending": pending, "timing": timing, "quarter": info.get("period"), "release": release, "reaction": reaction,
                        "eps": dict(e_c, actual=e_act, surprise=C._eps_surprise(e_act, e_c["est"], f"the {d} report")),
                        "rev": dict(r_c, actual=r_act, surprise=C._surprise(r_act, r_c["est"])), "rev_from": rev_from},
@@ -611,7 +615,7 @@ def earnings(symbol="AAPL", report=None, **_):
                "quarterly statement once posted (hours to a day after the release: until then, the release beside this card). Yahoo moves its consensus to the next quarter around a report, so the consensus of a report "
                "once it is due is the one this terminal saw before the move. Pick an earlier report above or click a date in EPS surprise "
                "history. Prices delayed.*"]
-    return {"content": "\n".join(md), "sources": C._earn_sources(m)}
+    return {"content": "\n".join(md), "sources": C._earn_sources(m), **_dated(m)}
 
 
 def earnings_reports(symbol="AAPL", **_):
@@ -622,7 +626,11 @@ def earnings_reports(symbol="AAPL", **_):
     if m["latest"]["pending"]:
         opts.append({"label": f"{m['latest']['date']} · results pending", "value": m["latest"]["date"]})
     opts += [{"label": f"{r['date']} · EPS {C._eps_txt(r['actual'])} vs {C._eps_txt(r['est'])} ({C._pct_txt(r['surprise'])})", "value": r["date"]} for r in m["history"]]
-    return {"results": opts, "sources": C._earn_sources(m)[:1]}
+    return {"results": opts, "sources": C._earn_sources(m)[:1], **_dated(m)}
+
+
+def _dated(m):
+    return {"as_of": m["as_of"]} if m.get("as_of") else {"as_of_na": "No report or price for this company yet."}
 
 
 def earnings_release(symbol="AAPL", report=None, **_):
@@ -649,7 +657,9 @@ def earnings_history(symbol="AAPL", **_):
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
     m = C._earn_model(sym, need_implied=False)
     rows = [{"date": r["date"], "eps_est": r["est"], "eps_actual": r["actual"], "surprise": r["surprise"], "move_2d": r["move_2d"]} for r in m["history"]]
-    return {"results": rows, "sources": C._earn_sources(m)[:1]}
+    # the newest data point the table uses: a report date or the close a 2-day move ends on
+    as_of = C.newest_date([r["date"] for r in m["history"]] + [r.get("move_end") for r in m["history"]])
+    return {"results": rows, "sources": C._earn_sources(m)[:1], **({"as_of": as_of} if as_of else {"as_of_na": "No report for this company yet."})}
 
 
 def consensus(symbol="AAPL", **_):

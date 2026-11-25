@@ -170,6 +170,14 @@ check(P.envelope_violations(200, {"results": []}) == ["200 without sources"], "2
 check(P.envelope_violations(502, {"detail": "x", "sources": []}) == [], "502 with detail is a valid error envelope")
 check(P.envelope_violations(500, {"oops": 1}) == ["500 without detail"], "an error body without detail is a violation")
 check(P.envelope_violations(200, "<html>") == ["200 body is not a JSON object"], "a non-object body is a violation")
+from composite.core import contract as _K                                   # noqa: E402
+check(P.GENERIC_NO_DATE == _K.NO_DATE, "the probe's generic no-date text is the server's (contract.NO_DATE)")
+_src = [{"name": "Yahoo Finance"}]
+check(P.envelope_violations(200, {"sources": _src, "as_of_na": _K.NO_DATE}, require_as_of=True)
+      == ["200 with only the generic no-date reason (neither a data date nor a declared reason)"], "--require-as-of: the generic no-date reason counts as missing")
+check(P.envelope_violations(200, {"sources": _src, "as_of_na": _K.UNDATED["search"]}, require_as_of=True) == [], "--require-as-of: a declared reason passes")
+check(P.envelope_violations(200, {"sources": _src, "as_of": "2026-11-20"}, require_as_of=True) == [], "--require-as-of: a data date passes")
+check(P.envelope_violations(200, {"sources": _src, "as_of_na": _K.NO_DATE}) == [], "without --require-as-of the reason is not audited")
 check(P.percentile([1, 2, 3, 4, 100], 50) == 3 and P.percentile([1, 2, 3, 4, 100], 95) == 100 and P.percentile([], 50) is None, "percentiles")
 check(P.redact_url("/api/v1/x?symbol=A&api_key=SECRET&token=T") == "/api/v1/x?symbol=A&api_key=***&token=***", "key material redacted from printed URLs")
 check(json.loads(json.dumps(P.summary_line("snapshot", {200: 3, 502: 1}, [10.0, 20.0, 30.0, 40.0], 0)))

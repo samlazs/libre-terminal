@@ -73,7 +73,8 @@ def bank_failures(limit="30", **_):
                      fields="NAME,CITY,PSTALP,FAILDATE,QBFASSET,QBFDEP,COST,BIDNAME,RESTYPE1,RESTYPE")
     rows = failure_rows(C.cached_disk(f"fdic_failures_{n}", 12 * 3600, run))
     rows.sort(key=lambda r: r["failed"], reverse=True)
-    return {"results": rows, "sources": [FDIC_SRC]}
+    as_of = C.newest_date(r["failed"] for r in rows)         # the newest closing date (rows are newest first)
+    return {"results": rows, "sources": [FDIC_SRC], **({"as_of": as_of} if as_of else {"as_of_na": "The FDIC list returned no bank failures."})}
 
 
 def lead_bank(holding_rssd):

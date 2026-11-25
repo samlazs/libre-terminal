@@ -103,7 +103,7 @@ from .equity.filings import (  # noqa: F401
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
 from .warm import _safe, warm, warm_status  # noqa: F401
 from .core import contract as _contract
-from .core.contract import kind_of, time_left  # noqa: F401
+from .core.contract import kind_of, time_left, newest as newest_date  # noqa: F401
 
 def dispatch(name, params):
     """Run a view and answer inside the envelope of core/contract.py (sources, as_of or as_of_na, status, notes)."""
@@ -149,8 +149,8 @@ def dispatch(name, params):
         out = dict(out, delayed=DELAYED_YAHOO)          # HANDOFF P2: live prices from a free feed say they are delayed
     _contract.enforce_finite(name, out)                 # strict mode: a NaN/Inf reaching the serializer is a defect
     if "_frame" in out or "_message" in out:            # a frame card's answer: server.py shapes it
-        return out if out.get("as_of") or out.get("as_of_na") else dict(out, as_of_na=_contract.NO_DATE)
-    out = _contract.finish(out)
+        return out if out.get("as_of") or out.get("as_of_na") else dict(out, as_of_na=_contract.UNDATED.get(name, _contract.NO_DATE))
+    out = _contract.finish(out, name)
     _contract.enforce(name, out)
     return out
 

@@ -324,7 +324,7 @@ def chart(currency="USD", today=None, **_):
     note = C._note(f"{what} · as of {max(asof_all)}")
     note.update({"x": 0 if rising else 1, "xanchor": "left" if rising else "right", "y": 1, "yanchor": "top"})
     lay["annotations"] = [note]
-    out = {"data": traces, "layout": lay, "sources": _sources(ccys)}
+    out = {"data": traces, "layout": lay, "sources": _sources(ccys), "as_of": max(asof_all)}    # the newest futures print (x = meetings ahead)
     st = _stale(min(built_all), today)
     if st:
         out["stale"] = st
