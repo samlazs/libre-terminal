@@ -700,17 +700,6 @@ window.__fcPromise = (async function (T) {
 
   // ---- P4: readable month sort, bounded per-card timeouts, and 3-tier board widths at 1440 px
   ok(T.monthKey("Nov 2026") === 202611 && T.monthKey("Oct 2026") < T.monthKey("Nov 2026"), "readable recommendation months sort chronologically");
-  ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
-    && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
-    && T.requestTimeout("/x/chart?symbol=AAPL", false) === 60000
-    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 70000
-    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 70000
-    && T.requestTimeout("/x/policy_path?currency=USD", false) === 70000
-    && T.requestTimeout("/x/global_yields?countries=g10", false) === 70000
-    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 70000
-    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 70000
-    && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
-    "bounded per-card timeouts by route/provider");
   ok(T.boardTier(1200) === 0 && T.boardTier(700) === 1 && T.boardTier(520) === 2 && T.boardTier(400) === 3 && T.boardTier(0) === 0,
     "board width tiers step cleanly");
 
@@ -1142,9 +1131,7 @@ window.__fcPromise = (async function (T) {
       if (closeHelp) closeHelp.click();
 
       // v0.6.0 UX checks: Stage 3 requestTimeout 70s, / focuses goto, double-click header maximizes, chart footer note helper
-      ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 70000
-        && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 70000
-        && T.requestTimeout("/x/gex_strike?symbol=SPY") === 70000, "Stage 3 composite routes get 70s requestTimeout");
+      // (the Stage 3 70 s requestTimeout check runs after boot, with the per-route table)
       ok(T.chartFooterNote({ warning: "Test warning", convention: "5Y window" }) === "⚠ Test warning · 5Y window"
         && T.chartFooterNote({ convention: "5Y window" }) === "5Y window"
         && T.chartFooterNote({ convention: "5Y window", layout: { annotations: [{ text: "5Y window" }] } }) === ""
@@ -1425,6 +1412,28 @@ window.__fcPromise = (async function (T) {
     await new Promise(function (r) { setTimeout(r, 50); });
   }
   ok(!!T.S.booted, "UI booted before async integration checks");
+  // per-route timeouts: the table /api/config served at boot
+  ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 70000
+    && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 70000
+    && T.requestTimeout("/x/gex_strike?symbol=SPY") === 70000, "Stage 3 composite routes get 70s requestTimeout");
+  ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
+    && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
+    && T.requestTimeout("/x/chart?symbol=AAPL", false) === 60000
+    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 70000
+    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 70000
+    && T.requestTimeout("/x/policy_path?currency=USD", false) === 70000
+    && T.requestTimeout("/x/global_yields?countries=g10", false) === 70000
+    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 70000
+    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 70000
+    && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
+    "bounded per-card timeouts by route/provider");
+  // the table is the server's (/api/config budgets): a different table changes the answer; a bad pattern is skipped
+  var servedBudgets = T.budgetTable;
+  T.setBudgets({ default_ms: 11000, files_ms: 12000, views: { board: 13000 }, patterns: [["(", 1], ["provider=oecd", 14000]] });
+  ok(T.requestTimeout("/x/board?preset=fx", false) === 13000 && T.requestTimeout("/api/v1/x?provider=oecd", false) === 14000
+    && T.requestTimeout("/x/chart?symbol=A", false) === 11000 && T.requestTimeout("/api/v1/sec/a", true) === 12000,
+    "per-route timeouts come from the served table");
+  T.setBudgets(servedBudgets);
 
   // P4-06: T.request bounds every wait and relays the caller's abort
   await (async function () {

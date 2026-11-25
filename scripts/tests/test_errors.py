@@ -20,7 +20,7 @@ server.log = lambda _msg: None
 
 # ---- the table: harness fault kind -> error.kind (None: not an error, the view answers with what arrived)
 TABLE = {
-    "timeout": "timeout", "refused": "upstream", "http429": "rate_limited", "http5xx": "upstream", "http404": "not_covered",
+    "timeout": "timeout", "hang": "timeout", "refused": "upstream", "http429": "rate_limited", "http5xx": "upstream", "http404": "not_covered",
     "html_body": "upstream", "empty_body": None, "nan_values": None, "partial": None,
 }
 check(set(TABLE) == set(KINDS), "the table covers every fault kind of the harness")
@@ -39,7 +39,8 @@ def through_layer(kind, fn):
 
 with no_retry_delays():
     for fk, want in TABLE.items():
-        for name, fn in (("http_json", lambda: C.http_json(URL, timeout=5)), ("_download", lambda: C._download("https://example.org/a.csv", timeout=5))):
+        t = 1 if fk == "hang" else 5                          # a hanging source costs the whole timeout: keep it short
+        for name, fn in (("http_json", lambda: C.http_json(URL, timeout=t)), ("_download", lambda: C._download("https://example.org/a.csv", timeout=t))):
             if name == "_download" and fk in ("nan_values", "html_body", "empty_body"):
                 continue                                  # _download returns raw bytes; parsing is the caller's
             e = through_layer(fk, fn)
@@ -105,11 +106,15 @@ saved = dict(C.ROUTES)
 C.ROUTES["snapshot"] = stub_view
 C._cache.clear()
 try:
+    budgets = K.ROUTE_BUDGETS["views"]
+    saved_budget, budgets["snapshot"] = budgets["snapshot"], 3      # a hanging source costs the view's whole budget: keep it short
     with no_retry_delays():
         for fk, want in TABLE.items():
             kw = {"retry_after": 30} if fk == "http429" else {"match": "symbol=ZZZZQ9"} if fk == "partial" else {}
+            t0 = time.monotonic()
             with fault(fk, **kw):
                 status, body = get("/x/snapshot?symbol=AAPL")
+            check(time.monotonic() - t0 < 3.5, f"{fk}: answered within the view's 3 s budget ({time.monotonic() - t0:.1f} s)")
             check(status == STATUS[want], f"{fk}: /x/ status {STATUS[want]} (got {status})")
             if want:
                 check(body["error"]["kind"] == want and body["error"]["retryable"] == (want in K.RETRYABLE_KINDS) and body["sources"],
@@ -121,6 +126,7 @@ try:
         with fault("partial", match="symbol=ZZZZQ9"):
             status, body = get("/x/snapshot?symbol=ZZZZQ9")
         check(status == 502 and body["error"]["kind"] == "upstream", "partial: the failing symbol answers upstream")
+    budgets["snapshot"] = saved_budget
     C.ROUTES["bond_pricer"] = lambda **_: (_ for _ in ()).throw(C.CompositeError("Click a bond's CUSIP in the table or the curve above."))
     status, body = get("/x/bond_pricer")
     check(status == 400 and body["error"]["kind"] == "input" and body["user_message"] is True, "a prompt for input answers 400 input")

@@ -300,6 +300,13 @@ held 60 s, and the view answers `status: "partial"` with a note naming what is m
 answer is partial itself. `_safe` catches `CompositeError` only. `test_cache_lint` fails on any new
 `except CompositeError` that turns a failure into `[]`/`{}`/`None` silently.
 
+Time budgets: `core/contract.py` `ROUTE_BUDGETS` is the one table of how long a route may take on the server (per `/x/`
+view, per directly called backend route pattern, a default). `/api/config` serves it as `budgets` and the page's
+`T.requestTimeout` reads it, so the browser always waits 5 s longer than the server. `dispatch` starts a deadline for the
+view; `fetch()` cuts every outbound call to the time left (minus 1 s to answer) and refuses to start one when none is left,
+so a slow source makes the answer partial instead of the card timing out. The backend's slow-source waits
+(`CACHE_POLICY` "answer within") are all bounded and never longer than the slowest route budget (65 s).
+
 Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
 http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
 for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the

@@ -21,12 +21,13 @@ import json
 import re
 import socket
 import threading
+import time
 import urllib.error
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-KINDS = ("timeout", "refused", "http429", "http5xx", "http404", "empty_body", "html_body", "nan_values", "partial")
+KINDS = ("timeout", "hang", "refused", "http429", "http5xx", "http404", "empty_body", "html_body", "nan_values", "partial")
 
 HTML_BODY = b"<!DOCTYPE html><html><head><title>Service unavailable</title></head><body>Please try again later.</body></html>"
 NAN_BODY = b'{"results": [{"date": "2026-01-02", "close": NaN, "volume": Infinity}, {"date": "2026-01-03", "close": 101.5, "volume": -Infinity}]}'
@@ -80,6 +81,9 @@ def make_answer(kind: str, **kw):
     def answer(req, timeout, context=None):
         url = req.full_url
         if kind == "timeout":
+            raise socket.timeout("timed out")
+        if kind == "hang":                    # a source that never answers: the socket gives up after the caller's timeout
+            time.sleep(float(timeout))
             raise socket.timeout("timed out")
         if kind == "refused":
             raise urllib.error.URLError(ConnectionRefusedError(10061, "No connection could be made because the target machine actively refused it"))
@@ -143,7 +147,7 @@ def _installed(transport):
 def fault(kind: str, **kw):
     """Context manager: every outbound request through composite._transport answers with fault `kind`.
 
-    kinds: timeout, refused, http429(retry_after=None), http5xx(code=503), http404, empty_body, html_body, nan_values,
+    kinds: timeout, hang (sleeps the caller's timeout, then times out), refused, http429(retry_after=None), http5xx(code=503), http404, empty_body, html_body, nan_values,
     partial(ok=payload, fail="http5xx", match=regex): URLs matching `match` fail with `fail`, every other answers `ok`
     (default: every second distinct URL fails, retries included). Yields a Recorder with the requested URLs."""
     if kind == "partial":

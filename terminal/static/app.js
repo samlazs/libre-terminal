@@ -2356,6 +2356,7 @@
       ]);
       var cfg = parsed[0], st = parsed[1], gen = parsed[2];
       T.version = cfg.version || "";
+      T.setBudgets(cfg.budgets);
       if (cfg.product) T.product = cfg.product;
       paintProduct();
       S.backends = cfg.backends;

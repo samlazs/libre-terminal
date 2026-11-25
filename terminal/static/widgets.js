@@ -224,19 +224,26 @@
   }
 
   // OECD limits requests per hour and its data is monthly or slower: keep its answers in the browser for 12 hours.
-  var REQUEST_TIMEOUT = 45000;
+  // Per-route timeouts come from the server (/api/config "budgets", core/contract.py ROUTE_BUDGETS): the server's budget for
+  // the route plus a margin, so a view always answers (data, partial, or a typed timeout) before the card gives up.
+  var REQUEST_TIMEOUT = 45000;                // only until /api/config has answered
+  var budgets = null;
+  T.setBudgets = function (b) {
+    if (!b || typeof b !== "object") return;
+    var pats = [];
+    (Array.isArray(b.patterns) ? b.patterns : []).forEach(function (p) {
+      try { pats.push([new RegExp(p[0]), +p[1]]); } catch (e) { /* a pattern this browser cannot read: skipped */ }
+    });
+    budgets = { def: +b.default_ms || REQUEST_TIMEOUT, files: +b.files_ms || REQUEST_TIMEOUT, views: b.views || {}, pats: pats };
+    T.budgetTable = b;                        // the table as served (read-only use: diagnostics)
+  };
   T.requestTimeout = function (url, isFiles) {
-    var u = String(url || "");
-    if (isFiles
-      || /\/api\/v1\/(?:cboe\/options\/|derivatives\/options\/chains)\b/.test(u)
-      || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release|valuation_bands|roic_dupont|gex_strike|vol_cone|debt_maturity_wall|etf_overlap|correlation|risk_stats|fx_rate_diff)\b/.test(u)
-      || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
-      || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 70000;
-    if (/\/x\/chart\b/.test(u)) return 60000;
-    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
-      || /[?&]provider=(yfinance|cboe|tmx|nasdaq|deribit|finviz)(&|$)/.test(u)
-      || /\/api\/v1\/(yfinance|cboe|tmx|nasdaq|deribit|finviz)\//.test(u)) return 30000;
-    return REQUEST_TIMEOUT;
+    if (!budgets) return REQUEST_TIMEOUT;
+    if (isFiles) return budgets.files;
+    var u = String(url || ""), m = /\/x\/([A-Za-z0-9_]+)/.exec(u);
+    if (m && Object.prototype.hasOwnProperty.call(budgets.views, m[1])) return +budgets.views[m[1]];
+    for (var i = 0; i < budgets.pats.length; i++) if (budgets.pats[i][0].test(u)) return budgets.pats[i][1];
+    return budgets.def;
   };
   var limitedBy = {};                         // cooldowns: OECD per provider; Nasdaq per URL (the backend still serves its cache hits)
   T.clearAllCaches = function () { dataCache.clear(); limitedBy = {}; };

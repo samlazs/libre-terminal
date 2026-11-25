@@ -99,7 +99,7 @@ from .equity.filings import (  # noqa: F401
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
 from .warm import _safe, warm, warm_status  # noqa: F401
 from .core import contract as _contract
-from .core.contract import kind_of  # noqa: F401
+from .core.contract import kind_of, time_left  # noqa: F401
 
 def dispatch(name, params):
     """Run a view and answer inside the envelope of core/contract.py (sources, as_of or as_of_na, status, notes)."""
@@ -113,9 +113,11 @@ def dispatch(name, params):
     token = _STALE_NOTES.set(notes)
     swr_token = _SWR_NOTES.set(swr_notes)
     part_token = _PARTIAL_NOTES.set(missing)
+    dl_token = _contract.set_deadline(_contract.budget_for(name))       # every outbound call is cut to the time left
     try:
         out = fn(**params)
     finally:
+        _contract._DEADLINE.reset(dl_token)
         _PARTIAL_NOTES.reset(part_token)
         _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)

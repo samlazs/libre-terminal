@@ -4,6 +4,7 @@ import json
 import math
 import subprocess
 import sys
+import time
 
 from _common import ROOT, check, done
 from _fixtures import FIXTURES, KINDS, fault, fixture, no_retry_delays, serve
@@ -137,8 +138,17 @@ with no_retry_delays():
 import composite.core.http as H  # noqa: E402
 check(C._transport is H._transport, "composite._transport restored after the fault blocks")
 check(H._RETRY_DELAYS == (0.4, 1.0), "retry delays restored")
-check(set(KINDS) == {"timeout", "refused", "http429", "http5xx", "http404", "empty_body", "html_body", "nan_values", "partial"},
-      "every fault kind from the manifest exists")
+check(set(KINDS) == {"timeout", "hang", "refused", "http429", "http5xx", "http404", "empty_body", "html_body", "nan_values", "partial"},
+      "every fault kind from the manifest exists (and hang: a source that never answers)")
+_t0 = time.monotonic()
+with no_retry_delays(), fault("hang") as _rec:
+    try:
+        C.http_json("https://example.org/hang.json", timeout=1)
+        _e = None
+    except C.CompositeError as _err:
+        _e = _err
+_dt = time.monotonic() - _t0
+check(_e is not None and _e.kind == "timeout" and 0.9 <= _dt < 3.0, f"hang: waits the caller's timeout, then a typed timeout ({_dt:.2f} s)")
 
 # ---- probe.py: stdlib only, parses its CLI, refuses to run with nothing to do
 probe = ROOT / "scripts" / "probe.py"

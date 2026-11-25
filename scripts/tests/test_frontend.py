@@ -88,7 +88,8 @@ class Handler(server.Handler):
         if path in SCRIPTS:
             return self._send(200, SCRIPTS[path].encode("utf-8"), "application/javascript; charset=utf-8")
         if path == "/api/config":            # no data backends in this test: only the terminal's own views
-            return self._json(200, {"product": "Test", "backends": [{"id": "x", "name": "Terminal views", "url": ""}]})
+            return self._json(200, {"product": "Test", "backends": [{"id": "x", "name": "Terminal views", "url": ""}],
+                                    "budgets": server.contract.client_budgets()})       # the route timeouts, as the real server serves them
         return super().do_GET()
 
 

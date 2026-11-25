@@ -15,6 +15,8 @@ import urllib.request
 
 import composite as C
 
+from . import contract as _contract
+
 # Backend ports: the launcher passes TERMINAL_V5_PORT / TERMINAL_V4_PORT when other ports are chosen.
 V5 = f"http://127.0.0.1:{os.environ.get('TERMINAL_V5_PORT') or 6900}/api/v1"
 
@@ -210,6 +212,11 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
     is_local = url.startswith((C.V5, C.V4))
     label = C._which(url)
     ckey = _cool_key(url, pname)
+    left = _contract.time_left()                          # a view's deadline (dispatch): never wait past it
+    if left is not None:
+        if left <= 0.5:
+            raise _fail(f"{label} could not be asked in time (this view's time budget ran out).", kind="timeout")
+        deadline = min(deadline, time.monotonic() + left)
 
     now = time.monotonic()
     with _state_lock:

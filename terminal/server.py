@@ -84,7 +84,8 @@ def config_for(host_header: str) -> dict:
     name = (host_header or "").strip().lower().rsplit(":", 1)[0] if not (host_header or "").strip().startswith("[") else ""
     name = name if name == "localhost" else "127.0.0.1"
     include_v4 = v4_active()
-    out = dict(CONFIG, backends=[dict(b) for b in CONFIG["backends"] if include_v4 or b["id"] != "v4"])
+    out = dict(CONFIG, backends=[dict(b) for b in CONFIG["backends"] if include_v4 or b["id"] != "v4"],
+               budgets=contract.client_budgets())         # per-route browser timeouts: the server's budget + a margin
     for b in out["backends"]:
         if b["url"]:
             b["url"] = b["url"].replace("127.0.0.1", name, 1)

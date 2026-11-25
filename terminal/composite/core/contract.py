@@ -11,11 +11,13 @@ Error (every non-2xx, /x/* and /api/*):
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 import importlib
 import logging
 import os
 import re
+import time
 
 STATUSES = ("ok", "partial", "stale", "fallback")
 ERROR_KINDS = ("input", "not_covered", "upstream", "rate_limited", "timeout", "unavailable", "internal")
@@ -191,3 +193,66 @@ def bad_params(fn, params: dict) -> str | None:
     except TypeError as e:
         return str(e)
     return None
+
+
+# ---------------------------------------------------------------- time budgets: one table for the server and the browser
+# Seconds a request may take on the server. The browser waits CLIENT_MARGIN_S longer (served by /api/config), so a view
+# always answers (data, partial, or a typed timeout) before the card gives up. A /x/ view runs under a deadline (dispatch):
+# every outbound call is cut to the time left, so a slow source makes the answer partial instead of the card time out.
+CLIENT_MARGIN_S = 5
+DEFAULT_BUDGET_S = 40
+SLOW_BUDGET_S = 65                 # slow public datasets (OECD, IMF, BLS, SEC...), files, options chains
+_SLOW_VIEWS = ("global_yields", "policy_path", "yield_curves", "yield_curve_table", "rate_history", "rates_by_country", "compare",
+               "earnings_release", "valuation_bands", "roic_dupont", "gex_strike", "vol_cone", "debt_maturity_wall", "etf_overlap",
+               "correlation", "risk_stats", "fx_rate_diff")
+_FAST_VIEWS = ("board", "watchlist", "perf_bars", "performance", "style_box", "snapshot", "comps", "news", "fx_matrix", "fx_moves",
+               "fx_trend", "crypto_vol", "cds_indices")
+ROUTE_BUDGETS = {
+    "default": DEFAULT_BUDGET_S,
+    "files": SLOW_BUDGET_S,
+    # /x/<view>
+    "views": {**{v: SLOW_BUDGET_S for v in _SLOW_VIEWS}, "chart": 55, **{v: 25 for v in _FAST_VIEWS}},
+    # backend routes the page calls directly (first match wins); the regexes are valid in Python and JavaScript
+    "backend": [
+        (r"/api/v1/(?:cboe/options/|derivatives/options/chains)\b", SLOW_BUDGET_S),
+        (r"[?&]provider=(?:oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(?:&|$)", SLOW_BUDGET_S),
+        (r"/api/v1/(?:oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)/", SLOW_BUDGET_S),
+        (r"[?&]provider=(?:yfinance|cboe|tmx|nasdaq|deribit|finviz)(?:&|$)", 25),
+        (r"/api/v1/(?:yfinance|cboe|tmx|nasdaq|deribit|finviz)/", 25),
+    ],
+}
+
+
+def budget_for(view: str) -> float:
+    """Seconds the view may take on the server."""
+    return float(ROUTE_BUDGETS["views"].get(view, ROUTE_BUDGETS["default"]))
+
+
+def client_budgets() -> dict:
+    """The browser's per-route timeouts in milliseconds (server budget + CLIENT_MARGIN_S), for /api/config."""
+    ms = lambda s: int((s + CLIENT_MARGIN_S) * 1000)  # noqa: E731
+    return {"default_ms": ms(ROUTE_BUDGETS["default"]), "files_ms": ms(ROUTE_BUDGETS["files"]),
+            "views": {k: ms(v) for k, v in ROUTE_BUDGETS["views"].items()},
+            "patterns": [[p, ms(s)] for p, s in ROUTE_BUDGETS["backend"]]}
+
+
+_DEADLINE = contextvars.ContextVar("view_deadline", default=None)
+DEADLINE_RESERVE_S = 1.0           # kept back from every outbound call to build and send the answer
+
+
+def set_deadline(seconds: float):
+    """Start a deadline `seconds` from now for the request running in this context (an earlier one already running is
+    kept); returns the token to reset it."""
+    new = time.monotonic() + float(seconds)
+    cur = _DEADLINE.get()
+    return _DEADLINE.set(new if cur is None else min(cur, new))
+
+
+def time_left(cap: float | None = None) -> float | None:
+    """Seconds an outbound call or a wait may still take under the request's deadline (minus the reserve), at most cap.
+    None when no deadline is running and no cap is given (background work: the caller's own timeouts apply)."""
+    dl = _DEADLINE.get()
+    if dl is None:
+        return cap
+    left = dl - time.monotonic() - DEADLINE_RESERVE_S
+    return left if cap is None else min(cap, left)

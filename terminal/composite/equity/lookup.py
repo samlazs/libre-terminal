@@ -172,7 +172,7 @@ def _fdic_rows(sym):
     fut = ex.submit(_banks.snapshot_rows, sym)
     ex.shutdown(wait=False)
     try:
-        return fut.result(timeout=FDIC_WAIT), False
+        return fut.result(timeout=max(0.0, C.time_left(FDIC_WAIT))), False
     except C.cf.TimeoutError:
         return None, True
     except Exception:                               # noqa: BLE001  (not in the FFIEC directory, FDIC down: no bank rows)
@@ -187,9 +187,17 @@ def snapshot(symbol="AAPL", **_):
         jobs = {"profile": ("equity/profile", {"provider": "yfinance"}), "metrics": ("equity/fundamental/metrics", {"provider": "yfinance"}),
                 "quote": ("equity/price/quote", {"provider": "yfinance"}), "street": ("equity/estimates/consensus", {"provider": "yfinance"}),
                 "cal": ("yfinance/company_calendar", {})}
-        with C.cf.ThreadPoolExecutor(max_workers=5) as ex:
-            got = dict(zip(jobs, ex.map(lambda k: C._first(jobs[k][0], sym, **jobs[k][1]), jobs)))
+        def parts():
+            with C.cf.ThreadPoolExecutor(max_workers=5) as ex:
+                return dict(zip(jobs, ex.map(lambda k: C._first(jobs[k][0], sym, **jobs[k][1]), jobs)))
+        got = C._collect(parts)
+        failed = got.missing if isinstance(got, C.Partial) else []
+        got = got.value if isinstance(got, C.Partial) else got
+        C.note_partial(failed)
         p, m, q, st, cal = (got[k] for k in ("profile", "metrics", "quote", "street", "cal"))
+        if not p and not q and failed:                 # Yahoo did not answer: not the same as "nothing for this ticker"
+            raise C.CompositeError("Yahoo Finance did not answer for the company profile and quote just now (it may be throttling). "
+                                   "Press reload in a minute.", kind="upstream")
         if not p and not q:
             raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.", kind="not_covered")
         ccy = q.get("currency") or p.get("currency") or ""

@@ -247,16 +247,18 @@ class _OecdRateLimited(Exception):
 
 
 # ---------------------------------------------------------------- slow sources: disk cache, one fetch per query, bounded wait
-# provider package -> (fresh for seconds, answer within seconds (None = wait), attempts, name shown in messages)
+# provider package -> (fresh for seconds, answer within seconds, attempts, name shown in messages). "Answer within" is never
+# unbounded and never longer than the slowest route budget that reaches the provider (core/contract.py ROUTE_BUDGETS, 65 s):
+# past it the request is told the dataset keeps loading in the background (the fetch itself is not repeated).
 CACHE_POLICY = {
     "openbb_us_eia": (6 * 3600, 55, 1, "EIA"),  # paginate() already retries transient EIA timeouts up to 3 times
     "openbb_famafrench": (24 * 3600, 45, 3, "The Fama-French data library (Dartmouth)"),
     "openbb_government_us": (3 * 3600, 45, 2, "U.S. Treasury FiscalData"),
     "openbb_cftc": (3 * 3600, 45, 2, "CFTC"),
-    "openbb_bls": (6 * 3600, None, 2, "BLS"),
+    "openbb_bls": (6 * 3600, 55, 2, "BLS"),
     "openbb_usda": (12 * 3600, 45, 2, "USDA"),
-    "openbb_imf": (12 * 3600, None, 2, "IMF"),
-    "openbb_oecd": (12 * 3600, None, 1, "OECD"),       # strict hourly quota: 12 h TTL, never retry
+    "openbb_imf": (12 * 3600, 55, 2, "IMF"),
+    "openbb_oecd": (12 * 3600, 55, 1, "OECD"),         # strict hourly quota: 12 h TTL, never retry
     "openbb_ecb": (6 * 3600, 45, 2, "ECB"),
     "openbb_federal_reserve": (3 * 3600, 45, 2, "Federal Reserve"),
     "openbb_fred": (3 * 3600, 45, 2, "FRED"),
