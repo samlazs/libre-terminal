@@ -184,7 +184,8 @@ def enrich(rows, curve=None):
 def _par_curve():
     try:
         return C._src_fred_us()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "U.S. Treasury par curve (FRED)")
         return {}
 
 
@@ -200,6 +201,7 @@ def _hidden_text(hidden):
 
 def lookup(company="AAPL", issuer="", cusip="", all_types="no", include_old="no", today=None, **_):
     """Table: one row per bond with the last reported sale."""
+    C.us_only(company, "FINRA TRACE")
     rows, how = resolve(company, issuer, cusip)
     kept, hidden = select(rows, _flag(all_types), _flag(include_old), today)
     if not kept:
@@ -210,6 +212,7 @@ def lookup(company="AAPL", issuer="", cusip="", all_types="no", include_old="no"
 
 def curve(company="AAPL", issuer="", cusip="", all_types="no", include_old="no", today=None, **_):
     """Chart: last-sale yield against maturity, one colour per issuer name."""
+    C.us_only(company, "FINRA TRACE")
     rows, how = resolve(company, issuer, cusip)
     kept, hidden = select(rows, _flag(all_types), _flag(include_old), today)
     pts = [r for r in kept if r["yield"] is not None and r["maturity"]]
@@ -232,7 +235,9 @@ def curve(company="AAPL", issuer="", cusip="", all_types="no", include_old="no",
     lay["yaxis"]["title"] = {"text": "last-sale yield", "font": {"size": 10}}      # yield to worst on callables: the card's description and table say so
     note = "x: maturity · click a point for its history" + (" · " + _hidden_text(hidden) if _hidden_text(hidden) else "")
     lay["annotations"] = [C._note(note)]
-    return {"data": traces, "layout": lay, "sources": [SOURCE_FINRA, SOURCE_SEC], "delayed": DELAYED, "results": pts, "convention": note}
+    # dated by the newest last sale shown (the chart's x values are maturities, not observation dates)
+    return {"data": traces, "layout": lay, "sources": [SOURCE_FINRA, SOURCE_SEC], "delayed": DELAYED, "results": pts, "convention": note,
+            "as_of": C.newest_date(r["last_trade"] for r in pts)}
 
 
 # ---------------------------------------------------------------- bond pricer (Stage 3 item 4)
@@ -249,6 +254,8 @@ def pricer(cusip="", price="", ytm="", today=None, **_):
     cu = str(cusip or "").strip().upper()
     if not cu:
         raise C.CompositeError("Click a bond's CUSIP in the table or the curve above (or type a CUSIP in the settings).")
+    if not cusip_ok(cu):                         # an ISIN or a typo: TRACE knows 9-character CUSIPs with a valid check digit
+        raise C.CompositeError(f"Enter a 9-character CUSIP with a valid check digit ('{cu[:20]}' is not one; TRACE covers U.S. bonds).", kind="input")
     rows = _prices(cusip=cu)
     if not rows:
         raise C.CompositeError(f"No TRACE bond with CUSIP {cu}.")
@@ -321,17 +328,24 @@ def _wall_sources(sym, cik=None):
 
 def maturity_wall(company="AAPL", **_):
     sym = str(company or "").strip().upper()
+    C.us_only(sym, "SEC 10-K filings")
     if not re.fullmatch(r"[A-Z][A-Z0-9\-]{0,6}", sym):
         raise C.CompositeError("The debt maturity wall uses SEC 10-K figures: type the U.S. ticker of the issuer (for example AAPL, T, F).")
 
     def run():
-        out = {}
+        out, failed, first = {}, [], None
         for tag, _ in WALL:
             try:
                 out[tag] = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=sym, fact=tag, instantaneous="true") or []
-            except C.CompositeError:
-                out[tag] = []
-        return out
+            except C.CompositeError as e:
+                if C.kind_of(e) in ("not_covered", "input"):
+                    out[tag] = []                         # the company does not tag this year: a complete answer
+                    continue
+                failed.append(tag)
+                first = first or e
+        if failed and len(failed) == len(WALL):
+            raise first                                   # an SEC outage is never saved as "no maturities"
+        return C.Partial(out, [f"SEC {t}" for t in failed]) if failed else out
     got = wall_points(C.cached_disk(C.disk_name("debtwall_", sym), 12 * 3600, run))
     if not got:
         raise C.CompositeError(f"No debt maturity schedule in {sym}'s SEC filings (non-U.S. filers and companies that do not tag it have none).")
@@ -349,7 +363,8 @@ def maturity_wall(company="AAPL", **_):
             f"${total:,.1f}bn in all · a blank bar = not tagged · filings: source menu")
     lay["annotations"] = [C._note(conv)]
     results = [{"bucket": b, "principal_bn": v} for b, v in zip(xs, ys)]
-    return {"data": [trace], "layout": lay, "sources": _wall_sources(sym, cik), "results": results, "convention": conv}
+    return {"data": [trace], "layout": lay, "sources": _wall_sources(sym, cik), "results": results, "convention": conv,
+            "as_of": end}                                 # the schedule is as of the 10-K's fiscal year end
 
 
 def static_sources(name, p):

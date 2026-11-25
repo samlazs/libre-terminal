@@ -18,9 +18,9 @@ def _chokepoints():
         for r in rows or []:
             name, d = r.get("chokepoint"), str(r.get("date"))[:10]
             for f in PORTWATCH_FIELDS:
-                v = r.get(f)
+                v = C.num(r.get(f))
                 if name and v is not None:
-                    out.setdefault(f"{name}:{f}", []).append([d, float(v)])
+                    out.setdefault(f"{name}:{f}", []).append([d, v])
         for k in out:
             out[k].sort()
         if not out:
@@ -57,6 +57,6 @@ def chokepoint_monitor(**_):
             if lab in ("total", "tanker"):
                 pre = avg("2022-12-31", "2023-10-31")
                 row[lab + "_pre"] = (now / pre - 1) if now is not None and pre else None
-            row["as_of"] = pts[-1][0]
+            row["as_of"] = max(row.get("as_of") or "", pts[-1][0])     # the newest series of the row, not the last one read
         rows.append(row)
     return {"results": rows}

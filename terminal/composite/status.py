@@ -28,12 +28,28 @@ def _patch_status_md() -> list:
         for p in st.get("failed") or []:
             if isinstance(p, dict):
                 rows.append(f"| {BACKEND_NAMES[name]} | {cell(p.get('patch', ''), 120)} | **not applied**: {cell(p.get('why', ''), 160)} |")
+        for p in st.get("patches") or []:
+            if isinstance(p, dict) and p.get("applied") and p.get("unverified"):
+                rows.append(f"| {BACKEND_NAMES[name]} | {cell(p.get('title', ''), 120)} | applied, {cell(p['unverified'], 160)} |")
     if not rows:
         return []
     svc = "the data services" if with_v4 else "the data service"
     return ["", "#### Backend fixes", f"Fixes the terminal applies to {svc} in memory when starting (no installed file is changed). "
             "One that is not applied usually means the backend package changed; the affected sources keep working, without that fix.", "",
             "| Backend | Fix | Status |", "|---|---|---|"] + rows
+
+
+def critical_failures() -> list:
+    """(backend, fix title) for every critical runtime fix that did not apply at the last start (red on Data status)."""
+    out = []
+    for name in BACKEND_NAMES:
+        try:
+            st = json.loads((local_paths.RUN_DIR / f"patches-{name}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        titles = {p.get("id"): p.get("title") for p in st.get("patches") or [] if isinstance(p, dict)}
+        out += [(name, titles.get(pid) or pid) for pid in st.get("critical_failed") or []]
+    return out
 
 
 def data_status(**_):
@@ -43,6 +59,11 @@ def data_status(**_):
     except (OSError, ValueError):
         st = {}
     md = ["### Data status", f"As of the last dashboard build ({st.get('generated') or 'unknown'}). The terminal rebuilds this on every start.", ""]
+    crit = critical_failures()
+    if crit:
+        md = ["> **🔴 A critical backend fix is not applied:** " + "; ".join(f"{t} ({BACKEND_NAMES[n]})" for n, t in crit)
+              + ". The data service runs without it and may freeze, leak or answer wrongly. Restart the terminal; if it stays, "
+              "the backend package changed (see Backend fixes below).", ""] + md
     keys = st.get("keys") or []
     missing = [k for k in keys if not k.get("set") and k.get("cards")]
     md += ["#### API keys", "Everything on Markets Summary, Rates & Curves, Company and the boards works without keys. Cards that need a key you have not set say so and sit at the end of their tab.", ""]
@@ -63,4 +84,7 @@ def data_status(**_):
     md += ["", "#### Known limits", "Runs on the main V5 data service by default (legacy V4 is opt-in with `--with-v4`). "
            "No real-time feeds (Yahoo Finance prices are delayed), no single-name CDS, U.S. Treasury security prices are blocked at the source, "
            "euro-area member curves are monthly (3-month and 10-year only). OECD data is cached for 12 hours because OECD limits how often it can be queried."]
-    return {"content": "\n".join(md)}
+    out = {"content": "\n".join(md)}
+    if crit:
+        out.update(status="partial", notes=[f"Critical backend fix not applied: {t}" for _, t in crit])
+    return out

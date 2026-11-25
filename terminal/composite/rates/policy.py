@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
-import math
 
 import composite as C
 
@@ -33,12 +32,9 @@ def _bis_rates(flow, start):
         raise C.CompositeError("The BIS policy-rate service is not reachable right now.") from None
     out = {}
     for row in csv.DictReader(io.StringIO(text)):
-        try:
-            v = float(row.get("OBS_VALUE") or "nan")
-        except ValueError:
-            continue
+        v = C.num(row.get("OBS_VALUE"))
         area, per = row.get("REF_AREA"), row.get("TIME_PERIOD")
-        if not math.isfinite(v) or not area or not per:
+        if v is None or not area or not per:
             continue
         out.setdefault(area, []).append((per, v))
     for k in out:
@@ -93,7 +89,8 @@ def policy_rates(**_):
     data = C._bis_policy()
     try:
         daily = C._bis_policy_daily()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "BIS daily policy rates")
         daily = {}
     cutoff = (dt.date.today() - dt.timedelta(days=C.DAILY_POLICY_MAX_AGE)).isoformat()
     rows = []
@@ -131,7 +128,8 @@ def policy_rate_history(central_bank="US,XM,GB,JP", start="2015", country=None, 
     data = C._bis_policy()
     try:
         daily = C._bis_policy_daily()
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "BIS daily policy rates")
         daily = {}
     codes = [c.upper() for c in C._split(central_bank)][:8]
     if country:                                   # a dashboard country (e.g. "japan") overrides the list

@@ -23,7 +23,7 @@ SOURCES = [C.src("Deribit", "DVOL: 30-day implied volatility index from Deribit 
 
 
 def _fin(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def realised(closes, window=WINDOW):
@@ -46,8 +46,9 @@ def _day(v):
 
 def chart(currency="BTC", range="1Y", today=None, **_):
     today = today or dt.datetime.now(dt.timezone.utc).date()
-    ccy = str(currency or "BTC").upper()
-    ccy = ccy if ccy in COINS else "BTC"
+    ccy = str(currency or "BTC").strip().upper()
+    if ccy not in COINS:                        # never another coin's figures under this name
+        raise C.CompositeError("Pick one of: " + ", ".join(COINS), kind="input")
     name, ticker = COINS[ccy]
     rng = str(range or "1Y").upper()
     rng = rng if rng in RANGES else "1Y"
@@ -57,7 +58,8 @@ def chart(currency="BTC", range="1Y", today=None, **_):
     def load():
         dv = C.api(C.V5, "deribit/volatility/index", provider="deribit", currency=ccy, interval="1d", start_date=start.isoformat()) or []
         px = C.api(C.V5, "crypto/price/historical", provider="yfinance", symbol=ticker, start_date=fetch_from) or []
-        return dv, px
+        gone = (["Deribit DVOL"] if not dv else []) + (["Yahoo Finance daily closes"] if not px else [])
+        return C.Partial((dv, px), gone) if gone else (dv, px)
     dv, px = C.cached(("cryptovol", ccy, start.isoformat()), 900, load)
     done = today.isoformat()                                   # complete UTC days only
     implied = sorted((_day(r.get("date")), c) for r in dv for c in [_fin(r.get("close"))] if c is not None and _day(r.get("date")) < done)

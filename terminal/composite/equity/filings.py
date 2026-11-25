@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 
 import composite as C
 
@@ -57,7 +56,8 @@ def _facts(symbols, fact):
         for tag in tags:
             try:
                 rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=",".join(symbols), fact=tag, instantaneous="true" if instant else None)
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, f"SEC {tag}")
                 continue
             for r in rows or []:
                 if r.get("value") is None or not r.get("period_ending") or r.get("symbol") not in symbols:
@@ -70,8 +70,8 @@ def _facts(symbols, fact):
                     continue
                 if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
                     continue
-                val = r.get("value")
-                if not (isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val)):
+                val = C.num(r.get("value"))
+                if val is None:
                     continue
                 d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
                 d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(val)))
@@ -150,6 +150,7 @@ def yoy_pct(pts):
 def compare(group="hyperscalers", symbols=None, fact="capex", period="quarter", since="2019", measure="level", **_):
     """One reported line item (capex, revenue, debt...) or a ratio of two across companies over time, from SEC filings."""
     syms = [s.upper() for s in C._split(symbols)][:8] or C._split(COMPARE_GROUPS.get(group, COMPARE_GROUPS["hyperscalers"])[1])
+    C.us_only(syms, "SEC filings")
     measure = measure if measure in MEASURES else "level"
     if fact in DERIVED:
         label, fa, fb, how = DERIVED[fact]

@@ -123,8 +123,8 @@ def _symbols(symbols, symbol=None, peers=None):
         if len(lst) == 1:
             try:
                 lst += [p for p in C._peers(lst[0])[:8] if p != lst[0]]
-            except C.CompositeError:
-                pass
+            except C.CompositeError as e:
+                C.partial_from(e, "peers")
         return lst
     return C._syms(symbols or DEFAULT, 20) or C._syms(DEFAULT, 20)
 
@@ -172,7 +172,8 @@ def correlation(symbols=DEFAULT, range="1Y", freq="auto", today=None, **_):
     missing = [s for s in syms if s not in al]
     lay["annotations"] = [C._note(f"Correlation of {why.split(':')[0]} returns, {len(dates)} periods {dates[0]} to {dates[-1]} · {why}"
                                   + (f" · no prices: {', '.join(missing)}" if missing else ""))]
-    return {"data": [trace], "layout": lay, "sources": [YAHOO], "controls": {"ranges": list(RANGES), "range": rng}}
+    return {"data": [trace], "layout": lay, "sources": [YAHOO], "controls": {"ranges": list(RANGES), "range": rng},
+            "as_of": dates[-1]}                  # the last return date every symbol shares
 
 
 def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol=None, peers=None, today=None, **_):
@@ -190,7 +191,8 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
     try:
         tb, _ = C._fred(["DGS3MO"], start.isoformat())
         bills = [v for d, v in tb.get("DGS3MO", []) if v is not None and d >= start.isoformat()]
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "3-month T-bill rate (FRED)")
         bills = []
     rf_pct = _mean(bills)
     rf = rf_pct / 100 if rf_pct is not None else None
@@ -214,14 +216,16 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
                 row["beta"] = None if b is None else round(b, 2)
         if len(px) > 1:
             row["max_dd"] = round(max_drawdown(px), 2)
-            row["ret_1y"] = round((px[-1] / px[0] - 1) * 100, 2) if (px[0] and px[0] > 0 and math.isfinite(px[0]) and math.isfinite(px[-1])) else None
+            p0, p1 = C.num(px[0]), C.num(px[-1])
+            row["ret_1y"] = round((p1 / p0 - 1) * 100, 2) if (p0 and p0 > 0 and p1 is not None) else None
         rows.append(row)
     if not any(r["vol"] is not None for r in rows):
         raise C.CompositeError("Too few common prices to compute risk statistics.")
     n = max((r["periods"] for r in rows), default=0)
     conv = (f"{why}; up to {n} periods; Sharpe vs average 3M T-bill {rf * 100:.2f}%" if rf is not None else f"{why}; Sharpe not computed (3M T-bill not answered)") + \
         f"; beta vs {bench}; return = price change over the window ({rng})"
-    return {"results": rows, "sources": [YAHOO, TBILL], "convention": conv}
+    # the newest close among the price series the statistics were computed from
+    return {"results": rows, "sources": [YAHOO, TBILL], "convention": conv, "as_of": C.newest_date(series[s][-1][0] for s in rets if series.get(s))}
 
 
 # ---------------------------------------------------------------- FX: spot vs 2-year yield differential
@@ -266,8 +270,9 @@ def rolling_corr(spot, diff, window=CORR_WINDOW):
 
 
 def fx_rate_diff(pair="EURUSD", range="1Y", today=None, **_):
-    pair = str(pair or "EURUSD").upper().replace("/", "")
-    pair = pair if pair in PAIRS else "EURUSD"
+    pair = str(pair or "EURUSD").strip().upper().replace("/", "")
+    if pair not in PAIRS:                       # never another pair's figures under this name
+        raise C.CompositeError("Pick one of: " + ", ".join(PAIRS), kind="input")
     ysym, base_c, quote_c = PAIRS[pair]
     today = today or dt.date.today()
     with C.cf.ThreadPoolExecutor(max_workers=3) as ex:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -54,13 +53,9 @@ def _est_raw(sym):
             if failed:
                 raise C.CompositeError("Yahoo Finance did not answer just now (it may be throttling). Press reload in a minute.")
             raise C.CompositeError(f"Yahoo Finance has no estimates for '{sym}'. Non-U.S. listings need their exchange suffix (7203.T, SAP.DE).")
-        return out
-    key = ("est_raw", sym)
-    hit = C._cache.get(key)
-    if hit and hit[1].get("_failed") and time.time() - hit[0] > 60:
-        with C._guard:                              # a partial answer is kept one minute, not ten: never taken for the whole picture
-            C._cache.pop(key, None)
-    return C.cached(key, 600, run)
+        # a partial answer is kept one minute, not ten: never taken for the whole picture
+        return C.Partial(out, [f"Yahoo Finance estimates ({k})" for k in failed]) if failed else out
+    return C.cached(("est_raw", sym), 600, run)
 
 
 def _report_info(sym, date):
@@ -69,7 +64,8 @@ def _report_info(sym, date):
     def run():
         try:
             return C.api(C.V5, "equity/calendar/earnings", provider="nasdaq", start_date=date, end_date=date) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "Nasdaq earnings calendar")
             return []
     r = next((x for x in C.cached(("nasdaq_earn_cal", date), 3600, run) if str(x.get("symbol") or "").upper() == sym), None)
     if not r:
@@ -105,7 +101,8 @@ def _earnings_release(sym, date):
     def run():
         try:
             rows = C.api(C.V5, "equity/fundamental/filings", provider="sec", symbol=sym, form_type="8-K", limit=60) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "SEC 8-K filings")
             return []
         return [{"url": r.get("filing_detail_url") or r.get("report_url"), "doc": r.get("report_url"), "filed": str(r.get("accepted_date") or r.get("filing_date") or ""),
                  "date": str(r.get("filing_date") or "")[:10]} for r in rows if "2.02" in str(r.get("items") or "")]
@@ -119,7 +116,8 @@ def _filing_documents(url):
     def run():
         try:
             res = C.api(C.V5, "sec/filing_headers", url=url)
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "SEC filing documents")
             return []
         res = res[0] if isinstance(res, list) and res else res if isinstance(res, dict) else {}
         return [{"type": str(x.get("type") or "").upper(), "url": x.get("url")} for x in res.get("document_urls") or [] if x.get("url")]
@@ -132,10 +130,10 @@ def _last_price(sym):
         try:
             rows = C.api(C.V5, "equity/price/historical", symbol=sym, provider="yfinance", interval="5m", extended_hours=True,
                        start_date=(dt.date.today() - dt.timedelta(days=4)).isoformat()) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "Yahoo Finance intraday price")
             return None
-        rows = [(str(r.get("date"))[:19], float(r["close"])) for r in rows
-                if isinstance(r.get("close"), (int, float)) and not isinstance(r.get("close"), bool) and math.isfinite(r["close"])]
+        rows = [(str(r.get("date"))[:19], c) for r in rows if (c := C.num(r.get("close"))) is not None]
         return rows[-1] if rows else None
     return C.cached(("last_price", sym), 60, run)
 
@@ -158,11 +156,16 @@ def _consensus_store(sym, date=None, entry=None):
 
 
 def _f(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def _surprise(actual, est):
     return (actual - est) / abs(est) if actual is not None and est else None
+
+
+def _eps_surprise(actual, est, what=None):
+    """EPS surprise as a fraction, inside its plausible range (+-500%: a near-zero estimate makes it meaningless)."""
+    return C.banded("eps_surprise_pct", C._surprise(actual, est), what)
 
 
 def _cons(row):
@@ -175,7 +178,8 @@ def _two_day(closes, d):
     the open and after the close."""
     before = [c for x, c in closes if x < d]
     after = [c for x, c in closes if x > d]
-    return after[0] / before[-1] - 1 if before and after and before[-1] else None
+    move = after[0] / before[-1] - 1 if before and after and before[-1] else None
+    return C.banded("move_2d_pct", move, f"the {d} report")      # -80%..+300%: outside it is a bad print
 
 
 def _yahoo_q0_is(reported, d, eps, saved=None):
@@ -216,14 +220,9 @@ def _yahoo_quarter_chart(sym):
             qs = [(q.get("date"), raw(q.get("revenue")), eps.get(q.get("date")))
                   for q in (e.get("financialsChart") or {}).get("quarterly") or [] if q.get("date")]
         except Exception:                         # noqa: BLE001  (module missing, network, throttling, odd JSON: no figure)
-            return None
-        return {"currency": e.get("financialCurrency"), "quarters": qs} if qs else None
-    key = ("yahoo_qchart", sym)
-    hit = C._cache.get(key)
-    if hit and hit[1] is None and time.time() - hit[0] > 60:
-        with C._guard:
-            C._cache.pop(key, None)
-    return C.cached(key, 600, run)
+            return C.Partial(None)                # no figure: kept one minute (not reported: the views say what is blank)
+        return {"currency": e.get("financialCurrency"), "quarters": qs} if qs else C.Partial(None)
+    return C.cached(("yahoo_qchart", sym), 600, run)
 
 
 def _summary_revenue(chart, reported_eps, statement, ccy):
@@ -320,6 +319,7 @@ def _implied_move(chain, target_date, spot=None, today=None, timing=None):
     if td < now_d or (td - now_d).days > 120:
         return None
     rows, chain_spot, as_of = C._parse_option_chain(chain)
+    spot_from = "chain" if chain_spot else "close"
     spot = chain_spot or C._f(spot)
     if not spot or spot <= 0:
         return None
@@ -353,6 +353,7 @@ def _implied_move(chain, target_date, spot=None, today=None, timing=None):
             "dte": dte,
             "strike": strike,
             "spot": spot,
+            "spot_from": spot_from,                  # "close" when the chain had no underlying price (flagged by the caller)
             "straddle": straddle,
             "move": straddle / spot,
             "pricing": pricing,
@@ -370,7 +371,7 @@ def _options_chain(sym):
     key = ("opt_chain", sym)
 
     def _fresh(hit):
-        return hit and time.time() - hit[0] < (900 if hit[1][0] is not None else 60)
+        return hit and time.monotonic() - hit[0] < (900 if hit[1][0] is not None else 60)
 
     with C._guard:
         hit = C._cache.get(key)
@@ -391,10 +392,10 @@ def _options_chain(sym):
             if has_rows:
                 val = (res, prov)
                 with C._guard:
-                    C._cache[key] = (time.time(), val)
+                    C._cache[key] = (time.monotonic(), val)
                 return val
         with C._guard:
-            C._cache[key] = (time.time(), (None, None))
+            C._cache[key] = (time.monotonic(), (None, None))
         return None, None
 
 
@@ -464,6 +465,7 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
     timing = info.get("timing") or C._timing_from_acceptance((release or {}).get("filed"), d)
     reaction = {"base_date": None, "base": None, "price": None, "move": None, "when": None}
     live = (today - dt.date.fromisoformat(d)).days <= 3 and (not pending or release is not None)
+    lp = None
     if live:
         base_rows = [p for p in closes if (p[0] <= d if timing == "after-hours" else p[0] < d)]
         lp = C._last_price(sym)
@@ -479,7 +481,9 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
             reaction["move"] = reaction["price"] / reaction["base"] - 1 if reaction["base"] else None
     elif not pending:
         reaction.update(move=C._two_day(closes, d), when="2-day move")
-    hist_rows = [dict(r, surprise=C._surprise(r["actual"], r["est"]), move_2d=C._two_day(closes, r["date"])) for r in reported[:12]]
+    hist_rows = [dict(r, surprise=C._eps_surprise(r["actual"], r["est"], f"the {r['date']} report"), move_2d=(mv := C._two_day(closes, r["date"])),
+                      move_end=next((x for x, _ in closes if x > r["date"]), None) if mv is not None else None)    # the close the move ends on
+                 for r in reported[:12]]
     last8 = hist_rows[:8]
     moves = [abs(r["move_2d"]) for r in last8 if r["move_2d"] is not None]
     surp = [r["surprise"] for r in last8 if r["surprise"] is not None]
@@ -494,15 +498,19 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
             got = C._options_chain(sym)
             chain, opt_prov = got if isinstance(got, tuple) else (got, "cboe")
             implied = C._implied_move(chain, imp_target, spot=spot_fallback, today=today, timing=imp_timing)
+            if implied and implied.get("spot_from") == "close":
+                C.note_fallback("the last daily close", "the options chain has no underlying price for the implied move")
             if implied:
                 implied["provider"] = opt_prov or "nasdaq"
                 if moves:
                     implied["within"] = sum(1 for x in moves if x <= implied["move"])
                     implied["hist_n"] = len(moves)
+    # the newest data point used: the last close or live price, and the newest report already made
+    as_of = C.newest_date(([closes[-1][0]] if closes else []) + ([lp[0]] if lp else []) + [r["date"] for r in reported])
     return {"symbol": sym, "currency": ccy, "track": track, "history": hist_rows, "raw": raw, "is_latest": is_latest, "note": note,
-            "implied": implied,
+            "implied": implied, "as_of": as_of,
             "latest": {"date": d, "pending": pending, "timing": timing, "quarter": info.get("period"), "release": release, "reaction": reaction,
-                       "eps": dict(e_c, actual=e_act, surprise=C._surprise(e_act, e_c["est"])),
+                       "eps": dict(e_c, actual=e_act, surprise=C._eps_surprise(e_act, e_c["est"], f"the {d} report")),
                        "rev": dict(r_c, actual=r_act, surprise=C._surprise(r_act, r_c["est"])), "rev_from": rev_from},
             "next": {"date": nxt_date, **next_q}, "next_quarter": next_q}
 
@@ -607,7 +615,7 @@ def earnings(symbol="AAPL", report=None, **_):
                "quarterly statement once posted (hours to a day after the release: until then, the release beside this card). Yahoo moves its consensus to the next quarter around a report, so the consensus of a report "
                "once it is due is the one this terminal saw before the move. Pick an earlier report above or click a date in EPS surprise "
                "history. Prices delayed.*"]
-    return {"content": "\n".join(md), "sources": C._earn_sources(m)}
+    return {"content": "\n".join(md), "sources": C._earn_sources(m), **_dated(m)}
 
 
 def earnings_reports(symbol="AAPL", **_):
@@ -618,13 +626,18 @@ def earnings_reports(symbol="AAPL", **_):
     if m["latest"]["pending"]:
         opts.append({"label": f"{m['latest']['date']} · results pending", "value": m["latest"]["date"]})
     opts += [{"label": f"{r['date']} · EPS {C._eps_txt(r['actual'])} vs {C._eps_txt(r['est'])} ({C._pct_txt(r['surprise'])})", "value": r["date"]} for r in m["history"]]
-    return {"results": opts, "sources": C._earn_sources(m)[:1]}
+    return {"results": opts, "sources": C._earn_sources(m)[:1], **_dated(m)}
+
+
+def _dated(m):
+    return {"as_of": m["as_of"]} if m.get("as_of") else {"as_of_na": "No report or price for this company yet."}
 
 
 def earnings_release(symbol="AAPL", report=None, **_):
     """The picked (or latest) report's press release, 8-K exhibit 99.1, in the SEC filing viewer; the 8-K itself when it
     has no 99.1. Answered as {"_frame": viewer path} (the UI server answers the backend viewer's URL and the card's frame loads it) or {"_message": text}."""
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
+    C.us_only(sym, "SEC EDGAR earnings releases (Form 8-K)")
     try:
         m = C._earn_model(sym, report=report, need_implied=False)
     except C.CompositeError as e:
@@ -645,7 +658,19 @@ def earnings_history(symbol="AAPL", **_):
     sym = (C._syms(symbol, 1) or ["AAPL"])[0]
     m = C._earn_model(sym, need_implied=False)
     rows = [{"date": r["date"], "eps_est": r["est"], "eps_actual": r["actual"], "surprise": r["surprise"], "move_2d": r["move_2d"]} for r in m["history"]]
-    return {"results": rows, "sources": C._earn_sources(m)[:1]}
+    # the newest data point the table uses: a report date or the close a 2-day move ends on
+    as_of = C.newest_date([r["date"] for r in m["history"]] + [r.get("move_end") for r in m["history"]])
+    # the currency Yahoo names for this company's EPS (its estimates; the history is on the same basis). None named: the
+    # contract envelope blanks the amounts with a note (core/contract.py ccy_unnamed)
+    ccy = {"currency": m["currency"], "convention": f"EPS in {m['currency']} per share"} if m.get("currency") else {}
+    return {"results": rows, "sources": C._earn_sources(m)[:1], **ccy,
+            **({"as_of": as_of} if as_of else {"as_of_na": "No report for this company yet."})}
+
+
+def _named_ccy(rows):
+    """The one currency Yahoo names on a list of estimate rows ('' when none or more than one)."""
+    named = {str(r.get("currency")) for r in rows if r.get("currency")}
+    return named.pop() if len(named) == 1 else ""
 
 
 def consensus(symbol="AAPL", **_):
@@ -672,4 +697,16 @@ def consensus(symbol="AAPL", **_):
         if {"eps", "rev"} & set(raw.get("_failed", [])):
             raise C.CompositeError("Yahoo Finance did not answer for its estimates just now (it may be throttling). Press reload in a minute.")
         raise C.CompositeError(f"Yahoo Finance has no consensus estimates for '{sym}'.")
-    return {"results": rows, "sources": [C.src("Yahoo Finance", "consensus estimates, EPS trend and revisions", C.YAHOO_URL + "quote/" + urllib.parse.quote(sym) + "/analysis")]}
+    # amounts in the currency Yahoo names: EPS from its EPS estimates, revenue from its revenue estimates. When the two
+    # differ (or one names none), the side not in the answer's currency is left blank with a note, never shown unlabelled
+    e_ccy, r_ccy = _named_ccy(raw["eps"]), _named_ccy(raw["rev"])
+    ccy = e_ccy or r_ccy
+    extra = {}
+    for side, own, cols in (("EPS", e_ccy, ("eps", "eps_low", "eps_high")), ("Revenue", r_ccy, ("rev", "rev_low", "rev_high"))):
+        if ccy and own != ccy and any(r[c] is not None for r in rows for c in cols):
+            rows = [dict(r, **{c: None for c in cols}) for r in rows]
+            extra.setdefault("notes", []).append(f"{side} estimates left blank: Yahoo Finance names "
+                                                 + (f"them in {own}, not {ccy}." if own else "no currency for them."))
+    if ccy:
+        extra.update(currency=ccy, convention=f"EPS per share and revenue in {ccy}")
+    return {"results": rows, **extra, "sources": [C.src("Yahoo Finance", "consensus estimates, EPS trend and revisions", C.YAHOO_URL + "quote/" + urllib.parse.quote(sym) + "/analysis")]}

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -26,6 +25,24 @@ def _syms(value, cap=40):
         if s and s not in out:
             out.append(s)
     return out[:cap]
+
+
+_LISTED_ELSEWHERE = re.compile(r"^[A-Z0-9\-&]+\.[A-Z]{1,4}$")      # SAP.DE, 7203.T, SHEL.L, RY.TO
+_SHARE_CLASS = re.compile(r"^[A-Z]{1,5}\.[A-C]$")                    # BRK.B, BF.B: U.S. share classes
+
+
+def non_us_listing(sym) -> bool:
+    """A Yahoo ticker with a non-U.S. exchange suffix (the rule the page uses, widgets.js T.nonUSNote)."""
+    s = str(sym or "").strip().upper()
+    return bool(_LISTED_ELSEWHERE.match(s)) and not _SHARE_CLASS.match(s)
+
+
+def us_only(syms, source):
+    """A U.S.-only source asked about a listing elsewhere: not_covered with a plain message, before any call is made."""
+    away = [s for s in ([syms] if isinstance(syms, str) else syms) if non_us_listing(s)]
+    if away:
+        raise C.CompositeError(f"{source} covers U.S. listings only: {', '.join(away)} {'is' if len(away) == 1 else 'are'} listed elsewhere. "
+                               "A company with a U.S. listing (an ADR such as SAP or TM) can be looked up by that ticker.", kind="not_covered")
 
 
 def cik_of(q):
@@ -56,7 +73,7 @@ def search(query="", **_):
         query, via = q, ""
         cik = cik_of(q)
         if cik:                                    # an SEC CIK (0000320193, CIK 320193): its ticker, then that ticker's listings
-            sym = C._safe(lambda: _cik_symbol(cik))
+            sym = C._safe(lambda: _cik_symbol(cik), missing="SEC ticker list")
             if not sym:
                 return []
             query, via = sym, f" (SEC CIK {cik})"
@@ -104,25 +121,26 @@ def _meta(symbols):
     for s in symbols:
         with C._guard:
             hit = C._cache.get(("msym", s))
-        if hit and now - hit[0] < C.META_TTL:
+        if hit and time.monotonic() - hit[0] < C.META_TTL:
             out[s] = hit[1]
             continue
         rec = read_disk().get(s)
         if isinstance(rec, dict) and rec.get("v") and rec.get("t"):
             if now - float(rec["t"]) < C.META_TTL:
                 with C._guard:
-                    C._cache[("msym", s)] = (float(rec["t"]), rec["v"])
+                    C._cache[("msym", s)] = (C._mono(rec["t"]), rec["v"])
                 out[s] = rec["v"]
                 continue
-            fallback[s] = rec["v"]
+            fallback[s] = (rec["v"], float(rec["t"]))
         need.append(s)
 
     if need:
-        fresh = {}
+        fresh, failed = {}, None
         for i in range(0, len(need), 25):
             try:
                 rows = C.api(C.V5, "equity/price/quote", _timeout=25, symbol=",".join(need[i:i + 25]), provider="yfinance")
-            except C.CompositeError:
+            except C.CompositeError as e:
+                failed = e                       # symbols left without names: their saved copy (stale) or partial, below
                 continue
             for r in rows or []:
                 sym = r.get("symbol")
@@ -141,12 +159,17 @@ def _meta(symbols):
                     merged = {}
                 with C._guard:
                     for sym, info in fresh.items():
-                        C._cache[("msym", sym)] = (ts, info)
+                        C._cache[("msym", sym)] = (C._mono(ts), info)
                         merged[sym] = {"t": ts, "v": info}
                 C._write_json(disk_path, merged)
         for s in need:
-            if s not in out and s in fallback:
-                out[s] = fallback[s]
+            if s in out:
+                continue
+            if s in fallback:
+                out[s] = fallback[s][0]
+                C._note_stale_ts(fallback[s][1])          # an expired name/currency is served flagged, never as fresh
+            elif failed is not None:
+                C.partial_from(failed, "Yahoo Finance quotes")
     return out
 
 
@@ -154,7 +177,8 @@ def _meta(symbols):
 def _first(path, sym, **kw):
     try:
         rows = C.api(C.V5, path, symbol=sym, **kw)
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, f"{path.rsplit('/', 1)[-1].replace('_', ' ')} ({kw.get('provider') or 'data service'})")
         return {}
     return (rows[0] if isinstance(rows, list) and rows else rows if isinstance(rows, dict) else {}) or {}
 
@@ -170,7 +194,7 @@ def _fdic_rows(sym):
     fut = ex.submit(_banks.snapshot_rows, sym)
     ex.shutdown(wait=False)
     try:
-        return fut.result(timeout=FDIC_WAIT), False
+        return fut.result(timeout=max(0.0, C.time_left(FDIC_WAIT))), False
     except C.cf.TimeoutError:
         return None, True
     except Exception:                               # noqa: BLE001  (not in the FFIEC directory, FDIC down: no bank rows)
@@ -185,16 +209,25 @@ def snapshot(symbol="AAPL", **_):
         jobs = {"profile": ("equity/profile", {"provider": "yfinance"}), "metrics": ("equity/fundamental/metrics", {"provider": "yfinance"}),
                 "quote": ("equity/price/quote", {"provider": "yfinance"}), "street": ("equity/estimates/consensus", {"provider": "yfinance"}),
                 "cal": ("yfinance/company_calendar", {})}
-        with C.cf.ThreadPoolExecutor(max_workers=5) as ex:
-            got = dict(zip(jobs, ex.map(lambda k: C._first(jobs[k][0], sym, **jobs[k][1]), jobs)))
+        def parts():
+            with C.cf.ThreadPoolExecutor(max_workers=5) as ex:
+                return dict(zip(jobs, ex.map(lambda k: C._first(jobs[k][0], sym, **jobs[k][1]), jobs)))
+        got = C._collect(parts)
+        failed = got.missing if isinstance(got, C.Partial) else []
+        got = got.value if isinstance(got, C.Partial) else got
+        C.note_partial(failed)
         p, m, q, st, cal = (got[k] for k in ("profile", "metrics", "quote", "street", "cal"))
+        if not p and not q and failed:                 # Yahoo did not answer: not the same as "nothing for this ticker"
+            raise C.CompositeError("Yahoo Finance did not answer for the company profile and quote just now (it may be throttling). "
+                                   "Press reload in a minute.", kind="upstream")
         if not p and not q:
-            raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.")
+            raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.", kind="not_covered")
         ccy = q.get("currency") or p.get("currency") or ""
         last, prev = q.get("last_price"), q.get("prev_close")
-        ok_last = isinstance(last, (int, float)) and not isinstance(last, bool) and math.isfinite(last)
-        ok_prev = isinstance(prev, (int, float)) and not isinstance(prev, bool) and math.isfinite(prev) and prev != 0
-        chg = f" ({(last / prev - 1) * 100:+.2f}%)" if ok_last and ok_prev else ""
+        last_n, prev_n = C.num(last), C.num(prev)
+        ok_last = last_n is not None
+        ok_prev = prev_n is not None and prev_n != 0
+        chg = f" ({(last_n / prev_n - 1) * 100:+.2f}%)" if ok_last and ok_prev else ""
         head = f"### {p.get('name') or q.get('name') or sym}  `{sym}`"
         bits = [b for b in (q.get("exchange") or p.get("stock_exchange"), ccy, " › ".join(x for x in (p.get("sector"), p.get("industry_category")) if x),
                             p.get("hq_country"), f"{p['employees']:,} employees" if isinstance(p.get("employees"), int) else None) if b]
@@ -206,7 +239,7 @@ def snapshot(symbol="AAPL", **_):
         if len(desc) > 560:
             cut = desc[:560].rfind(". ")
             desc = desc[:cut + 1] if cut > 200 else desc[:560] + "…"
-        dy = m.get("dividend_yield")
+        dy = C.num(m.get("dividend_yield"))
         try:                                               # EV rebuilt in the trading currency (see _ev_parts)
             e_ = C._ev_parts(m, ccy, C._usd_rates({ccy, m.get("currency")} - {None}))
         except C.CompositeError:
@@ -222,9 +255,10 @@ def snapshot(symbol="AAPL", **_):
         tgt, cur = st.get("target_consensus"), st.get("current_price") or last
         t_ccy = str(st.get("currency") or "")      # audit C9: Yahoo states the target's currency (ADRs: USD; SHEL.L: GBp); no upside across currencies
         same = bool(t_ccy) and t_ccy == ccy
-        ok_tgt = isinstance(tgt, (int, float)) and not isinstance(tgt, bool) and math.isfinite(tgt)
-        ok_cur = isinstance(cur, (int, float)) and not isinstance(cur, bool) and math.isfinite(cur) and cur != 0
-        upside = (f" ({(tgt / cur - 1) * 100:+.0f}%)" if ok_tgt and ok_cur else "") if same else \
+        tgt_n, cur_n = C.num(tgt), C.num(cur)
+        ok_tgt = tgt_n is not None
+        ok_cur = cur_n is not None and cur_n != 0
+        upside = (f" ({(tgt_n / cur_n - 1) * 100:+.0f}%)" if ok_tgt and ok_cur else "") if same else \
             "" if tgt is None else f" (target in {t_ccy}, price in {ccy}: no upside computed)" if t_ccy else " (target currency not stated: no upside computed)"
         rec = str(st.get("recommendation") or "").replace("_", " ")
         rows = [
@@ -236,7 +270,7 @@ def snapshot(symbol="AAPL", **_):
             ("EV / EBITDA", C._num(m.get("enterprise_to_ebitda"), "{:,.1f}", "x"), "Return on equity", C._pc(m.get("return_on_equity"))),
             ("EV / Sales", C._num(m.get("enterprise_to_revenue"), "{:,.1f}", "x"), "Debt / equity", C._num(m.get("debt_to_equity"), "{:,.0f}", "%")),
             ("Price / book", C._num(m.get("price_to_book"), "{:,.1f}", "x"), "Beta", C._num(m.get("beta") or p.get("beta"))),
-            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if isinstance(dy, (int, float)) and not isinstance(dy, bool) and math.isfinite(dy) else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
+            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if dy is not None else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
         ]
         fdic, fdic_missing = None, False
         if bank:                                           # a bank: EV, EBITDA, gross margin and debt/equity carry no meaning
@@ -258,8 +292,14 @@ def snapshot(symbol="AAPL", **_):
                f"| Price target (mean, low – high) | {C._num(tgt)}{(' ' + t_ccy) if t_ccy and tgt is not None else ''}{upside} ({C._num(st.get('target_low'))} – {C._num(st.get('target_high'))}) |",
                f"| Ex-dividend date | {str(cal.get('ex_dividend_date') or '–')[:10]} |"]
         out = {"content": "\n".join(md)}
-        if not (p and m and q) or fdic_missing:
-            out["_partial"] = True          # Yahoo dropped a part (throttling): not kept for 15 minutes (P0-6)
+        stamp = C.newest_date([q.get("last_timestamp"), q.get("timestamp"), q.get("date")])          # a quote's own time, when the feed sends one
+        if stamp:
+            out["as_of"] = stamp
+        else:
+            out["as_of_na"] = "Yahoo Finance dates neither its quote nor its key statistics: these are its current figures (asked again every 15 minutes)."
+        gone = [n for n, v in (("Yahoo Finance profile", p), ("Yahoo Finance key metrics", m), ("Yahoo Finance quote", q)) if not v]
+        if gone or fdic_missing:            # Yahoo dropped a part (throttling): not kept for 15 minutes (P0-6)
+            out["_partial"] = gone + (["FDIC call report"] if fdic_missing else [])
         return out
     out = C.cached_complete(("snapshot", sym), 900, run)
     # the Estimates tab's three views share one Yahoo burst (_est_raw, 7 requests): start it once the snapshot is in,

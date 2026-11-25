@@ -76,6 +76,88 @@ try:
 finally:
     v.sec_figures, v._profile, c.history = saved
 
+# gatekeeper P2: SEC failing for a U.S. company switches to Yahoo's statements as a said substitute (status fallback),
+# unless SEC simply has nothing for it (not_covered): then Yahoo is the usual basis and the answer is ok.
+# Same figures either way (shares 1, net income 1; closes 1..10): P/E today 10.0.
+saved = v.sec_figures, v._profile, c.history, v._yahoo_pack
+try:
+    v._profile = lambda sym: {"industry": "Consumer Electronics", "currency": "USD"}
+    c.history = lambda syms, start: {syms[0]: [(f"2026-01-{i:02d}", float(i)) for i in range(1, 11)]}
+    one = {"shares": [("2025-09-30", 1.0, D(2025, 11, 1))], "net_income": [("2025-09-30", 1.0, D(2025, 11, 1))]}
+    v._yahoo_pack = lambda sym, px_ccy, prof=None, last_px=None: (one, "Yahoo annual statements", [v.YAHOO_FIN_SRC, v.YAHOO_SRC])
+    for kind, want_status in (("timeout", "fallback"), ("upstream", "fallback"), ("not_covered", "ok")):
+        def sec_fails(sym, items=None, _k=kind):
+            raise c.CompositeError(f"HTTP 500 from http://127.0.0.1:6900/api/v1/equity/compare/company_facts ({_k})", kind=_k)
+        v.sec_figures = sec_fails
+        c._cache.clear()
+        out = c.dispatch("valuation_bands", {"symbol": "TSTB", "measure": "pe"})
+        said = any("Yahoo annual statements used instead: SEC EDGAR did not answer just now" in n for n in out.get("notes") or [])
+        check(out["status"] == want_status and said == (want_status == "fallback") and out["summary"]["current"] == 10.0,
+              f"SEC {kind}: status {want_status}, substitute {'said' if want_status == 'fallback' else 'not claimed'} ({out['status']}, {out.get('notes')})")
+        # review R7: the note says the kind of failure, never the source's own text (URLs, backend detail)
+        check(not any("http" in n or "6900" in n for n in out.get("notes") or []), f"SEC {kind}: no URL in the notes ({out.get('notes')})")
+finally:
+    v.sec_figures, v._profile, c.history, v._yahoo_pack = saved
+    c._cache.clear()
+
+# review R10: roic_dupont through dispatch. Figures (in units, shown in millions) as in the DuPont check above x 1e6:
+# ROE 20/100 = 20%; tax 10/25 = 40% clipped to 35%; NOPAT 30 x 0.65 = 19.5 mn; invested capital 50 + 100 - 30 = 120 mn;
+# ROIC 19.5 / 120 = 16.25%.
+from composite.core import contract as K  # noqa: E402
+import os  # noqa: E402
+
+_FY = "2025-12-31"
+_yf = {k: [] for k in ("net_income", "operating_income", "da", "ebitda", "equity", "debt", "cash", "shares", "assets", "revenue", "pretax", "tax")}
+for _k, _val in (("net_income", 20), ("revenue", 200), ("assets", 400), ("equity", 100), ("operating_income", 30), ("pretax", 25),
+                 ("tax", 10), ("debt", 50), ("cash", 30)):
+    _yf[_k] = [(_FY, _val * 1e6, D(2026, 3, 31))]
+saved = v._profile, v._sec_rows, v.yahoo_figures, v.C._first
+_metrics = {"currency": "USD"}
+sec_calls = []
+try:
+    v._profile = lambda sym: {"industry": "Consumer Electronics", "currency": "USD"}
+    v.yahoo_figures = lambda sym, rate=1.0: _yf
+    v.C._first = lambda path, sym, **kw: dict(_metrics)
+
+    def sec_rows_timeout(sym, tags, instant=False, cache_key=None):
+        sec_calls.append(sym)
+        raise c.CompositeError("OpenBB V5 backend did not answer in time (http://127.0.0.1:6900/api/v1/equity/compare/company_facts).", kind="timeout")
+    v._sec_rows = sec_rows_timeout
+    c._cache.clear()
+    out = c.dispatch("roic_dupont", {"symbol": "TSTD"})
+    r0 = out["results"][0]
+    check(out["status"] == "fallback" and out["currency"] == "USD" and (r0["roe"], r0["nopat"], r0["invested_capital"], r0["roic"]) == (20.0, 19.5, 120.0, 16.25)
+          and any(n.startswith("Yahoo annual statements used instead: SEC EDGAR did not answer just now") for n in out["notes"])
+          and not any("http" in n for n in out["notes"]),
+          f"roic_dupont, SEC timeout: Yahoo said as a substitute, in USD, figures by hand ({out['status']}, {out.get('currency')}, {r0}, {out.get('notes')})")
+    _metrics = {"currency": "EUR"}
+    sec_calls.clear()
+    c._cache.clear()
+    out = c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+    check(out["status"] == "ok" and out["currency"] == "EUR" and out["results"][0]["nopat"] == 19.5 and sec_calls == [],
+          f"roic_dupont, non-U.S.: Yahoo is the usual basis (ok), in the metrics' currency EUR, SEC not asked ({out['status']}, {out.get('currency')})")
+    _metrics = {}
+    c._cache.clear()
+    try:
+        c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+        named = "answered"
+    except K.ContractViolation as e:
+        named = str(e)
+    check("names no currency" in named, f"roic_dupont, no currency named: a contract violation in strict mode ({named[:80]})")
+    os.environ["TERMINAL_STRICT_CONTRACT"] = "0"
+    try:
+        c._cache.clear()
+        out = c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+    finally:
+        os.environ["TERMINAL_STRICT_CONTRACT"] = "1"
+    r0 = out["results"][0]
+    check("currency" not in out and r0["nopat"] is None and r0["invested_capital"] is None and r0["roe"] == 20.0 and r0["roic"] == 16.25
+          and K.CCY_BLANK_NOTE in out["notes"] and "currency not named" in out["note"],
+          f"roic_dupont, no currency named (production): amounts blank with the note, ratios kept ({r0}, {out.get('notes')})")
+finally:
+    v._profile, v._sec_rows, v.yahoo_figures, v.C._first = saved
+    c._cache.clear()
+
 check("valuation_bands" in c.ROUTES and "roic_dupont" in c.ROUTES and c.static_sources("valuation_bands", {"symbol": "AAPL"})[0]["name"] == "SEC"
       and c.static_sources("roic_dupont", {"symbol": "SAP.DE"})[0]["name"] == "Yahoo Finance", "routes and sources by market")
 
@@ -230,5 +312,72 @@ try:
         v._yahoo_pack = saved_yp
 finally:
     v.sec_figures, v._profile, c.history = saved
+
+# ---- P2-05: a 10:1 split on 2024-06-10 (NVDA-like). Hand-computed: price 100 (Yahoo, split-adjusted), TTM net income
+# 4 x 25 = 100, diluted shares 2.5 filed before the split (x10 = 25 on today's basis) and 25 after -> EPS 100 / 25 = 4,
+# P/E 100 / 4 = 25 on every day. Without the split adjustment the pre-split days would show 100 / (100 / 2.5) = 2.5.
+import json  # noqa: E402
+
+TODAY_S = dt.date(2025, 9, 30)
+Q_ENDS = [dt.date(y, m, 28) for y in (2021, 2022, 2023, 2024, 2025) for m in (1, 4, 7, 10) if dt.date(y, m, 28) < dt.date(2025, 8, 1)]
+
+
+def split_api(base, path, **p):
+    fact = p.get("fact")
+    if path.endswith("historical_splits"):
+        raise c.CompositeError("HTTP 429 Too Many Requests", kind="rate_limited", retry_after=30.0)
+    rows = []
+    for end in Q_ENDS:
+        filed = end + dt.timedelta(days=31)
+        row = {"span": "quarter", "period_ending": end.isoformat(), "period_beginning": (end - dt.timedelta(days=89)).isoformat(),
+               "reported_date": filed.isoformat(), "form": "10-Q"}
+        if fact == "NetIncomeLoss":
+            rows.append(dict(row, value=25.0, unit="USD"))
+        elif fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+            rows.append(dict(row, value=2.5 if filed.isoformat() < "2024-06-10" else 25.0, unit="shares"))
+    return rows
+
+
+CLOSES_S = [((TODAY_S - dt.timedelta(days=i)).isoformat(), 100.0) for i in range(3 * 366, 0, -1)
+            if (TODAY_S - dt.timedelta(days=i)).weekday() < 5]
+saved = c.api, v._splits, v._profile, c.history
+try:
+    c.reset_runtime_caches()
+    c.api = split_api
+    v._profile = lambda sym: {"currency": "USD", "industry": "Semiconductors"}
+    c.history = lambda syms, start, interval="1d": c.PriceHistory({s: list(CLOSES_S) for s in syms})
+    v._splits = lambda sym: [("2024-06-10", 10.0)]
+    sh = v.sec_figures("NVSX", items=["net_income", "shares"])["shares"]
+    check({x[1] for x in sh} == {25.0}, f"every share count on today's basis: 2.5 filed before the split x10 = 25 ({sorted({x[1] for x in sh})})")
+    out = v.bands("NVSX", "pe", "3", today=TODAY_S)
+    s = out["summary"]
+    check(s["p10"] == s["median"] == s["p90"] == 25.0, f"P/E continuous across the split: 25.0 everywhere ({s})")
+    v._splits = lambda sym: []
+    s_raw = v.bands("NVSX", "pe", "3", today=TODAY_S)["summary"]
+    check(s_raw["p10"] == 2.5 and s_raw["p90"] == 25.0, f"(control) without the adjustment the pre-split P/E would be 2.5 ({s_raw})")
+
+    # the split fetch fails and nothing is saved: blank with the note (typed, retryable), never Yahoo figures in silence
+    c.reset_runtime_caches()
+    v._splits = saved[1]
+    split_file = c.CACHE_DIR / (c.disk_name("splits_", "NVSX") + ".json")
+    split_file.unlink(missing_ok=True)
+    try:
+        v.bands("NVSX", "pe", "3", today=TODAY_S)
+        err = None
+    except c.CompositeError as e:
+        err = e
+    check(isinstance(err, v.SplitsUnavailable) and err.kind == "rate_limited" and str(err).startswith("Bands not drawn")
+          and "split history" in str(err), f"no split list: bands blank with the note ({err})")
+    check(not split_file.exists(), "nothing saved for the failed split fetch")
+
+    # the split fetch fails, a saved list exists (8 days old, past its 7-day life): it is used, and the answer says stale
+    split_file.write_text(json.dumps({"t": c.time.time() - 8 * 86400, "v": [["2024-06-10", 10.0]]}), encoding="utf-8")
+    c.reset_runtime_caches()
+    got = c._collect(lambda: v.bands("NVSX", "pe", "3", today=TODAY_S))
+    check(isinstance(got, c.Partial) and len(got.stale) == 1 and got.value["summary"]["median"] == 25.0,
+          f"saved split list used (bands right), flagged stale ({got!r})")
+finally:
+    c.api, v._splits, v._profile, c.history = saved
+    c.reset_runtime_caches()
 
 done("test_valuation")

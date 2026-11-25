@@ -185,7 +185,7 @@ try:
     h2 = c.history(["AAA", "BBB", "CCC"], dt.date(2026, 1, 1))
     check(h1.partial and len(_calls) == 1 and h2 is h1, "partial answer: flagged, served from cache within 30 s")
     _k = ("hist", ("AAA", "BBB", "CCC"), "2026-01-01", "1d")
-    c._cache[_k] = (_time.time() - 31, c._cache[_k][1])
+    c._cache[_k] = (_time.monotonic() - 31, c._cache[_k][1])
     c.history(["AAA", "BBB", "CCC"], dt.date(2026, 1, 1))
     check(len(_calls) == 2, "partial answer older than 30 s: fetched again")
     _calls.clear(); c._cache.clear()
@@ -193,7 +193,7 @@ try:
         _f.unlink()
     c.history(["AAA"], dt.date(2026, 1, 1))
     _k1 = ("hist", ("AAA",), "2026-01-01", "1d")
-    c._cache[_k1] = (_time.time() - 200, c._cache[_k1][1])
+    c._cache[_k1] = (_time.monotonic() - 200, c._cache[_k1][1])
     c.history(["AAA"], dt.date(2026, 1, 1))
     check(len(_calls) == 1, "complete answer: kept the full 5 minutes")
 finally:

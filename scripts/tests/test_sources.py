@@ -28,7 +28,7 @@ check([s["name"] for s in c.static_sources("yield_curves", {"country": "germany"
 check([s["name"] for s in c.static_sources("yield_curve_table", {"country": "united_states", "source": "fred"})] == ["FRED"], "U.S. curve from FRED when picked")
 saved = c.ROUTES["style_box"]
 try:
-    c.ROUTES["style_box"] = lambda **_: {"results": []}
+    c.ROUTES["style_box"] = lambda **_: {"results": [{"size": "Large", "core": 0.4, "date": "2026-11-20"}]}
     check(c.dispatch("style_box", {})["sources"][0]["name"] == "Yahoo Finance", "dispatch fills in sources a view did not send")
 finally:
     c.ROUTES["style_box"] = saved

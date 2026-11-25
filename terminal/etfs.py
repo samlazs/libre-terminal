@@ -60,6 +60,7 @@ def etf_overlap(symbol="SPY", symbol2="QQQ", **_):
     a, b = (C._syms(symbol, 1) or ["SPY"])[0], (C._syms(symbol2, 1) or ["QQQ"])[0]
     if a == b:
         raise C.CompositeError("Pick two different funds.")
+    C.us_only([a, b], "SEC N-PORT fund holdings")
     with C.cf.ThreadPoolExecutor(max_workers=2) as ex:
         ha, hb = ex.map(holdings, (a, b))
     rows, w, n = overlap(ha["rows"], hb["rows"])
@@ -69,7 +70,13 @@ def etf_overlap(symbol="SPY", symbol2="QQQ", **_):
     asof = f"as of {pa}" if pa == pb else f"{a} as of {pa}, {b} as of {pb}"
     conv = (f"{a} vs {b}: weight overlap {w:.1f}% · {n} common holdings ({n / na * 100:.0f}% of {a}'s {na}, {n / nb * 100:.0f}% of {b}'s {nb}) · "
             f"SEC N-PORT {asof} (quarterly, public about 60 days after the quarter; filing date not in the feed)")
-    return {"results": out, "sources": [SOURCE], "convention": conv, "columns": {"weight_a": f"{a} weight", "weight_b": f"{b} weight"}}
+    res = {"results": out, "sources": [SOURCE], "convention": conv, "columns": {"weight_a": f"{a} weight", "weight_b": f"{b} weight"}}
+    as_of = C.newest_date([pa, pb])                  # the newer of the two funds' portfolio dates
+    if as_of:
+        res["as_of"] = as_of
+    else:
+        res["as_of_na"] = f"SEC N-PORT gave no portfolio date for {a} or {b}."
+    return res
 
 
 def static_sources(name, p):

@@ -19,7 +19,6 @@ band of that window and today's percentile.
 
 import bisect
 import datetime as dt
-import math
 
 import composite as C
 
@@ -218,11 +217,18 @@ def _sec_rows(sym, tags, instant=False, cache_key=None):
     return C.cached_disk(C.disk_name("secval3_", sym + "_" + (cache_key or tags[0])), 12 * 3600, run)
 
 
+class SplitsUnavailable(C.CompositeError):
+    """The split history did not answer and no saved copy exists: SEC per-share history cannot be split-adjusted, so a
+    per-share figure (and every band built on it) is left blank with this note instead of being drawn on a wrong basis."""
+
+
 def _splits(sym):
     def run():
         try:
             rows = C.api(C.V5, "equity/fundamental/historical_splits", provider="yfinance", symbol=sym) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            if C.kind_of(e) not in ("not_covered", "input"):
+                raise                                 # a failed fetch is never saved as "no splits" (the saved list is served)
             rows = []
         return [(str(r.get("date"))[:10], float(r["numerator"]) / float(r["denominator"])) for r in rows
                 if r.get("numerator") and r.get("denominator")]
@@ -269,7 +275,14 @@ def sec_figures(sym, items=None):
         if k in got:
             out[k] = instants(got[k])
     if "shares" in got:
-        splits = _splits(sym)
+        try:
+            splits = _splits(sym)                     # a saved list is served (flagged stale) when the fetch fails
+        except C.CompositeError as e:
+            raise SplitsUnavailable(
+                f"Bands not drawn: Yahoo Finance's split history for {sym} did not answer and no saved copy exists, so SEC "
+                "share counts cannot be split-adjusted (a wrong per-share basis would shift the bands). Reload in a minute.",
+                kind=C.kind_of(e) if C.kind_of(e) in ("rate_limited", "timeout", "unavailable") else "upstream",
+                retry_after=e.retry_after) from None
         sh = {}
         # the backend derives a fiscal Q4 "quarter" as annual minus three quarters, which is meaningless for an average share
         # count (AAPL Q4 2026: -30 million): quarters from 10-Q filings only, and the annual average at the fiscal year end
@@ -293,7 +306,8 @@ def sec_figures(sym, items=None):
 def _yahoo(sym, kind):
     try:
         return C.api(C.V5, f"equity/fundamental/{kind}", provider="yfinance", symbol=sym, period="annual", limit=5) or []
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, f"Yahoo Finance {kind.replace('_', ' ')}")
         return []
 
 
@@ -333,7 +347,8 @@ def yahoo_figures(sym, rate=1.0):
 def _profile(sym):
     try:
         return (C._profiles([sym]) or {}).get(sym) or {}
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "Yahoo Finance profile")
         return {}
 
 
@@ -374,14 +389,25 @@ def _yahoo_pack(sym, px_ccy, prof=None, last_px=None):
     return yfigs, "Yahoo annual statements (each year from 90 days after its end)" + conv, [YAHOO_FIN_SRC, YAHOO_SRC]
 
 
+def _sec_failed(e):
+    """An SEC failure for a U.S. company whose answer goes on from Yahoo's statements: said as a substitute source,
+    unless SEC simply has nothing for this input (not_covered / input), where Yahoo is the usual basis. The note names
+    the kind of failure only: the error's own text (backend URLs, a provider's detail) never reaches a card's notes."""
+    kind = C.kind_of(e)
+    if kind not in ("not_covered", "input"):
+        C.note_fallback("Yahoo annual statements", f"SEC EDGAR did not answer just now ({kind.replace('_', ' ')})")
+
+
 def _figures(sym, px_ccy, prof=None, items=None, last_px=None):
     """(figures, basis text, sources, is_sec): SEC for U.S. filers, else Yahoo (converted to trading currency and share class)."""
     if "." not in sym and not sym.startswith("^"):
         try:
             figs = sec_figures(sym, items=items)
             return figs, "SEC filings (each figure from its filing date or deadline)", [SEC_SRC, YAHOO_SRC], True
-        except C.CompositeError:
-            pass
+        except SplitsUnavailable:
+            raise                                     # blank with the note, never a silent switch of basis
+        except C.CompositeError as e:
+            _sec_failed(e)                            # a switch of basis is said (status fallback), never silent
     yfigs, basis, sources = _yahoo_pack(sym, px_ccy, prof=prof, last_px=last_px)
     return yfigs, basis, sources, False
 
@@ -549,6 +575,14 @@ def _annual(pts):
     return {e: v for e, v, _ in pts}
 
 
+def _round4(v):
+    """Floats rounded to 4 places, NaN/Inf floats as None; anything that is not a float is left as it is."""
+    if not isinstance(v, float):
+        return v
+    x = C.finite(v)
+    return None if x is None else round(x, 4)
+
+
 def dupont_rows(f, bank=False, years=YEARS):
     """{name: {fiscal-year end: value}} annual figures -> rows newest first (ratios in percent / times)."""
     ends = sorted(f["net_income"])[-years:]
@@ -575,7 +609,7 @@ def dupont_rows(f, bank=False, years=YEARS):
                 ic = d_val + eq - cash
                 r["invested_capital"] = ic
                 r["roic"] = r["nopat"] / ic * 100 if ic > 0 else None
-        rows.append({k: (round(v, 4) if isinstance(v, float) and math.isfinite(v) else (None if isinstance(v, float) else v)) for k, v in r.items()})
+        rows.append({k: _round4(v) for k, v in r.items()})
     return rows
 
 
@@ -589,23 +623,24 @@ def roic_dupont(symbol="AAPL", **_):
             f = {k: {r["end"]: r["value"] for r in got[k] if r["span"] == ("instant" if k in INSTANT else "annual")} for k in names}
             # balances at the fiscal year end only (a 10-K instant matches an annual flow's end)
             if f["net_income"] and (dt.date.today() - _d(max(f["net_income"]))).days <= MAX_AGE:
-                return _dupont_out(sym, dupont_rows(f, bank), bank, "SEC 10-K figures (USD)", [SEC_SRC])
-        except C.CompositeError:
-            pass
+                return _dupont_out(sym, dupont_rows(f, bank), bank, "SEC 10-K figures (USD)", [SEC_SRC], "USD")
+        except C.CompositeError as e:
+            _sec_failed(e)
     y = yahoo_figures(sym)
     f = {k: _annual(v) for k, v in y.items()}
-    ccy = (C._first("equity/fundamental/metrics", sym, provider="yfinance") or {}).get("currency") or "reporting currency"
-    return _dupont_out(sym, dupont_rows(f, bank), bank, f"Yahoo annual statements ({ccy})", [YAHOO_FIN_SRC])
+    ccy = (C._first("equity/fundamental/metrics", sym, provider="yfinance") or {}).get("currency")
+    return _dupont_out(sym, dupont_rows(f, bank), bank, f"Yahoo annual statements ({ccy or 'currency not named'})", [YAHOO_FIN_SRC], ccy)
 
 
-def _dupont_out(sym, rows, bank, basis, sources):
+def _dupont_out(sym, rows, bank, basis, sources, ccy=None):
     if not rows:
         raise C.CompositeError(f"No annual net income figures for {sym}.")
     rows = [dict(r, **{k: None if r[k] is None else round(r[k] / 1e6, 1) for k in ("nopat", "invested_capital")}) for r in rows]   # millions
     note = (f"{sym} · {basis} · ROE = net margin x asset turnover x equity multiplier (year-end balances)"
             + (" · bank: ROIC not computed (deposits are not invested capital)" if bank else
                " · ROIC = operating income x (1 - tax rate) / (debt + equity - cash); tax rate clipped to 0-35%"))
-    return {"results": rows, "sources": sources, "note": note, "convention": note}
+    return {"results": rows, "sources": sources, "note": note, "convention": note, **({"currency": ccy} if ccy else {}),
+            "as_of": C.newest_date(r["fiscal_year_end"] for r in rows)}      # the latest fiscal year shown
 
 
 def static_sources(name, p):

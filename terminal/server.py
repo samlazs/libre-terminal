@@ -17,7 +17,6 @@ import gzip
 import hashlib
 import importlib.util
 import json
-import math
 import mimetypes
 import os
 import socket
@@ -32,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import composite  # noqa: E402
+from composite.core import contract  # noqa: E402
 import local_paths  # noqa: E402
 import xwidgets  # noqa: E402
 from redact import redact  # noqa: E402
@@ -43,6 +43,13 @@ STATE_DIR = local_paths.STATE_DIR
 STATE_FILE = local_paths.STATE_FILE
 DASHBOARDS_FILE = local_paths.DASHBOARDS_FILE
 MAX_STATE_BYTES = 5 * 1024 * 1024
+# Admission control: at most X_SLOTS views run at once; a request that waits longer than X_WAIT seconds for a slot
+# answers 503 (kind unavailable, retry_after). The page, state, config and service status never wait for a slot.
+X_SLOTS = int(os.environ.get("TERMINAL_X_SLOTS", "24") or 24)
+X_WAIT = 5.0
+X_RETRY_AFTER = 5
+_x_slots = threading.BoundedSemaphore(X_SLOTS)
+_nonfinite_logged: set = set()      # views whose answer had a NaN/Inf scrubbed at serialization (logged once each)
 
 # The product name shown in the browser title and the sidebar. Renaming the product is this one line
 # (static/app.js has the same name only as a fallback for the moment before /api/config answers).
@@ -77,7 +84,8 @@ def config_for(host_header: str) -> dict:
     name = (host_header or "").strip().lower().rsplit(":", 1)[0] if not (host_header or "").strip().startswith("[") else ""
     name = name if name == "localhost" else "127.0.0.1"
     include_v4 = v4_active()
-    out = dict(CONFIG, backends=[dict(b) for b in CONFIG["backends"] if include_v4 or b["id"] != "v4"])
+    out = dict(CONFIG, backends=[dict(b) for b in CONFIG["backends"] if include_v4 or b["id"] != "v4"],
+               budgets=contract.client_budgets())         # per-route browser timeouts: the server's budget + a margin
     for b in out["backends"]:
         if b["url"]:
             b["url"] = b["url"].replace("127.0.0.1", name, 1)
@@ -104,22 +112,27 @@ class StateUnreadable(Exception):
 def atomic_write(path: Path, text: str):
     """Write through a temporary file and replace: a crash or a full disk never leaves half a file behind."""
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-        f.flush()
-        os.fsync(f.fileno())
-    for attempt in range(5):
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:             # Windows: a virus scanner or indexer holding the old file for a moment
+                if attempt == 4:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    except BaseException:
+        # any failure (a full disk while writing, the file still held after 5 tries, an interrupt): the target is
+        # untouched and no half-written temporary file stays behind
         try:
-            os.replace(tmp, path)
-            return
-        except PermissionError:                 # Windows: a virus scanner or indexer holding the old file for a moment
-            if attempt == 4:
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
-            time.sleep(0.1 * (attempt + 1))
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _parse_state(path: Path):
@@ -197,6 +210,34 @@ class FileCache:
 
 
 _dash_cache = FileCache()
+
+
+RESTART_SETTLE_S = 10.0          # after a restart, failures remembered for a few seconds still read as "restarting"
+
+
+def backends_restarting() -> bool:
+    """True while a restart from the page runs, and for RESTART_SETTLE_S seconds after it finished."""
+    with _restart_lock:
+        st = dict(_restart_state)
+    return bool(st.get("restarting")) or (time.time() - float(st.get("finished_at") or 0.0) < RESTART_SETTLE_S)
+
+
+V5_START_WINDOW_S = 300.0        # launcher.START_TIMEOUT: past it, a closed V5 port is a failure, not a start
+V5_LABEL = "OpenBB V5 backend"   # how composite names the backend in its errors (core/http.py _which)
+
+
+def v5_starting(err: str) -> bool:
+    """True when `err` names the V5 backend, its supervisor (re)started it less than V5_START_WINDOW_S ago (the pid file
+    is written at every start) and its port does not answer yet. A card failing then says "starting" instead of the
+    connection error. Cheap on purpose: one file stat and one local connect, only for a V5 error; a crash loop or a hung
+    start shows its real cause once the window is over."""
+    if V5_LABEL not in err:
+        return False
+    try:
+        age = time.time() - (local_paths.RUN_DIR / "v5.json").stat().st_mtime
+    except OSError:
+        return False
+    return age < V5_START_WINDOW_S and not _port_open(int(V5_PORT))
 
 
 def _dash_build(raw: bytes):
@@ -278,6 +319,8 @@ def service_status() -> dict:
         else:
             out[name] = {"state": "not started"}
     out["restart"] = restart_snap
+    out["ui_threads"] = threading.active_count()
+    out["x_slots"] = {"max": X_SLOTS, "free": getattr(_x_slots, "_value", None)}
     return out
 
 
@@ -428,7 +471,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _clean_json(v):
         if isinstance(v, float):
-            return v if math.isfinite(v) else None
+            return composite.finite(v)
         if isinstance(v, dict):
             return {k: Handler._clean_json(val) for k, val in v.items()}
         if isinstance(v, (list, tuple)):
@@ -436,14 +479,19 @@ class Handler(BaseHTTPRequestHandler):
         return v
 
     @classmethod
-    def _dumps_strict(cls, obj) -> bytes:
+    def _dumps_strict(cls, obj, view: str | None = None) -> bytes:
         try:
             return json.dumps(obj, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
+            if view and view not in _nonfinite_logged:  # scrubbed to null, but the producing view is named (once)
+                _nonfinite_logged.add(view)
+                log(f"non-finite in {view}: {composite.nonfinite_path(obj) or 'a value json cannot encode'} (sent as null)")
             return json.dumps(cls._clean_json(obj), allow_nan=False).encode("utf-8")
 
-    def _json(self, code: int, obj, headers: dict | None = None):
-        self._send(code, self._dumps_strict(obj), "application/json; charset=utf-8", headers=headers)
+    def _json(self, code: int, obj, headers: dict | None = None, view: str | None = None):
+        if code >= 400:
+            obj = contract.with_error(code, obj)        # every error answer carries the same {error: {kind, ...}} object
+        self._send(code, self._dumps_strict(obj, view), "application/json; charset=utf-8", headers=headers)
 
     def _frame_answer(self, result: dict):
         """A frame card's answer from a view (earnings release), as JSON: {"frame": the main backend's SEC filing viewer URL,
@@ -451,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
         302: Firefox labels a frame navigation that was redirected from this port to the backend's port
         Sec-Fetch-Site: cross-site (a direct load of the same URL is same-site), so the backend's request guard refused
         it (403, owner 2026-11-18)."""
-        out = {"sources": result.get("sources") or []}
+        out = {"sources": result.get("sources") or [], "as_of_na": result.get("as_of_na") or contract.NO_DATE}
         path = str(result.get("_frame") or "")
         if path.startswith("/sec/filing_viewer_app?"):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0].lower()
@@ -485,6 +533,36 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return self._json(404, {"detail": "not found"})
         self._send(200, data, ctype, cache, h)
+
+    def _run_view(self, name: str, params: dict):
+        """Run one view (inside an admission slot) and answer: the envelope on success, the error object otherwise."""
+        try:
+            result = composite.dispatch(name, params)
+        except composite.CompositeError as e:
+            # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
+            # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
+            kind = contract.kind_of(e)
+            restarting = kind in ("upstream", "timeout") and backends_restarting()
+            if restarting or (kind in ("upstream", "timeout") and v5_starting(str(e))):
+                # the data service is being restarted on purpose, or is still starting: say so, and let the card retry,
+                # instead of a source or connection error
+                msg = ("The data service is restarting; this card retries shortly." if restarting
+                       else "The data services are starting; this card retries shortly.")
+                return self._json(503, contract.error_body(
+                    "unavailable", msg, retry_after=X_RETRY_AFTER,
+                    sources=_safe_sources(name, params), user_message=True), headers={"Retry-After": str(X_RETRY_AFTER)})
+            code = e.status or contract.STATUS_BY_KIND[kind]
+            return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,
+                                                        sources=_safe_sources(name, params), user_message=True))
+        except Exception as e:  # noqa: BLE001
+            # A TypeError/ValueError raised inside a view is a defect: logged with a ref.
+            ref = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:6]
+            log(f"view {name} failed (ref {ref}): {type(e).__name__}: {e}\n" + redact(traceback.format_exc()))
+            return self._json(500, contract.error_body("internal", f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).",
+                                                       sources=_safe_sources(name, params), ref=ref))
+        if isinstance(result, dict) and ("_frame" in result or "_message" in result):
+            return self._frame_answer(result)
+        return self._json(200, result, view=name)
 
     def _host_ok(self) -> bool:
         """Only requests addressed to this computer by name are answered (blocks DNS-rebinding pages)."""
@@ -542,22 +620,14 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "", keep_blank_values=False)
             params = {k: v[-1] for k, v in query.items()}
             name = path[3:].strip("/")
+            if not _x_slots.acquire(timeout=X_WAIT):
+                return self._json(503, contract.error_body(
+                    "unavailable", "The terminal is busy with other cards; this one retries shortly.", retry_after=X_RETRY_AFTER,
+                    sources=_safe_sources(name, params), user_message=True), headers={"Retry-After": str(X_RETRY_AFTER)})
             try:
-                result = composite.dispatch(name, params)
-            except composite.CompositeError as e:
-                # written for the user (or carrying a source's own error, which the page classifies)
-                return self._json(502, {"detail": redact(str(e)), "user_message": True, "sources": _safe_sources(name, params)})
-            except Exception as e:  # noqa: BLE001
-                # "bad parameters" only when the call itself failed (a parameter the view does not take): the traceback
-                # then ends in dispatch. A TypeError/ValueError raised inside a view is a defect: logged with a ref.
-                if isinstance(e, TypeError) and traceback.extract_tb(e.__traceback__)[-1].name == "dispatch":
-                    return self._json(400, {"detail": "Bad parameters for this view: " + redact(str(e))[:200]})
-                ref = hashlib.sha1(f"{name}{time.time()}".encode()).hexdigest()[:6]
-                log(f"view {name} failed (ref {ref}): {type(e).__name__}: {e}\n" + redact(traceback.format_exc()))
-                return self._json(500, {"detail": f"Internal error in the terminal (ref {ref}; details in local/logs/ui.log).", "ref": ref})
-            if isinstance(result, dict) and ("_frame" in result or "_message" in result):
-                return self._frame_answer(result)
-            return self._json(200, result)
+                return self._run_view(name, params)
+            finally:
+                _x_slots.release()
         if path == "/api/state":
             if not self._same_origin():
                 return self._json(403, {"detail": "cross-origin request refused"})
@@ -585,7 +655,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(target)
         return self._json(404, {"detail": "not found"})
 
-    do_HEAD = do_GET
+    def do_HEAD(self):
+        """HEAD never runs a view (it would compute a whole answer to throw it away); other paths answer as GET."""
+        if self.path.split("?", 1)[0].startswith("/x/"):
+            if not self._guard():
+                return None
+            return self._json(405, {"detail": "HEAD is not supported for views; use GET."}, headers={"Allow": "GET"})
+        return self.do_GET()
 
     def _body(self, limit: int):
         try:

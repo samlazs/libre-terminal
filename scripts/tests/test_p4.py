@@ -133,9 +133,9 @@ try:
     try:
         t_swr = time.time() - 600
         t_fail = time.time() - 30 * 3600
-        c.ROUTES["__test_swr"] = lambda **_: (c._note_swr_ts(t_swr) or {"results": [{"a": 1}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
-        c.ROUTES["__test_fail"] = lambda **_: (c._note_stale_ts(t_fail) or {"results": [{"a": 1}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
-        c.ROUTES["__test_both"] = lambda **_: (c._note_swr_ts(t_swr) or c._note_stale_ts(t_fail) or {"results": [{"a": 1}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
+        c.ROUTES["__test_swr"] = lambda **_: (c._note_swr_ts(t_swr) or {"results": [{"a": 1, "date": "2026-11-20"}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
+        c.ROUTES["__test_fail"] = lambda **_: (c._note_stale_ts(t_fail) or {"results": [{"a": 1, "date": "2026-11-20"}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
+        c.ROUTES["__test_both"] = lambda **_: (c._note_swr_ts(t_swr) or c._note_stale_ts(t_fail) or {"results": [{"a": 1, "date": "2026-11-20"}], "sources": [{"name": "Yahoo Finance", "detail": "d", "url": ""}]})
         d_swr = c.dispatch("__test_swr", {})
         d_fail = c.dispatch("__test_fail", {})
         d_both = c.dispatch("__test_both", {})

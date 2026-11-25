@@ -318,6 +318,19 @@ try:
           "scorecard prints implied move, dollar straddle, and realised comparison")
     check(any(s["name"] == "Nasdaq" and "delayed options chain" in s["detail"] for s in out_earn["sources"]),
           "sources cite Nasdaq options chain when Nasdaq answered")
+    # P2-03: the chain's own spot -> no note; no underlying price -> the last close stands in, flagged
+    got = c._collect(lambda: c._earn_model("NVDA", today=dt.date(2026, 11, 17)))
+    check(not isinstance(got, c.Partial) and got["implied"]["spot_from"] == "chain", "implied move on the chain's spot: no substitution note")
+    no_spot = {k: v for k, v in CHAIN_NVDA.items() if k != "underlying_price"}
+    install({"hist": HIST, "cal": CAL, "eps": EPS, "rev": REV, "trend": TREND, "revs": REVS, "inc": INC},
+            CLOSES, ("2026-11-17T14:00:00", 155.0), release=None, chain=(no_spot, "nasdaq"))
+    got = c._collect(lambda: c._earn_model("NVDA", today=dt.date(2026, 11, 17)))
+    check(isinstance(got, c.Partial) and got.value["implied"]["spot_from"] == "close" and not got.missing
+          and any(f.startswith("the last daily close used instead") for f in got.fallbacks), f"no chain spot: last close flagged ({got!r})")
+    c._cache.clear()
+    out_fb = c.dispatch("earnings", {"symbol": "NVDA"})
+    check(out_fb["status"] == "fallback" and any("last daily close used instead" in n for n in out_fb["notes"]),
+          f"the card says so: status fallback with the note ({out_fb.get('status')})")
 
     # DTE > 14 includes time-to-expiry caveat
     cal_far = dict(CAL, earnings_date="2026-12-16")

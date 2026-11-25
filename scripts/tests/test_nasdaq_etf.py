@@ -741,4 +741,136 @@ finally:
         oc.NasdaqOptionsChainsFetcher.extract_data = _orig_extract
     nn.DIRECTORY_CONCURRENCY = _orig_nordic_conc
 
+# ---- P2-04: the gate is fair (arrival order), bounded (no hang), and a 429 stops all traffic until its cooldown ends
+rb.reset_nasdaq_rate_limit_state()
+arrivals, acquired, starts = [], [], []
+inflight = [0, 0]
+order_lock = threading.Lock()
+
+
+async def _queued(i):
+    await asyncio.sleep(0.01 * i)                       # distinct arrival times, 10 ms apart, across three loops
+    with order_lock:
+        arrivals.append(i)
+    async with rb._nasdaq_network_slot(30):
+        with order_lock:
+            acquired.append(i)
+            starts.append(time.monotonic())
+            inflight[0] += 1
+            inflight[1] = max(inflight[1], inflight[0])
+        await asyncio.sleep(0.05)
+        with order_lock:
+            inflight[0] -= 1
+
+
+def _loop_of(ids):
+    async def _all():
+        await asyncio.gather(*[_queued(i) for i in ids])
+    asyncio.run(_all())
+
+
+loops = [threading.Thread(target=_loop_of, args=(list(range(k, 30, 3)),)) for k in range(3)]
+for t in loops:
+    t.start()
+for t in loops:
+    t.join(timeout=60)
+gaps = [b - a for a, b in zip(starts, starts[1:])]
+check(len(acquired) == 30 and acquired == arrivals, f"30 waiters on 3 loops get slots in arrival order ({acquired[:8]}... vs {arrivals[:8]}...)")
+check(inflight[1] <= rb.NASDAQ_MAX_CONCURRENCY, f"peak in flight {inflight[1]} <= {rb.NASDAQ_MAX_CONCURRENCY}")
+# the gate stamps each start under its lock; the test reads the clock a moment later in another thread (10 ms of hand-off)
+check(all(g >= rb.NASDAQ_MIN_GAP_SEC - 0.01 for g in gaps), f"every start gap >= {rb.NASDAQ_MIN_GAP_SEC} s (min {min(gaps):.3f})")
+check(not rb._nasdaq_queue, "the queue is empty afterwards")
+
+
+async def _bounded():
+    hold = asyncio.Event()
+
+    async def _holder():
+        async with rb._nasdaq_network_slot(30):
+            await hold.wait()
+    holders = [asyncio.ensure_future(_holder()) for _ in range(rb.NASDAQ_MAX_CONCURRENCY)]
+    await asyncio.sleep(0.8)                            # every slot taken
+    t0 = time.monotonic()
+    err = None
+    try:
+        async with rb._nasdaq_network_slot(0.4):
+            pass
+    except Exception as e:  # noqa: BLE001
+        err = e
+    took = time.monotonic() - t0
+    queued_after = len(rb._nasdaq_queue)
+    hold.set()
+    await asyncio.gather(*holders)
+    return err, took, queued_after
+
+
+rb.reset_nasdaq_rate_limit_state()
+err, took, queued_after = asyncio.run(_bounded())
+check(err is not None and "rate limit" in str(err).lower() and "try again" in str(err).lower() and 0.35 <= took < 1.0,
+      f"a slot wait ends at its bound with a rate-limit message and a retry hint ({took:.2f} s: {err})")
+check(queued_after == 0, "a waiter that gave up leaves the queue (it never blocks the ones behind it)")
+
+async def _cancelled_turn():
+    """A request cancelled while waiting for its start turn is skipped: the one behind it still starts."""
+    rb._nasdaq_last_start = time.monotonic() + 0.3                # the next start is 0.45 s away
+    got = []
+
+    async def _req(tag):
+        async with rb._nasdaq_network_slot(5):
+            got.append((tag, time.monotonic()))
+    a = asyncio.ensure_future(_req("a"))
+    await asyncio.sleep(0.05)
+    b = asyncio.ensure_future(_req("b"))
+    await asyncio.sleep(0.05)
+    a.cancel()
+    t0 = time.monotonic()
+    await asyncio.wait_for(b, timeout=3)
+    return got, time.monotonic() - t0, a.cancelled()
+
+
+rb.reset_nasdaq_rate_limit_state()
+got, took, was_cancelled = asyncio.run(_cancelled_turn())
+check(was_cancelled and [g[0] for g in got] == ["b"] and took < 1.0, f"a cancelled waiter does not hold up the next one ({got}, {took:.2f} s)")
+rb.reset_nasdaq_rate_limit_state()
+
+upstream = [0]
+
+
+async def _caller(first):
+    async with rb._nasdaq_network_slot(5):
+        upstream[0] += 1
+        if first:
+            rb._trip_nasdaq_cooldown(429, retry_after="30")
+
+
+async def _after_429():
+    msgs = []
+    try:
+        await _caller(True)
+    except Exception as e:  # noqa: BLE001
+        msgs.append(str(e))
+    for r in await asyncio.gather(*[_caller(False) for _ in range(8)], return_exceptions=True):
+        msgs.append(str(r))
+    return msgs
+
+
+rb.reset_nasdaq_rate_limit_state()
+msgs = asyncio.run(_after_429())
+left = rb._nasdaq_blocked_until - time.monotonic()
+check(upstream[0] == 1, f"after a 429 with Retry-After: 30, no further upstream request ({upstream[0]})")
+check(len(msgs) == 9 and all("rate limit" in m.lower() and "cooling down" in m.lower() for m in msgs), "every caller gets the cooldown message")
+check(28 <= left <= 30, f"cooldown honours Retry-After: 30 ({left:.1f} s left)")
+rb._nasdaq_blocked_until = time.monotonic() - 1                # the cooldown ends
+asyncio.run(_caller(False))
+check(upstream[0] == 2, "after the cooldown the next request goes upstream")
+rb.reset_nasdaq_rate_limit_state()
+
+# the gate's limits are declared once more in the UI's provider policy table: both copies are equal
+from composite.core import http as _H  # noqa: E402
+
+gate = _H.PROVIDERS["nasdaq"]["backend_gate"]
+check(gate == {"max_concurrency": rb.NASDAQ_MAX_CONCURRENCY, "min_gap": rb.NASDAQ_MIN_GAP_SEC, "cooldown": rb.NASDAQ_COOLDOWN_SEC,
+               "retry_after_min": rb.NASDAQ_RETRY_AFTER_MIN, "retry_after_max": rb.NASDAQ_RETRY_AFTER_MAX,
+               "slot_wait": rb.NASDAQ_DEFAULT_TIMEOUT_SEC}, f"PROVIDERS['nasdaq']['backend_gate'] equals run_backend's NASDAQ_* ({gate})")
+
 done("test_nasdaq_etf")

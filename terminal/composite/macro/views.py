@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import math
 
 import composite as C
 
@@ -43,8 +42,10 @@ def macro_chart(preset="credit_spreads", series=None, since="2015", transform=No
         label, sid, mult = items[0]
         out = C._seasonal(label or sid, [[d, v * mult] for d, v in data.get(sid, [])], unit, source_id=sid)
         controls["ranges"] = []                 # a seasonal chart always shows one year against the previous five
-        return dict(out, sources=[C.series_source(sid, meta.get(sid))], controls=controls)
-    traces, table, forecast_shown = [], {}, False
+        obs = data.get(sid) or []               # dated by the last observation (the chart's x is a template year)
+        return dict(out, sources=[C.series_source(sid, meta.get(sid))], controls=controls,
+                    **({"as_of": obs[-1][0]} if obs else {"as_of_na": f"No observations for {sid}."}))
+    traces, table, forecast_shown, last_actual = [], {}, False, []
     for n, (label, sid, mult) in enumerate(items):
         pts = [[d, v * mult] for d, v in data.get(sid, [])]
         if tf == "yoy":
@@ -65,6 +66,8 @@ def macro_chart(preset="credit_spreads", series=None, since="2015", transform=No
             forecast_shown = forecast_shown or bool(ahead and actual)
         ref = actual or pts
         last = ref[-1][1]
+        if actual:
+            last_actual.append(actual[-1][0])          # the answer is dated by observations, never by a forecast month
         # counts in thousands (JOLTS 7,523k) are whole numbers: no ".00" (review A5 printed "7,523.00k")
         dec = 0 if unit.strip() == "k" else 2
         label_txt = f"{name}  {last:,.0f} bp" if unit.strip() == "bp" else f"{name}  {last:,.2f} pp" if unit.strip() == "pp" else \
@@ -109,7 +112,7 @@ def macro_chart(preset="credit_spreads", series=None, since="2015", transform=No
         xs = [x for t in traces for x in t["x"]]
         used += C.add_recession_shading(lay, min(xs), max(xs))
     out = {"data": traces, "layout": lay, "results": [table[d] for d in sorted(table, reverse=True)],
-           "sources": used, "controls": controls}
+           "sources": used, "controls": controls, "as_of": C.newest_date(last_actual)}
     cut = [meta.get(i[1], {}).get("truncated") for i in items if meta.get(i[1], {}).get("truncated")]
     if cut:
         out["truncated"] = "; ".join(dict.fromkeys(cut))
@@ -191,7 +194,8 @@ def _imf_cpi(keys, start):
         for kw in calls:
             try:
                 rows = C.api(C.V5, "economy/cpi", provider="imf", start_date=start, **kw) or []
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, "IMF consumer prices" + (" (euro area)" if kw.get("harmonized") else ""))
                 continue
             names = kw["country"].split(",")
             for r in rows:
@@ -200,7 +204,7 @@ def _imf_cpi(keys, start):
                     vf = float(v)
                 except (TypeError, ValueError):
                     continue
-                if not math.isfinite(vf):
+                if C.num(vf) is None:
                     continue
                 key = C._imf_key(r.get("country"), r.get("country_code"), names)
                 if key:
@@ -236,7 +240,7 @@ def _oecd_all(path, start):
                 vf = float(r.get("value"))
             except (TypeError, ValueError):
                 continue
-            if math.isfinite(vf):
+            if C.num(vf) is not None:
                 out.setdefault(str(r.get("country")).replace("’", "'"), []).append([str(r.get("date"))[:10], vf])
         for k in out:
             out[k].sort()
@@ -256,35 +260,43 @@ def country_monitor(**_):
     """Latest actuals by country: real GDP growth, inflation, unemployment, policy rate, 3-month and 10-year rates."""
     def run():
         start = f"{dt.date.today().year - 2}-01-01"
-        gdp, une = (C._safe(C._oecd_all, p, start) or {} for p in ("economy/gdp/real", "economy/unemployment"))
-        cpi = C._safe(C._imf_cpi, MONITOR, start) or {}
-        pol = C._safe(C._policy_series) or {}
-        gy = {r["key"]: r for r in (C._safe(C.global_yields) or {}).get("results", [])}
-        rows = []
+        gdp, une = (C._safe(C._oecd_all, p, start, missing=label) or {}
+                    for p, label in (("economy/gdp/real", "OECD real GDP"), ("economy/unemployment", "OECD unemployment")))
+        cpi = C._safe(C._imf_cpi, MONITOR, start, missing="IMF consumer prices") or {}
+        pol = C._safe(C._policy_series, missing="policy rates (BIS)") or {}
+        gy = {r["key"]: r for r in (C._safe(C.global_yields, missing="3-month and 10-year rates") or {}).get("results", [])}
+        rows, dates = [], []                              # dates: every data point shown, for the answer's as_of
         for k in MONITOR:
             label, _, _, iso = C.COUNTRIES.get(k, (k.replace("_", " ").title(), None, None, None))
             row = {"country": MONITOR_LABELS.get(k, label), "key": k}
             g = C._oecd_for(gdp, k)
-            if len(g) >= 5 and g[-5][1] and math.isfinite(g[-5][1]) and math.isfinite(g[-1][1]):
-                row["gdp_yoy"], row["gdp_q"] = (g[-1][1] / g[-5][1] - 1), C._quarter(g[-1][0])
+            g5, g1 = (C.num(g[-5][1]), C.num(g[-1][1])) if len(g) >= 5 else (None, None)
+            if g5 and g1 is not None:
+                row["gdp_yoy"], row["gdp_q"] = C.banded("gdp_yoy_pct", g1 / g5 - 1, k), C._quarter(g[-1][0])     # +-30%
+                dates.append(g[-1][0])
             c = cpi.get(k) or []
             if c:
                 row["cpi_yoy"], row["cpi_m"] = c[-1][1] / 100, c[-1][0][:7]
+                dates.append(c[-1][0])
             u = C._oecd_for(une, k)
             if u:
                 row["unemp"], row["unemp_m"] = u[-1][1], u[-1][0][:7]
+                dates.append(u[-1][0])
             ser = pol.get(iso) if iso else None
             if ser:
-                row["policy"] = ser[-1][1]
+                row["policy"], row["policy_d"] = ser[-1][1], str(ser[-1][0])[:10]      # the rate and its BIS series date
+                dates.append(ser[-1][0])
             y = gy.get(k)
             if y:
                 row["m3"], row["y10"], row["rates_as_of"], row["rates_src"] = y.get("m3"), y.get("y10"), y.get("as_of"), y.get("freq")
+                dates.append(y.get("as_of"))
                 if y.get("_m3_kind") == "interbank":
                     row["rates_src"] = "monthly (3M interbank)"
                 elif row["m3"] is not None and row["y10"] is not None:          # a sovereign slope needs a bill yield, not an interbank rate
                     row["slope"] = round((row["y10"] - row["m3"]) * 100)
             rows.append(row)
-        return {"results": rows}
+        newest = C.newest_date(str(d) for d in dates if d)
+        return {"results": rows, **({"as_of": newest} if newest else {"as_of_na": "No country figure answered just now."})}
     return C.cached(("country_monitor",), 1800, run)
 
 

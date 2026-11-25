@@ -20,6 +20,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -175,6 +176,10 @@ def credentials():
 CATALOG = local_paths.CACHE_DIR / "catalog-{}.json"     # last widgets.json of each backend: lets scripts/tests replay a build offline
 
 
+class BackendUnavailable(OSError):
+    """The data backend did not answer for its widget list: said in one plain line, never a traceback."""
+
+
 def load():
     defs = {"x": xwidgets.widgets()}
     with_v4 = os.environ.get("TERMINAL_WITH_V4", "").strip().lower()
@@ -192,9 +197,16 @@ def load():
                 os.replace(tmp, str(CATALOG).format(bid))
             except OSError:
                 pass                            # only a test aid
-        except OSError:
+        except OSError as e:
             if bid != "v4":
-                raise
+                if isinstance(e, urllib.error.HTTPError):       # it answered, with an error status (its reason is a str)
+                    raise BackendUnavailable(f"The OpenBB V5 data backend at {url} answered HTTP {e.code} for its widget list, so "
+                                             "the dashboards were not rebuilt. Restart the terminal (Stop.cmd, then Start.cmd), "
+                                             "then try again.") from None
+                reason = getattr(e, "reason", None)
+                why = type(reason).__name__ if isinstance(reason, BaseException) else type(e).__name__
+                raise BackendUnavailable(f"The OpenBB V5 data backend is not answering at {url} ({why}), so the "
+                                         "dashboards were not rebuilt. Start the terminal first (Start.cmd), then try again.") from None
             # The legacy backend is optional (opt-in via --with-v4): build without its sources.
             print(f"Optional legacy V4 backend not running at {url}: building V5-only dashboards")
             defs[bid] = {}
@@ -718,7 +730,7 @@ def build(report=False):
         json.dump(result, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, OUT)                    # the UI server may be reading the previous file right now
+    local_paths.replace_file(tmp, OUT)      # the UI server may be reading the previous file right now
 
     n_items = sum(len(t["items"]) for d in out for t in d["tabs"])
     missing = [ep for ep in ix.functions if ep not in covered]
@@ -742,4 +754,8 @@ def build(report=False):
 
 
 if __name__ == "__main__":
-    build(report="--report" in sys.argv)
+    try:
+        build(report="--report" in sys.argv)
+    except BackendUnavailable as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)

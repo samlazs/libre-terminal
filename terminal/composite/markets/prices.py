@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -47,13 +46,13 @@ def _fetch_history(symbols, start, interval, _retry=True):
     single = symbols[0] if len(symbols) == 1 else None
     for r in rows or []:
         sym = r.get("symbol") or single
-        c = r.get("close")
+        c = C.num(r.get("close"))
         d = str(r.get("date") or "")[:10]
-        if sym in out and isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and len(d) == 10:
-            out[sym].append((d, float(c)))
-            div = r.get("dividend")
-            if isinstance(div, (int, float)) and not isinstance(div, bool) and math.isfinite(div) and div > 0:
-                out.divs.setdefault(sym, {})[d] = float(div)
+        if sym in out and c is not None and len(d) == 10:
+            out[sym].append((d, c))
+            div = C.num(r.get("dividend"))
+            if div is not None and div > 0:
+                out.divs.setdefault(sym, {})[d] = div
     for s in out:
         out[s].sort()
     missing = [s for s, v in out.items() if not v]
@@ -72,7 +71,7 @@ HIST_STALE_TTL = 24 * 3600
 
 PARTIAL_TTL = 30
 
-_HIST_REVALIDATING: set = set()
+_HIST_REVALIDATING = C.LRUSet()            # (symbol, interval) being refreshed in the background (bounded)
 
 
 def _sym_hist_path(sym):
@@ -91,7 +90,7 @@ def _sym_hist_load(sym, interval):
         saved = json.loads(C._sym_hist_path(sym).read_text(encoding="utf-8"))
         if isinstance(saved, dict) and saved.get("rows") and saved.get("start") and saved.get("t"):
             with C._guard:
-                C._cache[("hsym", sym, interval)] = (float(saved["t"]), saved)
+                C._cache[("hsym", sym, interval)] = (C._mono(saved["t"]), saved)
             return saved
     except (OSError, ValueError, TypeError):
         pass
@@ -115,7 +114,7 @@ def _sym_hist_save(sym, interval, start_iso, rows, divs, now=None):
         merged_start = start_iso
     entry = {"t": ts, "start": merged_start, "rows": merged_rows, "divs": merged_divs}
     with C._guard:
-        C._cache[("hsym", sym, interval)] = (ts, entry)
+        C._cache[("hsym", sym, interval)] = (C._mono(ts), entry)
     if interval == "1d":
         C._write_json(C._sym_hist_path(sym), entry)
 
@@ -227,8 +226,11 @@ def history(symbols, start: dt.date, interval="1d"):
             out.stale_ts = min(fallback_times)
         if swr_times:
             out.swr_ts = min(swr_times)
-        # stale-while-revalidate or >50% empty: re-check bundle after PARTIAL_TTL (30 s) so background refresh lands
-        out.partial = bool(stale_syms) or sum(1 for s in symbols if out.get(s)) * 2 < len(symbols)
+        # stale-while-revalidate or >50% empty: re-check bundle after PARTIAL_TTL (30 s) so background refresh lands.
+        # Only the throttled case is reported (missing names the symbols); the SWR one already says "refreshing".
+        thin = sum(1 for s in symbols if out.get(s)) * 2 < len(symbols)
+        out.partial = bool(stale_syms) or thin
+        out.missing = [f"Yahoo Finance prices for {s}" for s in symbols if not out.get(s)] if thin else []
         return out
 
     # more than half the symbols empty (throttling) or SWR: kept 30 s, not 5 minutes, so a retry/refresh lands cleanly
@@ -285,12 +287,12 @@ def fx_pair_label(symbol):
 
 
 def _opt_num(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def _invert(series):
     """A USD/XXX series as the value of XXX in dollars (same dates), so that up = currency stronger."""
-    return [(d, 1.0 / c) for d, c in series if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c > 0]
+    return [(d, 1.0 / x) for d, c in series if (x := C.num(c)) is not None and x > 0]
 
 
 def _usd_rates(currencies):
@@ -306,7 +308,7 @@ def _usd_rates(currencies):
             need[c] = (major, mult)
     if need:
         pairs = sorted({m + "USD=X" for m, _ in need.values()})
-        hist = C._safe(C.history, pairs, dt.date.today() - dt.timedelta(days=14)) or {}
+        hist = C._safe(C.history, pairs, dt.date.today() - dt.timedelta(days=14), missing="FX rates (Yahoo Finance)") or {}
         for c, (major, mult) in need.items():
             ser = hist.get(major + "USD=X") or []
             if ser:

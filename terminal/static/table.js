@@ -694,7 +694,7 @@
         var nAll = baseCols.length, asOf = "";
         // as-of: the latest date in the list's date column (the footer's "updated" is only the fetch time)
         var dcol = visCols.filter(function (c) { return c.type === "date" && !EXPIRY.test(c.field) && !opts.calendar; })[0];
-        if (dcol && total > 1) baseRows.forEach(function (r) { var v = String(r[dcol.field] || "").slice(0, 10); if (DATE_RE.test(v) && v > asOf) asOf = v; });
+        if (dcol && total >= 1) baseRows.forEach(function (r) { var v = String(r[dcol.field] || "").slice(0, 10); if (DATE_RE.test(v) && v > asOf) asOf = v; });
         var countText = view.transposed && state.filter.trim()
           ? nf(0, 0, true).format(shown) + " of " + nf(0, 0, true).format(view.totalFields) + " fields"
           : (state.filter ? nf(0, 0, true).format(shown) + " of " : "") + nf(0, 0, true).format(total) + (total === 1 ? " row" : " rows");
@@ -863,7 +863,7 @@
     lay.width = w; lay.height = h;
     window.Plotly.toImage({ data: JSON.parse(JSON.stringify(gd.data)), layout: lay }, { format: "png", width: w, height: h, scale: 2 })
       .then(function (url) { T.downloadURL(file, url); T.toast("Chart saved as " + file); })
-      .catch(function (e) { T.toast("Could not save the chart: " + (e && e.message || e)); });
+      .catch(function (e) { T.toast("Could not save the chart: " + T.userText(e, { source: "The browser" })); });
   };
 
   function uniq(rows, f, cap) {

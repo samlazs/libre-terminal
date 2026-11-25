@@ -7,8 +7,6 @@
 """
 
 import datetime as dt
-import json
-import math
 import urllib.parse
 
 import composite as C
@@ -30,7 +28,7 @@ FIELDS = [k for k, _, _ in QUALITY + EXTRA]
 
 def _fdic(path, **params):
     url = FDIC + path + "?" + urllib.parse.urlencode(params)
-    j = json.loads(C._download(url, timeout=40, ua=C.BROWSER_UA))
+    j = C.fetch(url, parse="json", timeout=40, ua=C.BROWSER_UA)
     return [r.get("data", r) for r in j.get("data") or []]
 
 
@@ -54,7 +52,8 @@ def failure_rows(raw):
     for r in raw:
         def mn(k):
             v = r.get(k)
-            return round(float(v) / 1000, 1) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+            x = C.num(v)
+            return round(x / 1000, 1) if x is not None else None
         out.append({"failed": _date_us(r.get("FAILDATE")), "bank": _title(r.get("NAME")),
                     "location": ", ".join(x for x in (str(r.get("CITY") or "").title(), r.get("PSTALP")) if x),
                     "assets_mn": mn("QBFASSET"), "deposits_mn": mn("QBFDEP"), "est_loss_mn": mn("COST"),
@@ -74,7 +73,8 @@ def bank_failures(limit="30", **_):
                      fields="NAME,CITY,PSTALP,FAILDATE,QBFASSET,QBFDEP,COST,BIDNAME,RESTYPE1,RESTYPE")
     rows = failure_rows(C.cached_disk(f"fdic_failures_{n}", 12 * 3600, run))
     rows.sort(key=lambda r: r["failed"], reverse=True)
-    return {"results": rows, "sources": [FDIC_SRC]}
+    as_of = C.newest_date(r["failed"] for r in rows)         # the newest closing date (rows are newest first)
+    return {"results": rows, "sources": [FDIC_SRC], **({"as_of": as_of} if as_of else {"as_of_na": "The FDIC list returned no bank failures."})}
 
 
 def lead_bank(holding_rssd):
@@ -93,9 +93,9 @@ def quality_series(raw):
             continue
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}"
         for k in FIELDS:
-            v = r.get(k)
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
-                out[k].append([iso, round(float(v), 3)])
+            v = C.num(r.get(k))
+            if v is not None:
+                out[k].append([iso, round(v, 3)])
     return out
 
 
@@ -104,7 +104,8 @@ def holding_company(symbol="JPM"):
     sym = str(symbol or "JPM").strip().upper().split(",")[0]
     try:
         inst = C.api(C.V5, "federal_reserve/ffiec/institutions", ticker=sym) or []
-    except C.CompositeError:
+    except C.CompositeError as e:
+        C.partial_from(e, "FFIEC institution directory")
         inst = []
     if not inst:
         raise C.CompositeError(f"No U.S. bank holding company found for '{sym}' in the FFIEC directory. Use the ticker of a "
@@ -120,6 +121,7 @@ def bank_rssd(symbol="JPM", **_):
     sym = str(symbol or "").strip().upper().split(",")[0]
     if not sym:
         raise C.CompositeError("Enter a bank ticker (for example JPM, BAC, WFC, C, RY).")
+    C.us_only(sym, "The FFIEC bank directory")
 
     def run():
         hc = holding_company(sym)
@@ -168,7 +170,7 @@ def snapshot_rows(symbol):
 def bank_quality(symbol="JPM", **_):
     """Credit quality and capital of the bank behind a U.S.-listed bank holding company ticker, quarterly (FDIC)."""
     sym = str(symbol or "JPM").strip().upper().split(",")[0]
-
+    C.us_only(sym, "FDIC call reports")
     got = quality_data(sym)
     traces = []
     for i, (k, label, what) in enumerate(QUALITY):

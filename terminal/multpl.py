@@ -10,9 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import html
 from html.parser import HTMLParser
-import math
-import urllib.error
-import urllib.request
 
 import composite as C
 
@@ -132,11 +129,7 @@ def _parse_value(raw: str) -> tuple[float | None, bool]:
     txt = raw.replace("†", "").replace("\u2002", "").replace("\xa0", "").replace("$", "").replace("%", "").replace(",", "").strip()
     if not txt:
         return None, is_est
-    try:
-        val = float(txt)
-    except ValueError:
-        return None, is_est
-    return (val, is_est) if math.isfinite(val) else (None, is_est)
+    return C.num(txt), is_est
 
 
 def parse_table(html_text: str) -> list[tuple[str, float, bool]]:
@@ -165,17 +158,16 @@ def fetch_series(key: str) -> list[tuple[str, float, bool]]:
     url = BASE_URL + slug
 
     def load():
-        req = urllib.request.Request(url, headers={"User-Agent": _UA, "Accept": "text/html,application/xhtml+xml"})
         try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                body = r.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as e:
-            raise C.CompositeError(f"multpl.com returned HTTP {e.code} for {key}.") from None
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            raise C.CompositeError(f"multpl.com is not reachable ({type(e).__name__}).") from None
+            body = C.fetch(url, provider="multpl", parse="text", headers={"Accept": "text/html,application/xhtml+xml"})
+        except C.CompositeError as e:
+            status = getattr(e, "http_status", None)
+            msg = f"multpl.com returned HTTP {status} for {key}." if status else (
+                "multpl.com did not answer in time." if e.kind == "timeout" else str(e))
+            raise C.CompositeError(msg, kind=e.kind, retry_after=e.retry_after) from None
         rows = parse_table(body)
         if not rows:
-            raise C.CompositeError(f"multpl.com returned no table rows for {key}.")
+            raise C.CompositeError(f"multpl.com returned no table rows for {key}.", kind="upstream")
         return [[d, v, e] for d, v, e in rows]
 
     raw = C.cached_disk(f"multpl_{key}", 12 * 3600, load)

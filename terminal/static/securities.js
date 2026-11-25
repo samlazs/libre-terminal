@@ -15,7 +15,7 @@
     if (!q) return Promise.resolve([]);
     var k = q.toLowerCase();
     if (!found[k]) {
-      found[k] = fetch("/x/search?query=" + encodeURIComponent(q))
+      found[k] = T.request("/x/search?query=" + encodeURIComponent(q), { timeout: 20000 })
         .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
         .then(function (j) {
           var rows = (j && j.results) || [], up = q.toUpperCase();

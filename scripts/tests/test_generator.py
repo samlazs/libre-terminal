@@ -7,9 +7,11 @@ The full build is replayed offline from the backend catalogs the last live build
 import contextlib
 import io
 import json
+import os
 import re
+import sys
 
-from _common import REAL_LOCAL, check, done
+from _common import REAL_LOCAL, ROOT, check, done, make_tmp_dir
 
 import build_dashboards as bd
 import xwidgets
@@ -259,5 +261,48 @@ for _sym in ("CONCEPTS", "DASHBOARDS", "Index", "LAST_REPORT", "OPT_LABELS", "RE
     check(hasattr(bd, _sym), f"W9: build_dashboards exports {_sym}")
 check(db_pkg.CONCEPTS is db_overrides.CONCEPTS and db_pkg.DASHBOARDS is db_layouts.DASHBOARDS,
       "W9: dashboards package __init__ re-exports overrides and layouts")
+
+
+# ---- gatekeeper P2: V5 not answering -> one plain line and exit 1, never a traceback (launcher shows the last line)
+import socket as _socket  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+with _socket.socket() as _s:
+    _s.bind(("127.0.0.1", 0))
+    _dead = _s.getsockname()[1]                       # a port nothing listens on once this socket closes
+_env = dict(os.environ, TERMINAL_V5_PORT=str(_dead), TERMINAL_WITH_V4="0", TERMINAL_LOCAL_DIR=str(make_tmp_dir("bd-down-")))
+_r = _subprocess.run([sys.executable, str(ROOT / "scripts" / "build_dashboards.py")], capture_output=True, text=True, timeout=120,
+                     env=_env, cwd=ROOT)
+check(_r.returncode == 1 and "Traceback" not in _r.stderr + _r.stdout
+      and _r.stderr.strip().splitlines()[-1].startswith(f"The OpenBB V5 data backend is not answering at http://127.0.0.1:{_dead}"),
+      f"V5 down: build_dashboards prints one plain line and exits 1 ({_r.returncode}: {(_r.stderr or _r.stdout).strip()[-160:]})")
+
+# review R9: V5 up but its widget list answers HTTP 500: said as 'answered HTTP 500', never 'not answering (str)'
+import http.server as _hs  # noqa: E402
+import threading as _th  # noqa: E402
+
+
+class _Err500(_hs.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(500)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+
+    def log_message(self, *a):
+        pass
+
+
+_srv = _hs.ThreadingHTTPServer(("127.0.0.1", 0), _Err500)
+_th.Thread(target=_srv.serve_forever, daemon=True).start()
+try:
+    _env = dict(_env, TERMINAL_V5_PORT=str(_srv.server_address[1]))
+    _r = _subprocess.run([sys.executable, str(ROOT / "scripts" / "build_dashboards.py")], capture_output=True, text=True, timeout=120,
+                         env=_env, cwd=ROOT)
+finally:
+    _srv.shutdown()
+_last = (_r.stderr.strip().splitlines() or [""])[-1]
+check(_r.returncode == 1 and "Traceback" not in _r.stderr + _r.stdout and "answered HTTP 500" in _last and "(str)" not in _last
+      and "not answering" not in _last, f"V5 answers HTTP 500: one plain line naming the status ({_r.returncode}: {_last[:160]})")
 
 done("test_generator")

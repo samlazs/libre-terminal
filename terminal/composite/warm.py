@@ -78,10 +78,14 @@ def warm_status() -> dict:
     }
 
 
-def _safe(fn, *a):
+def _safe(fn, *a, missing=None):
+    """fn(*a), or None when its source failed (CompositeError). A defect (TypeError, KeyError...) is not a source failure:
+    it propagates to the 500-with-ref path. With `missing`, a failure marks the answer partial, naming that part."""
     try:
         return fn(*a)
-    except Exception:  # noqa: BLE001
+    except C.CompositeError as e:
+        if missing:
+            C.partial_from(e, missing)
         return None
 
 

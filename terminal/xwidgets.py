@@ -1,6 +1,7 @@
 """Widget definitions for the Terminal's own composite views (same schema the OpenBB backends use)."""
 
 import cds
+import columns
 import cryptovol
 import multpl
 import news
@@ -439,7 +440,8 @@ def widgets():
                  _pct("gdp_yoy", "GDP y/y", "Real GDP, change against the same quarter a year earlier (OECD).", heat=False), _col("gdp_q", "Quarter", "text"),
                  _pct("cpi_yoy", "CPI y/y", "Consumer prices, change over twelve months (IMF; euro area HICP).", heat=False), _col("cpi_m", "Month", "text"),
                  _pct("unemp", "Unemployment", "Unemployment rate (OECD, harmonised). Empty where the OECD has no monthly series.", heat=False), _col("unemp_m", "Month ", "text"),
-                 _yld("policy", "Policy rate", "Central-bank policy rate (BIS)."), _yld("m3", "3M", "3-month rate: bill yield from the daily curve, else the OECD's 3-month interbank rate."),
+                 _yld("policy", "Policy rate", "Central-bank policy rate (BIS)."), _col("policy_d", "Rate date", "text", "Date of the policy rate shown (BIS series)."),
+                 _yld("m3", "3M", "3-month rate: bill yield from the daily curve, else the OECD's 3-month interbank rate."),
                  _yld("y10", "10Y", "10-year government bond yield."), _bp("slope", "10Y-3M", "10-year yield minus 3-month bill yield, in basis points. Only where both come from the daily government curve (a 10-year bond minus an interbank rate is not a curve slope)."),
                  _col("rates_as_of", "Rates as of", "text"), _col("rates_src", "Rates data", "text", "daily = official daily curve; monthly = OECD."), _col("key", "Key", "text", hide=True)]),
         _w("x_cpi_history", "Inflation by Country", "Consumer-price inflation (year over year) for the countries you pick, from the IMF; the euro area is the harmonised index (HICP).",
@@ -455,7 +457,7 @@ def widgets():
            "markdown", "/x/data_status", [], "Reference", ["Terminal"], w=40, h=20, refetch=3600000),
     ]
     out.extend(_stage3())
-    return {w["widgetId"]: w for w in out}
+    return columns.stamp_x_units({w["widgetId"]: w for w in out})      # every number column declares its unit
 
 
 SYM = [_p("symbol", "Symbol", "AAPL", "Ticker (Yahoo Finance spelling; U.S. filers use SEC figures).")]

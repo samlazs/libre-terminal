@@ -71,6 +71,20 @@ _OLD_LAYOUT = [
 ]
 
 
+def replace_file(tmp: Path | str, path: Path | str, tries: int = 10) -> None:
+    """os.replace(tmp, path), retried for a moment: on Windows the replace fails (PermissionError, WinError 5) while any
+    process has the old file open for reading, and pid files, ports.json and dashboards.json are read all the time
+    (the UI's service status, `launcher.py status`, a page load). Raises the last error after about 2.75 s."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def backend_dir(name: str) -> Path:
     return BACKENDS_DIR / name
 
@@ -129,7 +143,7 @@ def saved_ports() -> dict:
         return {}
 
 
-PROTECTED_CACHE = ("curvestore_", "catalog-", "earnings_consensus.json", "health-history.json", "yahoo_meta.json")
+PROTECTED_CACHE = ("curvestore_", "cdsday_", "catalog-", "earnings_consensus.json", "health-history.json", "yahoo_meta.json")
 
 
 def _is_protected_cache(path: Path) -> bool:
@@ -139,7 +153,7 @@ def _is_protected_cache(path: Path) -> bool:
 
 def prune_local(now: float | None = None, max_cache_mb: float = 150.0) -> int:
     """Disk caches and freeze dumps do not grow for ever: drop cache files untouched for 30 days (the history stores
-    curvestore_*, catalog snapshots and earnings/health history stay), backend cache entries after 14 days, freeze dumps
+    curvestore_* and cdsday_*, catalog snapshots and earnings/health history stay), backend cache entries after 14 days, freeze dumps
     after 14; then trim non-protected files under local/cache/ oldest-first to stay within max_cache_mb."""
     now = now or time.time()
     gone = 0

@@ -40,8 +40,8 @@ def _own_strength(values, base, at):
     """{currency: change from base to at against the other seven, equally weighted, geometric}."""
     logs = {}
     for ccy, v in values.items():
-        vb, va = v[base], v[at]
-        if not (isinstance(vb, (int, float)) and isinstance(va, (int, float)) and math.isfinite(vb) and math.isfinite(va) and vb > 0 and va > 0):
+        vb, va = C.num(v[base]), C.num(v[at])
+        if not (vb is not None and va is not None and vb > 0 and va > 0):
             raise C.CompositeError(f"Invalid price series for {ccy} while computing currency strength.")
         logs[ccy] = math.log(va / vb)
     total, n = sum(logs.values()), len(logs) - 1
@@ -94,7 +94,7 @@ def fx_moves(period="1D", **_):
                          "title": {"text": f"Right = stronger<br>{res['dates'][0]} to {res['dates'][-1]}, 17:00 New York", "font": {"size": 10}}})
     lay["yaxis"].update({"showgrid": False, "tickfont": {"color": C.INK["text2"], "size": 10}})
     lay["legend"]["traceorder"] = "reversed"
-    return {"data": data, "layout": lay}
+    return {"data": data, "layout": lay, "as_of": C.newest_date(res["dates"])}
 
 
 def fx_trend(period="3M", **_):

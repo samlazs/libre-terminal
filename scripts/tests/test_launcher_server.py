@@ -99,7 +99,7 @@ def _t_boom(**_):
 
 
 def _t_strict(a="1"):
-    return {"results": [], "sources": [{"name": "Terminal", "detail": "test", "url": ""}]}
+    return {"results": [], "sources": [{"name": "Terminal", "detail": "test", "url": ""}], "as_of_na": "A test view with no data."}
 
 
 def _frame_ok(**_):
@@ -770,6 +770,129 @@ finally:
     launcher.apply_keys_if_changed = _orig_apply_keys
     launcher.rebuild_dashboards = _orig_rebuild
     launcher.venv_python = _orig_venv_py
+
+# ---- pid files are replaced while others read them (P1-06): on Windows os.replace fails while a reader has the old
+# file open, which once killed a supervisor mid crash loop; the write waits a moment, and a failure never stops it
+pf_dir = make_tmp_dir("pidfile-")
+target = pf_dir / "v5.json"
+target.write_text('{"child": 1}', encoding="utf-8")
+holder = open(target, encoding="utf-8")                  # noqa: SIM115  (a reader holding the file, like /api/services)
+threading.Timer(0.3, holder.close).start()
+t0 = time.monotonic()
+launcher._write_atomic(target, '{"child": 2}')
+took = time.monotonic() - t0
+check(target.read_text(encoding="utf-8") == '{"child": 2}', "a pid file held open by a reader is still replaced")
+if os.name == "nt":
+    check(took >= 0.25, f"the replace waited for the reader to let go ({took:.2f} s)")
+    held = open(target, encoding="utf-8")                # noqa: SIM115  (a reader that never lets go)
+    try:
+        t0 = time.monotonic()
+        try:
+            launcher._write_atomic(target, '{"child": 3}')
+            raised = None
+        except PermissionError as e:
+            raised = e
+        took = time.monotonic() - t0
+    finally:
+        held.close()
+    check(raised is not None and took < 4, f"a file held for good fails in bounded time ({took:.2f} s)")
+    check(target.read_text(encoding="utf-8") == '{"child": 2}' and not list(pf_dir.glob("*.tmp")),
+          "the old pid file is intact and no temporary file is left")
+
+sup_dir = make_tmp_dir("supervisor-")
+saved_l = {k: getattr(launcher, k) for k in ("LOGS", "RUN", "child_cmd", "venv_python", "resolve_ports", "_write_atomic")}
+out_, err_ = sys.stdout, sys.stderr
+
+
+def _deny_pidfile(path, text):
+    raise PermissionError(5, "Access is denied", str(path))
+
+
+try:
+    launcher.LOGS, launcher.RUN = sup_dir / "logs", sup_dir / "run"
+    launcher.child_cmd = lambda _n, _p: [sys.executable, "-c", "print('service ran')"]
+    launcher.venv_python = lambda _s: launcher.Path(sys.executable)
+    launcher.resolve_ports = lambda _a: {"ui": 1, "v5": 2, "v4": 3}
+    launcher._write_atomic = _deny_pidfile
+    rc_sup = launcher.cmd_run(types.SimpleNamespace(service="v5", log=True))
+finally:
+    sys.stdout, sys.stderr = out_, err_
+    for k, v in saved_l.items():
+        setattr(launcher, k, v)
+sup_log = (sup_dir / "logs" / "v5.log").read_text(encoding="utf-8")
+check(rc_sup == 0 and "service ran" in sup_log and "could not record the new process in v5.json" in sup_log,
+      "a pid file that cannot be written leaves the supervisor running its service, and says so in the log")
+
+# ---- OD-2: a card asked while the data service is still starting (supervisor running, port not answering yet) says
+# "starting" and retries, never the connection error; once V5 answers, a source's own error is shown as it is
+def _refused(name, params):
+    raise _comp.CompositeError("OpenBB V5 backend is not reachable ([WinError 10061] No connection could be made).", kind="upstream")
+
+
+def _fred_down(name, params):
+    raise _comp.CompositeError("fred.stlouisfed.org did not answer in time.", kind="timeout")
+
+
+# review R6: "starting" is decided from V5's pid file (written by its supervisor at each start) and its port alone, only for
+# an error naming the V5 backend, and only within V5_START_WINDOW_S of that start; never the full service_status per card
+pid5 = server.local_paths.RUN_DIR / "v5.json"
+port_asks = []
+
+
+def _port(answers):
+    def f(port, timeout=0.15):
+        port_asks.append(int(port))
+        return answers
+    return f
+
+
+def _no_status():
+    raise AssertionError("service_status is not asked for a failing card")
+
+
+saved_disp, saved_svc, saved_po = server.composite.dispatch, server.service_status, server._port_open
+try:
+    server.service_status = _no_status
+    server.composite.dispatch = _refused
+    with server._restart_lock:
+        server._restart_state.update({"restarting": False, "finished_at": 0.0})
+    pid5.parent.mkdir(parents=True, exist_ok=True)
+    pid5.write_text("{}", encoding="utf-8")                      # the supervisor has just started V5's process
+    server._port_open = _port(False)
+    st_s, body_s = req("GET", "/x/board?preset=fx")
+    j_s = json.loads(body_s)
+    check(st_s == 503 and j_s["error"]["kind"] == "unavailable" and j_s["error"]["message"] == "The data services are starting; this card retries shortly."
+          and "10061" not in body_s.decode("utf-8") and port_asks == [int(server.V5_PORT)],
+          f"V5 starting: 503 'data services starting', no raw connection error ({st_s}, {j_s['error']['message']}, {port_asks})")
+    server._port_open = _port(True)
+    st_u, body_u = req("GET", "/x/board?preset=fx")
+    check(st_u == 502 and json.loads(body_u)["error"]["kind"] == "upstream", f"V5 up: a real upstream error is shown as such ({st_u})")
+    server._port_open = _port(False)
+    old = time.time() - server.V5_START_WINDOW_S - 5
+    os.utime(pid5, (old, old))                                    # started longer ago than the window: not 'starting'
+    st_o, body_o = req("GET", "/x/board?preset=fx")
+    check(st_o == 502 and "10061" in body_o.decode("utf-8"),
+          f"V5 started {server.V5_START_WINDOW_S + 5:.0f} s ago, port still closed: the real cause, 502 ({st_o})")
+    pid5.unlink()
+    st_x, _ = req("GET", "/x/board?preset=fx")
+    check(st_x == 502, "no supervisor pid file (stopped, or never started): not called 'starting'")
+    pid5.write_text("{}", encoding="utf-8")
+    port_asks.clear()
+    server.composite.dispatch = _fred_down
+    st_f, body_f = req("GET", "/x/board?preset=fx")
+    check(st_f == 504 and json.loads(body_f)["error"]["message"] == "fred.stlouisfed.org did not answer in time." and port_asks == [],
+          f"a FRED timeout while V5 starts: FRED's own error, V5's port not even asked ({st_f}, {port_asks})")
+    server.composite.dispatch = _refused
+    with server._restart_lock:
+        server._restart_state.update({"restarting": True, "finished_at": 0.0})
+    st_r, body_r = req("GET", "/x/board?preset=fx")
+    check(st_r == 503 and json.loads(body_r)["error"]["message"] == "The data service is restarting; this card retries shortly.",
+          "a restart from the page: 'restarting' wins over 'starting'")
+finally:
+    with server._restart_lock:
+        server._restart_state.update({"restarting": False, "finished_at": 0.0})
+    pid5.unlink(missing_ok=True)
+    server.composite.dispatch, server.service_status, server._port_open = saved_disp, saved_svc, saved_po
 
 httpd.shutdown()
 

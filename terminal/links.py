@@ -42,7 +42,8 @@ def _yahoo_profile(sym):
     def run():
         try:
             rows = C.api(C.V5, "equity/profile", provider="yfinance", symbol=sym) or []
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "Yahoo Finance profile")
             return {}
         r = rows[0] if rows else {}
         return {"name": r.get("name") or r.get("long_name") or "", "sector": r.get("sector") or "", "industry": r.get("industry_category") or ""}
@@ -66,9 +67,9 @@ def _bank_value(sym, base, sector=None):
                 continue
             if any(r.get("rssd_id") for r in inst):
                 return {"value": t, "_partial": False}
-        return {"value": None, "_partial": failed}
+        return {"value": None, "_partial": ["FFIEC bank directory"] if failed else False}
     got = C.cached_complete(("bank_value", sym), 86400, run, short=300)
-    return got["value"], got["_partial"]
+    return got["value"], bool(got["_partial"])
 
 
 def _bond_value(sym, sec_name, name):
@@ -76,7 +77,8 @@ def _bond_value(sym, sec_name, name):
     for value in ([sym] if sec_name else []) + ([name] if name else []):
         try:
             rows, _ = bonds.resolve(company=value)
-        except C.CompositeError:
+        except C.CompositeError as e:
+            C.partial_from(e, "bond issuer lookup")
             continue
         if rows:
             return value

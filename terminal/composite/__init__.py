@@ -14,12 +14,18 @@ import time as time
 
 from .core.http import (  # noqa: F401
     V5, V4, CompositeError, http_json, _which, api_full, api, src, uniq_sources, YAHOO_URL, yahoo_source,
-    _SSL, _ssl_context, BROWSER_UA, _download, _RETRY_DELAYS,
+    _SSL, _ssl_context, BROWSER_UA, _download, _RETRY_DELAYS, _transport,
+    PROVIDERS, provider_of, fetch, reset_outbound,
 )
 from .core.cache import (  # noqa: F401
     CACHE_DIR, _cache, _locks, _guard, cached, _backoff, disk_name, _STALE_SINCE, _STALE_NOTES, _SWR_NOTES, _CtxPool,
     _CfShim, cf, _note_stale, _note_stale_ts, _note_swr_ts, _age_text, stale_text, cached_text, mtl_time, cached_disk,
-    _write_json, cached_complete, _curve_store, reset_runtime_caches,
+    _write_json, cached_complete, _curve_store, reset_runtime_caches, LRUDict, LRUSet, STATE_CAP, NEG_TTL, _neg, _mono,
+    cache, Partial, PARTIAL_HOLD, _PARTIAL_NOTES, note_partial, partial_from, partial_text, _collect, _serve,
+    _FALLBACK_NOTES, note_fallback,
+)
+from .core.num import (  # noqa: F401
+    num, finite, banded, in_band, band_note, note_blank, nonfinite_path, BANDS, Band, PLACEHOLDERS, _BLANK_NOTES,
 )
 from .core.dates import (  # noqa: F401
     minus_months, HORIZON_MONTHS, horizon_date, RANGE_YEARS, DAILY_RANGES, MONTHLY_RANGES,
@@ -79,13 +85,13 @@ from .macro.views import (  # noqa: F401
 )
 from .geo.gpr import _gpr, GPR_NAMES, gpr_table  # noqa: F401
 from .geo.shipping import PORTWATCH_FIELDS, _chokepoints, CHOKEPOINT_ORDER, chokepoint_monitor  # noqa: F401
-from .equity.lookup import TYPE_NAMES, MINOR_UNITS, _syms, search, META_TTL, _meta, _first, snapshot  # noqa: F401
+from .equity.lookup import TYPE_NAMES, MINOR_UNITS, _syms, non_us_listing, us_only, search, META_TTL, _meta, _first, snapshot  # noqa: F401
 from .equity.comps import (  # noqa: F401
-    _slug, _norm_name, _profiles, _yahoo_recs, _peers, COMP_FIELDS, _METRICS, _ev_parts, comps, is_bank, BANK_NA,
+    _slug, _norm_name, _profiles, _yahoo_recs, _peers, COMP_FIELDS, _METRICS, _ev_parts, _ev_figures, comps, is_bank, BANK_NA,
 )
 from .equity.earnings import (  # noqa: F401
     EARN_PERIODS, _STORE_LOCK, _est_raw, _report_info, _timing_from_acceptance, _earnings_release,
-    _filing_documents, _last_price, _consensus_store, _f, _surprise, _cons, _two_day, _yahoo_q0_is,
+    _filing_documents, _last_price, _consensus_store, _f, _surprise, _eps_surprise, _cons, _two_day, _yahoo_q0_is,
     _saved_cons, _yahoo_quarter_chart, _summary_revenue, _opt_leg_price, _parse_option_chain,
     _implied_move, _options_chain, _earn_model, _eps_txt, _pct_txt, _range_txt, _earn_sources,
     earnings_call_link, earnings, earnings_reports, earnings_release, earnings_history, consensus,
@@ -96,20 +102,44 @@ from .equity.filings import (  # noqa: F401
 )
 from .status import BACKEND_NAMES, _patch_status_md, data_status  # noqa: F401
 from .warm import _safe, warm, warm_status  # noqa: F401
+from .core import contract as _contract
+from .core.contract import kind_of, time_left, newest as newest_date  # noqa: F401
 
 def dispatch(name, params):
+    """Run a view and answer inside the envelope of core/contract.py (sources, as_of or as_of_na, status, notes)."""
     fn = ROUTES.get(name)
     if fn is None:
-        raise CompositeError(f"Unknown view '{name}'.")
-    notes, swr_notes = [], []
+        raise CompositeError(f"Unknown view '{name}'.", kind="input", status=404)
+    why = _contract.bad_params(fn, params)
+    if why:
+        raise CompositeError("Bad parameters for this view: " + why[:200], kind="input", status=400)
+    notes, swr_notes, missing, subs, blanks = [], [], [], [], []
     token = _STALE_NOTES.set(notes)
+    blank_token = _BLANK_NOTES.set(blanks)
     swr_token = _SWR_NOTES.set(swr_notes)
+    part_token = _PARTIAL_NOTES.set(missing)
+    fb_token = _FALLBACK_NOTES.set(subs)
+    dl_token = _contract.set_deadline(_contract.budget_for(name))       # every outbound call is cut to the time left
     try:
-        out = fn(**params)
+        out = _serve(fn(**params))                      # a view that returns a Partial reports it directly
     finally:
+        _contract._DEADLINE.reset(dl_token)
+        _BLANK_NOTES.reset(blank_token)
+        _FALLBACK_NOTES.reset(fb_token)
+        _PARTIAL_NOTES.reset(part_token)
         _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)
-    if isinstance(out, dict) and not out.get("sources"):
+    if not isinstance(out, dict):
+        out = {"results": out}
+    if missing or subs:                                 # never presented as the whole answer from the usual sources
+        prior = out.get("status")
+        new = "partial" if missing else "fallback"
+        out = dict(out, status=new if prior in (None, "ok", "stale") or (missing and prior == "fallback") else prior,
+                   notes=list(out.get("notes") or []) + ([partial_text(missing)] if missing else []) + subs)
+    if blanks:                                          # implausible figures left blank: said, status unchanged
+        have = list(out.get("notes") or [])
+        out = dict(out, notes=have + [b for b in blanks if b not in have])
+    if not out.get("sources"):
         out = dict(out, sources=static_sources(name, params))       # the cached object itself is never changed
     if isinstance(out, dict) and notes:
         out = dict(out, stale=stale_text(notes))
@@ -117,6 +147,11 @@ def dispatch(name, params):
         out = dict(out, cached=cached_text(swr_notes))
     if isinstance(out, dict) and name in DELAYED_VIEWS and "delayed" not in out and not str(params.get("symbol") or "").upper().startswith("FRED:"):
         out = dict(out, delayed=DELAYED_YAHOO)          # HANDOFF P2: live prices from a free feed say they are delayed
+    _contract.enforce_finite(name, out)                 # strict mode: a NaN/Inf reaching the serializer is a defect
+    if "_frame" in out or "_message" in out:            # a frame card's answer: server.py shapes it
+        return out if out.get("as_of") or out.get("as_of_na") else dict(out, as_of_na=_contract.UNDATED.get(name, _contract.NO_DATE))
+    out = _contract.finish(out, name)
+    _contract.enforce(name, out)
     return out
 
 DELAYED_VIEWS = {"board", "watchlist", "fx_matrix", "fx_moves", "fx_trend", "chart", "snapshot", "perf_bars", "performance", "comps"}
@@ -297,7 +332,19 @@ def _late(module, fn):
     def view(**params):
         return getattr(importlib.import_module(module), fn)(**params)
     view.__name__ = fn + "_view"
+    view._target = (module, fn)                     # parameters are checked against this function's signature
     return view
+
+
+# The hand-written wrappers above call into late-imported modules too: name their targets for the parameter check
+for _w, _t in ((news_view, ("news", "news")), (bank_failures_view, ("banks", "bank_failures")),
+               (bank_quality_view, ("banks", "bank_quality")), (bank_rssd_view, ("banks", "bank_rssd")),
+               (policy_path_view, ("policy_path", "chart")), (policy_path_table_view, ("policy_path", "table")),
+               (cds_indices_view, ("cds", "table")), (cds_history_view, ("cds", "history")),
+               (crypto_vol_view, ("cryptovol", "chart")), (bond_lookup_view, ("bonds", "lookup")),
+               (bond_curve_view, ("bonds", "curve")), (company_links_view, ("links", "links")),
+               (sp500_multiples_view, ("multpl", "chart"))):
+    _w._target = _t
 
 
 ROUTES = {

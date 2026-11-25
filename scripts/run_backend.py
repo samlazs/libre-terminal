@@ -20,16 +20,20 @@ Usage: python scripts/run_backend.py <name> [openbb-api arguments...]
 from __future__ import annotations
 
 import atexit
+import collections
 import contextlib
 import faulthandler
+import itertools
 import json
 import math
 import os
+import re
 import sys
 import threading
 import time
 import urllib.request
 import weakref
+from typing import NamedTuple
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +44,7 @@ from redact import redact  # noqa: E402
 LOGS = local_paths.LOGS_DIR
 RESTART_CODE = 75
 FROZEN_AFTER = float(os.environ.get("OPENBB_FROZEN_AFTER", "45"))     # seconds without any answer
+STARTUP_GRACE = float(os.environ.get("OPENBB_STARTUP_GRACE", "240"))   # seconds allowed before the first answer
 UI_PORT = os.environ.get("TERMINAL_UI_PORT") or "6950"
 BACKEND_CACHE = local_paths.CACHE_DIR / "backend"
 
@@ -190,17 +195,37 @@ def say(msg: str):
         pass
 
 
-def watchdog(name: str, host: str, port: str):
+def _freeze_exit(name: str, why: str):
+    """Write every thread's stack to <name>-freeze-*.txt and exit with RESTART_CODE (the supervisor restarts us)."""
+    try:
+        LOGS.mkdir(parents=True, exist_ok=True)
+        dump = LOGS / f"{name}-freeze-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        with open(dump, "w", encoding="utf-8") as f:
+            f.write(f"{name} backend {why}. Thread stacks:\n\n")
+            f.flush()
+            faulthandler.dump_traceback(file=f, all_threads=True)
+        say(f"\n[watchdog] {name} backend {why}; stacks in {dump}; restarting.")
+    finally:
+        os._exit(RESTART_CODE)      # always reached, whatever happened to the output streams
+
+
+def watchdog(name: str, host: str, port: str, startup_grace: float | None = None):
+    """Restart a backend that stops answering, and one that never answers at all: startup (building the API) may take
+    up to STARTUP_GRACE seconds; a startup that hangs longer (an import or lock deadlock) is dumped and restarted too."""
     probe_host = "127.0.0.1" if host in ("0.0.0.0", "::", "[::]", "") else host
     url = f"http://{probe_host}:{port}/"
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    # wait until the server has answered once (startup builds the API and can take a minute)
+    grace = STARTUP_GRACE if startup_grace is None else float(startup_grace)
+    started = time.time()
+    poll = min(3.0, max(0.2, grace / 4))
     while True:
-        time.sleep(3)
+        time.sleep(poll)
         try:
             opener.open(url, timeout=5).read(1)
             break
         except Exception:  # noqa: BLE001
+            if time.time() - started >= grace:
+                _freeze_exit(name, f"gave no first answer within {int(grace)}s of starting")
             continue
     last_ok = time.time()
     misses = 0
@@ -216,16 +241,7 @@ def watchdog(name: str, host: str, port: str):
             misses += 1
             if misses < 2:
                 continue
-            try:
-                LOGS.mkdir(parents=True, exist_ok=True)
-                dump = LOGS / f"{name}-freeze-{time.strftime('%Y%m%d-%H%M%S')}.txt"
-                with open(dump, "w", encoding="utf-8") as f:
-                    f.write(f"{name} backend stopped answering for {int(time.time() - last_ok)}s. Thread stacks:\n\n")
-                    f.flush()
-                    faulthandler.dump_traceback(file=f, all_threads=True)
-                say(f"\n[watchdog] {name} backend frozen for {int(time.time() - last_ok)}s; stacks in {dump}; restarting.")
-            finally:
-                os._exit(RESTART_CODE)      # always reached, whatever happened to the output streams
+            _freeze_exit(name, f"stopped answering for {int(time.time() - last_ok)}s")
 
 
 class _OecdRateLimited(Exception):
@@ -233,16 +249,18 @@ class _OecdRateLimited(Exception):
 
 
 # ---------------------------------------------------------------- slow sources: disk cache, one fetch per query, bounded wait
-# provider package -> (fresh for seconds, answer within seconds (None = wait), attempts, name shown in messages)
+# provider package -> (fresh for seconds, answer within seconds, attempts, name shown in messages). "Answer within" is never
+# unbounded and never longer than the slowest route budget that reaches the provider (core/contract.py ROUTE_BUDGETS, 65 s):
+# past it the request is told the dataset keeps loading in the background (the fetch itself is not repeated).
 CACHE_POLICY = {
     "openbb_us_eia": (6 * 3600, 55, 1, "EIA"),  # paginate() already retries transient EIA timeouts up to 3 times
     "openbb_famafrench": (24 * 3600, 45, 3, "The Fama-French data library (Dartmouth)"),
     "openbb_government_us": (3 * 3600, 45, 2, "U.S. Treasury FiscalData"),
     "openbb_cftc": (3 * 3600, 45, 2, "CFTC"),
-    "openbb_bls": (6 * 3600, None, 2, "BLS"),
+    "openbb_bls": (6 * 3600, 55, 2, "BLS"),
     "openbb_usda": (12 * 3600, 45, 2, "USDA"),
-    "openbb_imf": (12 * 3600, None, 2, "IMF"),
-    "openbb_oecd": (12 * 3600, None, 1, "OECD"),       # strict hourly quota: 12 h TTL, never retry
+    "openbb_imf": (12 * 3600, 55, 2, "IMF"),
+    "openbb_oecd": (12 * 3600, 55, 1, "OECD"),         # strict hourly quota: 12 h TTL, never retry
     "openbb_ecb": (6 * 3600, 45, 2, "ECB"),
     "openbb_federal_reserve": (3 * 3600, 45, 2, "Federal Reserve"),
     "openbb_fred": (3 * 3600, 45, 2, "FRED"),
@@ -1768,6 +1786,89 @@ def install_fx_chart_fix(applied: list, tvdf=None, tvn=None):
     applied.append("TradingView FX candles, header change and session use 17:00 New York closes")
 
 
+# The chart legend (pywry 2.0 tvchart: 02-helpers.js _tvRenderHoverLegend, 11-legend.js last-bar and hover legends)
+# printed close - open of the bar as its change: a daily candle showed its open-to-close move, not the day's change.
+# EUNL.DE 2026-11-25: open 124.525, close 122.24 -> "-2.29 (-1.83%)" beside Yahoo's -2.325 (-1.87%) from the
+# previous close 124.565. Each site now counts from the previous bar's close (TradingView's convention, and the
+# boards' 1D: the bar before), and colours the values by that change. The previous bar is found by the hovered
+# bar's own time, so the zone a bar is stamped in (Berlin midnight is 23:00 UTC the day before) does not matter;
+# a point that is not a raw bar (Heikin Ashi) or the first bar keeps the open.
+LEGEND_CHANGE = re.compile(
+    r"var chg\s*=\s*(?:Number\()?(?P<v>\w+)\.close\)?\s*-\s*(?:Number\()?(?P=v)\.open\)?;\s*"
+    r"var chgPct\s*=\s*[^;]*?\b(?P=v)\.open[^;]*;\s*"
+    r"var clr\s*=\s*(?P<fn>[\w$]+)\(\s*(?P=v)\.close\s*,\s*(?P=v)\.open\s*\);")
+LEGEND_ROWS = {          # (colour function, point variable) -> the raw bars of the series that point belongs to
+    ("_tvLegendColorize", "d"): "entry && entry._seriesRawData && entry._seriesRawData[mainKey]",
+    ("colorize", "last"): "rows",
+    ("colorize", "d"): "entry && entry._seriesRawData && entry._seriesRawData[sKey]",
+}
+LEGEND_BASE_SCRIPT = """<script>(function () {
+  function secs(v) {
+    if (typeof v === "number") return v;
+    if (typeof v === "string") { var n = Date.parse(v.length === 10 ? v + "T00:00:00Z" : v); return isNaN(n) ? null : n / 1000; }
+    if (v && typeof v === "object" && v.year) return Date.UTC(v.year, v.month - 1, v.day) / 1000;
+    return null;
+  }
+  /* The close a bar's change counts from: the bar before it in its own series; the bar's open when there is none. */
+  window.__terminalChangeBase = function (rows, p) {
+    var open = Number(p && p.open), want = secs(p && p.time);
+    if (!rows || !rows.length || want === null) return open;
+    for (var i = rows.length - 1; i > 0; i--) {
+      var at = secs(rows[i] && rows[i].time);
+      if (at === null || at < want) break;
+      if (at === want) {
+        var prev = Number(rows[i - 1] && rows[i - 1].close);
+        return Number(rows[i].close) === Number(p.close) && isFinite(prev) && prev > 0 ? prev : open;
+      }
+    }
+    return open;
+  };
+})();</script>"""
+
+
+def legend_change_from_previous_close(html: str) -> tuple[str, int]:
+    """(page, sites changed): every legend change counts from the previous bar's close. All three sites or none: a
+    page whose legend code changed (another pywry) is returned untouched, so it never mixes two conventions."""
+    def base(m):
+        rows = LEGEND_ROWS.get((m.group("fn"), m.group("v")))
+        if rows is None:
+            raise KeyError(m.group(0)[:60])
+        v, fn = m.group("v"), m.group("fn")
+        return (f"var __base = (window.__terminalChangeBase ? window.__terminalChangeBase({rows}, {v}) : Number({v}.open)); "
+                f"var chg = Number({v}.close) - __base; var chgPct = __base !== 0 ? ((chg / __base) * 100) : 0; "
+                f"var clr = {fn}({v}.close, __base);")
+    try:
+        out, n = LEGEND_CHANGE.subn(base, html)
+    except KeyError:
+        return html, 0
+    if n != len(LEGEND_ROWS):
+        return html, 0
+    head = out.find("<head>")
+    if head >= 0:
+        out = out[:head + 6] + LEGEND_BASE_SCRIPT + out[head + 6:]
+    else:
+        out = LEGEND_BASE_SCRIPT + out
+    return out, n
+
+
+def install_tv_legend_change(applied: list, tvn=None):
+    """TradingView chart legend: a bar's change from the previous bar's close, not from its own open."""
+    if tvn is None:
+        from openbb_yfinance.utils import tvchart_native as tvn
+    orig_html = tvn.tvchart_widget_html
+    warned = []
+
+    async def tvchart_widget_html(symbol: str = "AAPL", interval: str = "1d", theme: str = "dark") -> str:
+        html, n = legend_change_from_previous_close(await orig_html(symbol, interval, theme))
+        if not n and not warned:
+            warned.append(1)
+            say("[tvchart] legend code not recognised: its change still counts from the bar's open")
+        return html
+
+    tvn.tvchart_widget_html = tvchart_widget_html
+    applied.append("TradingView legend change from the previous close (was the bar's open)")
+
+
 def install_cot_canada(applied: list):
     """The curated COT universe has five currencies and not the Canadian dollar (CME contract 090741)."""
     import openbb_cftc.models.cot_index as ci
@@ -3154,6 +3255,72 @@ def install_yfinance_futures_curve_fix(applied: list):
     applied.append("Yahoo futures curves: traded months only, mid or previous close (labelled), no 0.00 or half prices")
 
 
+def yahoo_quote_record(info: dict, fields) -> dict:
+    """One Yahoo quote for openbb_yfinance's quote model: its own fields, plus a last price and a day change.
+
+    The fetcher read the last price from `currentPrice`, which Yahoo leaves out for funds: every ETF had no price and
+    so no change (EUNL.DE, SPY: Snapshot showed "Last — EUR"), and `change` / `change_percent` were never filled for
+    anything. The last price falls back to `regularMarketPrice` (the same number where both exist: SAP.DE 189.82), the
+    previous close to `regularMarketPreviousClose`, and both changes count from that one previous close, so the amount
+    and the percent always agree (EUNL.DE 2026-11-25: 122.24 - 124.565 = -2.325, -1.8665%; Yahoo -2.325, -1.8665%).
+    change_percent is a fraction, as the standard model declares it."""
+    rec = {f: info.get(f) for f in fields if f in info}
+
+    def price(*keys):
+        for k in keys:
+            v = _safe_finite_float(info.get(k))
+            if v is not None and v > 0:
+                return v
+        return None
+
+    last = price("currentPrice", "regularMarketPrice")
+    prev = price("previousClose", "regularMarketPreviousClose")
+    if last is not None:
+        rec["currentPrice"] = last
+    if prev is not None:
+        rec["previousClose"] = prev
+    if last is not None and prev is not None:
+        rec["change"] = last - prev
+        rec["change_percent"] = (last - prev) / prev
+    return rec
+
+
+def install_yfinance_quote_regular_market(applied: list):
+    """Yahoo quotes: a last price for funds and a day change for every symbol (yahoo_quote_record)."""
+    from openbb_yfinance.models import equity_quote as yq
+
+    fetcher = yq.YFinanceEquityQuoteFetcher
+    fields = ["symbol", "longName", "exchange", "quoteType", "bid", "bidSize", "ask", "askSize", "currentPrice", "open",
+              "dayHigh", "dayLow", "previousClose", "volume", "averageVolume", "averageDailyVolume10Day",
+              "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyDayAverage", "twoHundredDayAverage", "currency"]
+
+    async def aextract_data(query, credentials, **kwargs):
+        import asyncio
+        from warnings import warn
+
+        from yfinance import Ticker
+
+        symbols = [s.strip() for s in query.symbol.split(",") if s.strip()]
+        results: list = []
+
+        async def get_one(symbol):
+            try:
+                info = await asyncio.to_thread(lambda: Ticker(symbol).get_info())
+            except Exception as e:  # noqa: BLE001  (one bad symbol leaves the others, as the fetcher did)
+                warn(f"Error getting data for {symbol}: {e}")
+                return
+            rec = yahoo_quote_record(info or {}, fields)
+            if rec:
+                results.append(rec)
+
+        await asyncio.gather(*(get_one(s) for s in symbols))
+        return results
+
+    # Fetcher.__init_subclass__ copied aextract_data onto extract_data, which is what fetch_data calls: replace both
+    fetcher.aextract_data = fetcher.extract_data = staticmethod(aextract_data)
+    applied.append("Yahoo quotes: funds get their last price, every symbol its day change from the previous close")
+
+
 def sec_standalone_quarters(records: list, frames) -> list:
     """Standalone quarters from SEC year-to-date chains, grouped by the period start (one fiscal year per chain).
 
@@ -3454,320 +3621,214 @@ def write_patch_status(name: str, applied: list):
         local_paths.RUN_DIR.mkdir(parents=True, exist_ok=True)
         path = local_paths.RUN_DIR / f"patches-{name}.json"
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "applied": applied, "failed": FAILED_PATCHES}), encoding="utf-8")
+        tmp.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"), "applied": applied, "failed": FAILED_PATCHES,
+                                   "patches": PATCH_RESULTS,
+                                   "critical_failed": [r["id"] for r in PATCH_RESULTS if r["critical"] and not r["applied"]]}), encoding="utf-8")
         os.replace(tmp, path)
     except OSError as e:
         say(f"[fixes] could not write the patch status: {e}")
 
 
-def apply_fixes():
-    """Fixes found 2026-11-13..15 (stack dumps, crash logs, reviews in local/notes/). Returns the list applied."""
-    applied = []
-    try:
-        install_thread_offload(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("sync fetchers off the event loop", e)
-    try:
-        install_fetch_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("disk cache for slow sources", e)
-    try:
-        install_futures_curve_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("futures curves in their own thread", e)
-    try:
-        install_fred_keyless(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("FRED series without a key", e)
+def install_oecd_fail_fast(applied: list):
+    """OECD answers 429 when its hourly quota is used: fail fast with a plain message instead of retrying."""
+    import inspect
 
-    try:
-        import inspect
+    from openbb_oecd.utils import query_builder as qb
 
-        from openbb_oecd.utils import query_builder as qb
+    def _make_request(url, headers=None, timeout=30):
+        import requests
 
-        def _make_request(url, headers=None, timeout=30):
-            import requests
+        req = requests.Request("GET", url, headers=headers or {})
+        prepared = req.prepare()
+        prepared.url = url                      # OECD needs the brackets un-encoded
+        with requests.Session() as sess:
+            resp = sess.send(prepared, timeout=min(timeout or 30, 60))
+        if resp.status_code == 429:
+            raise _OecdRateLimited(resp.headers.get("Retry-After") or "")
+        resp.raise_for_status()
+        return resp
 
-            req = requests.Request("GET", url, headers=headers or {})
-            prepared = req.prepare()
-            prepared.url = url                      # OECD needs the brackets un-encoded
-            with requests.Session() as sess:
-                resp = sess.send(prepared, timeout=min(timeout or 30, 60))
-            if resp.status_code == 429:
-                raise _OecdRateLimited(resp.headers.get("Retry-After") or "")
-            resp.raise_for_status()
-            return resp
+    qb._make_request = _make_request
+    builder = next(v for v in vars(qb).values() if inspect.isclass(v) and hasattr(v, "_fetch_with_multi_value_fallback") and hasattr(v, "fetch_data"))
+    original = builder.fetch_data
 
-        qb._make_request = _make_request
-        builder = next(v for v in vars(qb).values() if inspect.isclass(v) and hasattr(v, "_fetch_with_multi_value_fallback") and hasattr(v, "fetch_data"))
-        original = builder.fetch_data
+    def fetch_data(self, *args, **kwargs):
+        try:
+            return original(self, *args, **kwargs)
+        except _OecdRateLimited as e:
+            wait = f" OECD asks to wait {e} seconds." if str(e).isdigit() else ""
+            raise qb.OpenBBError("OECD rate limit reached (HTTP 429). OECD allows only a limited number of requests per hour." + wait
+                                 + " Try again later, or switch source on this card.") from None
 
-        def fetch_data(self, *args, **kwargs):
-            try:
-                return original(self, *args, **kwargs)
-            except _OecdRateLimited as e:
-                wait = f" OECD asks to wait {e} seconds." if str(e).isdigit() else ""
-                raise qb.OpenBBError("OECD rate limit reached (HTTP 429). OECD allows only a limited number of requests per hour." + wait
-                                     + " Try again later, or switch source on this card.") from None
+    builder.fetch_data = fetch_data
+    applied.append("OECD fails fast on rate limit")
 
-        builder.fetch_data = fetch_data
-        applied.append("OECD fails fast on rate limit")
-    except Exception as e:  # noqa: BLE001  (the V4 package is laid out differently)
-        _not_applied("OECD fails fast on rate limit", e)
+
+def install_eia_row_cap(applied: list):
+    """EIA: cap rows unless a limit is set, retry its cold-cache 504s, at most four calls in flight."""
     # EIA (found 2026-11-14): every EIA dataset widget asks for *all* rows by default. One card could pull
     # 195,000 rows (67 MB) as 39 simultaneous page requests with a 10 s timeout each; a tab of them made EIA's API
     # time out. Unless the caller sets a limit, return the most recent rows only. EIA's gateway also answers 504
     # after 10 s on a cold query and then serves the same query quickly from its cache, so retry, and keep at most
     # four EIA calls in flight. The data browser imports paginate by name, so it is patched there too.
+    from openbb_us_eia.utils import api_query as aq
+
+    auto_rows = int(os.environ.get("OPENBB_EIA_AUTO_ROWS", "5000"))      # one page = one EIA request per card
+    page_size = aq.PAGE_SIZE
+
+    gate_box = []
+
+    async def paginate(build_url, request, limit, amake_request, amake_requests, response_callback):
+        import asyncio
+
+        from openbb_core.app.model.abstract.error import OpenBBError
+        from openbb_core.provider.utils.errors import EmptyDataError
+
+        if not gate_box:
+            gate_box.append(asyncio.Semaphore(4))
+
+        async def get(url):
+            last = None
+            for attempt in range(3):
+                try:
+                    async with gate_box[0]:
+                        return await amake_request(url, response_callback=response_callback, timeout=25)
+                except (OpenBBError, EmptyDataError):
+                    raise                       # a real API answer (bad filter, bad key): do not retry
+                except Exception as e:  # noqa: BLE001  (timeout or EIA's 504 page)
+                    last = e
+                    await asyncio.sleep(1.5 * (attempt + 1))
+            raise OpenBBError("EIA's API did not answer (timed out three times). It is usually slow on the first request for a dataset; try again in a minute.") from last
+
+        req = dict(request)
+        cap = limit
+        if limit is None:
+            cap = auto_rows
+            req["sort"] = "desc"            # newest first, so the automatic cap keeps the latest data
+        response = await get(build_url(req, offset=0, length=min(cap, page_size)))
+        payload = response.get("response", {})
+        rows = list(payload.get("data", []))
+        total = int(payload.get("total") or 0)
+        if total == 0 or not rows:
+            raise EmptyDataError(await aq.empty_result_message(request, amake_request, response_callback))
+        target = min(cap, total)
+        if len(rows) < target:
+            async def page(offset):
+                r = await get(build_url(req, offset=offset, length=min(page_size, target - offset)))
+                return r.get("response", {}).get("data", [])
+
+            for part in await asyncio.gather(*(page(o) for o in range(len(rows), target, page_size))):
+                rows.extend(part)
+        return {"rows": rows[:target], "total": total, "date_format": payload.get("dateFormat")}
+
+    aq.paginate = paginate
     try:
-        from openbb_us_eia.utils import api_query as aq
+        from openbb_us_eia.models import data_browser as _db
+        _db.paginate = paginate
+    except Exception as e:  # noqa: BLE001
+        _not_applied("EIA row cap in the EIA data browser", e)
+    applied.append(f"EIA returns the latest {auto_rows:,} rows unless a limit is set")
 
-        auto_rows = int(os.environ.get("OPENBB_EIA_AUTO_ROWS", "5000"))      # one page = one EIA request per card
-        page_size = aq.PAGE_SIZE
 
-        gate_box = []
+class Patch(NamedTuple):
+    """One runtime fix. install(applied) raises on failure (it may add plain-text lines to `applied`); critical fixes
+    keep the backend safe or responsive, and a failure is shown in red on Data status and fails the release gate.
+    targets: distribution -> version range the fix was verified against (">=2.0,<2.1"); outside it the fix is
+    reported as unverified."""
+    id: str
+    title: str
+    install: object
+    critical: bool = False
+    targets: dict = {}
 
-        async def paginate(build_url, request, limit, amake_request, amake_requests, response_callback):
-            import asyncio
 
-            from openbb_core.app.model.abstract.error import OpenBBError
-            from openbb_core.provider.utils.errors import EmptyDataError
+# distribution -> version range every fix below was verified against (V5 environment, 2026-11-24)
+VERIFIED = {
+    "openbb-core": ">=2.0,<2.1", "openbb-platform-api": ">=2.0,<2.1", "openbb-mcp-server": ">=2.0,<2.1",
+    "openbb-yfinance": ">=2.1,<2.2", "yfinance": ">=1.8,<1.9", "openbb-oecd": ">=2.0,<2.1", "openbb-us-eia": ">=2.0,<2.1",
+    "openbb-fred": ">=2.0,<2.1", "openbb-nasdaq": ">=2.0,<2.1", "openbb-cboe": ">=2.0,<2.1", "openbb-tmx": ">=2.0,<2.1",
+    "openbb-sec": ">=2.0,<2.1", "openbb-imf": ">=3.0,<3.1", "openbb-cftc": ">=2.0,<2.1", "openbb-deribit": ">=2.0,<2.1",
+    "openbb-government-us": ">=2.0,<2.1", "openbb-federal-reserve": ">=2.0,<2.1", "openbb-congress-gov": ">=2.0,<2.1",
+    "fastapi": ">=0.162,<0.163", "uvicorn": ">=0.54,<0.55", "aiohttp": ">=3.14,<3.15", "pywry": ">=2.0,<2.1",
+}
 
-            if not gate_box:
-                gate_box.append(asyncio.Semaphore(4))
 
-            async def get(url):
-                last = None
-                for attempt in range(3):
-                    try:
-                        async with gate_box[0]:
-                            return await amake_request(url, response_callback=response_callback, timeout=25)
-                    except (OpenBBError, EmptyDataError):
-                        raise                       # a real API answer (bad filter, bad key): do not retry
-                    except Exception as e:  # noqa: BLE001  (timeout or EIA's 504 page)
-                        last = e
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                raise OpenBBError("EIA's API did not answer (timed out three times). It is usually slow on the first request for a dataset; try again in a minute.") from last
+def _targets(*dists) -> dict:
+    return {d: VERIFIED[d] for d in dists}
 
-            req = dict(request)
-            cap = limit
-            if limit is None:
-                cap = auto_rows
-                req["sort"] = "desc"            # newest first, so the automatic cap keeps the latest data
-            response = await get(build_url(req, offset=0, length=min(cap, page_size)))
-            payload = response.get("response", {})
-            rows = list(payload.get("data", []))
-            total = int(payload.get("total") or 0)
-            if total == 0 or not rows:
-                raise EmptyDataError(await aq.empty_result_message(request, amake_request, response_callback))
-            target = min(cap, total)
-            if len(rows) < target:
-                async def page(offset):
-                    r = await get(build_url(req, offset=offset, length=min(page_size, target - offset)))
-                    return r.get("response", {}).get("data", [])
 
-                for part in await asyncio.gather(*(page(o) for o in range(len(rows), target, page_size))):
-                    rows.extend(part)
-            return {"rows": rows[:target], "total": total, "date_format": payload.get("dateFormat")}
+def _vtuple(v: str) -> tuple:
+    out = []
+    for part in str(v).split("."):
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        out.append(int(m.group(0)))
+    return tuple(out)
 
-        aq.paginate = paginate
+
+def version_in(ver: str, spec: str) -> bool:
+    """Is version `ver` inside a ">=a,<b" style range (also ==, <=, >)? Numeric parts only."""
+    v = _vtuple(ver)
+    for cond in [c.strip() for c in str(spec).split(",") if c.strip()]:
+        m = re.match(r"(>=|<=|==|>|<)\s*(.+)$", cond)
+        if not m:
+            return False
+        op, ref = m.group(1), _vtuple(m.group(2))
+        n = max(len(v), len(ref))
+        a, b = v + (0,) * (n - len(v)), ref + (0,) * (n - len(ref))
+        if not {">=": a >= b, "<=": a <= b, "==": a == b, ">": a > b, "<": a < b}[op]:
+            return False
+    return True
+
+
+def _dist_version(dist: str):
+    try:
+        import importlib.metadata as md
+        return md.version(dist)
+    except Exception:  # noqa: BLE001  (not installed in this environment)
+        return None
+
+
+PATCH_RESULTS: list = []
+_GUARD_PORT = ["6900"]
+
+
+def _install_guard_patch(applied: list):
+    install_guard(_GUARD_PORT[0])
+
+
+_install_guard_patch._wraps = "install_guard"
+
+
+def apply_fixes():
+    """Install every fix in PATCHES (order matters, see the registry) and record the outcome of each one in
+    PATCH_RESULTS. Returns the plain-text lines the fixes added (the same list Data status shows)."""
+    applied = []
+    PATCH_RESULTS.clear()
+    for patch in PATCHES:
+        rec = {"id": patch.id, "title": patch.title, "critical": bool(patch.critical), "applied": False, "why": "", "versions": {}}
+        unverified = []
+        for dist, spec in patch.targets.items():
+            ver = _dist_version(dist)
+            rec["versions"][dist] = ver
+            if ver and not version_in(ver, spec):
+                unverified.append(f"unverified for {dist} {ver}")
+        if unverified:
+            rec["unverified"] = "; ".join(unverified)
+        before = len(applied)
         try:
-            from openbb_us_eia.models import data_browser as _db
-            _db.paginate = paginate
+            patch.install(applied)
+            rec["applied"] = True
+            rec["detail"] = applied[before:]
         except Exception as e:  # noqa: BLE001
-            _not_applied("EIA row cap in the EIA data browser", e)
-        applied.append(f"EIA returns the latest {auto_rows:,} rows unless a limit is set")
-    except Exception as e:  # noqa: BLE001  (not installed in the V4 environment in this form)
-        _not_applied("EIA row cap and retries", e)
-    try:
-        install_imf_arcgis_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("IMF PortWatch ArcGIS error checks", e)
-    try:
-        install_tmx_filings_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX SEDAR+ filings missing description coercion", e)
-    try:
-        install_yfinance_losers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo Finance top losers filter", e)
-    try:
-        install_sec_quarters_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC company facts quarters from year-to-date chains", e)
-    try:
-        install_fx_session_closes(applied)          # before the Montreal-time patch: it reads hourly bars in UTC
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo FX daily closes", e)
-    try:
-        install_montreal_times(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Montreal time for Yahoo intraday bars and Nasdaq Nordic notices", e)
-    try:
-        install_nasdaq_etf_fallback(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq ETF fallback for quotes, profiles, history and short interest", e)
-    try:
-        install_sec_growth_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC growth units, adjacent quarters and TTM growth", e)
-    try:
-        install_yfinance_price_target_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo analyst actions order and empty price targets", e)
-    try:
-        install_yfinance_futures_curve_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo futures curve prices (one-sided quotes, untraded months)", e)
-    try:
-        install_yfinance_fund_multiples_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo fund multiples", e)
-    try:
-        install_yfinance_recommendations_months(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo recommendations readable months", e)
-    try:
-        install_tmx_holdings_currency_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX ETF holdings currency", e)
-    try:
-        install_tmx_asset_info_escape_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX Asset Info escaping", e)
-    try:
-        install_congress_search_bill_id(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Congressional search bill id", e)
-    try:
-        install_fred_bond_index_unit(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("FRED bond index unit column", e)
-    try:
-        install_tmx_quote_symbol_order(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX quote symbol order", e)
-    try:
-        install_cboe_chain_symbols(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe chain contract symbols", e)
-    try:
-        install_cboe_options_fallback(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe options analytics fallback", e)
-    try:
-        install_cboe_settlement_date(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe settlement session date", e)
-    try:
-        install_cboe_market_fallbacks(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Cboe market fallbacks", e)
-    try:
-        install_cds_spread_bp(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("CFTC CDS spread in bp", e)
-    try:
-        install_usaspending_format(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("USAspending page amounts", e)
-    try:
-        install_imf_table_scale_label(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("IMF presentation table scale label", e)
-    try:
-        install_oecd_dataflow_list(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("OECD dataflow list", e)
-    try:
-        install_cot_search_aliases(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("COT search aliases", e)
-    try:
-        install_sec_fact_any_tag(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("SEC company facts tags", e)
-    try:
-        install_deribit_funding_apr(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Deribit funding APR", e)
-    try:
-        install_deribit_book_ladder(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Deribit order book ladder", e)
-    try:
-        install_eia_aeo_identified(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("EIA AEO unnamed rows", e)
-    try:
-        install_eia_grid_hours(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("EIA grid hours", e)
-    try:
-        install_oecd_gdp_units(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("OECD GDP unit column", e)
-    try:
-        install_rescales(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("unit rescales (Nasdaq ratios, TMX short interest)", e)
-    try:
-        install_blocking_route_offload(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("blocking route event-loop offload", e)
-    try:
-        install_session_leak_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("WeakSet ClientSession cleanup", e)
-    try:
-        install_disable_mcp_subprocesses(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("disable background MCP subprocesses", e)
-    try:
-        install_yfinance_crumb_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Yahoo Finance crumb guard and 401 recovery", e)
-    try:
-        install_yfinance_options_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("YFinance options chains recovery", e)
-    try:
-        install_tmx_gainers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX gainers missing longName fix", e)
-    try:
-        install_nasdaq_empty_json_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq empty JSON recovery", e)
-    try:
-        install_nasdaq_rate_limit_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("Nasdaq rate-limit and transport guard", e)
-    try:
-        install_user_settings_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("user_settings.json mtime cache", e)
-    try:
-        install_tmx_movers_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX market movers ranking", e)
-    try:
-        install_tmx_asset_info_cache(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TMX asset info cache", e)
-    try:
-        install_tvchart_fix(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TradingView chart cache & loading indicator", e)
-    try:
-        install_fx_chart_fix(applied)          # after the chart cache, which calls the history function it replaces
-    except Exception as e:  # noqa: BLE001
-        _not_applied("TradingView FX closes", e)
-    try:
-        install_cot_canada(applied)
-    except Exception as e:  # noqa: BLE001
-        _not_applied("COT Canadian dollar", e)
+            _not_applied(patch.title, e)
+            rec["why"] = FAILED_PATCHES[-1]["why"]
+        PATCH_RESULTS.append(rec)
     say("[fixes] " + ("; ".join(applied) if applied else "none applied"))
+    bad = [r["title"] for r in PATCH_RESULTS if r["critical"] and not r["applied"]]
+    if bad:
+        say("[fixes] CRITICAL fixes not applied: " + "; ".join(bad))
     return applied
 
 
@@ -4523,7 +4584,9 @@ _NASDAQ_BLOCK_MARKERS = (
     "access denied",
     "too many requests",
 )
-NASDAQ_DEFAULT_TIMEOUT_SEC = 10.0
+NASDAQ_DEFAULT_TIMEOUT_SEC = 10.0   # also the longest wait for a request slot when the request gives no timeout
+# The gate's limits above are also declared in terminal/composite/core/http.py PROVIDERS["nasdaq"]["backend_gate"] (this
+# process cannot import terminal/); test_nasdaq_etf asserts the two copies are equal.
 
 _nasdaq_rl_lock = threading.Lock()
 _nasdaq_blocked_until = 0.0
@@ -4533,6 +4596,12 @@ _nasdaq_loop_gates: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _nasdaq_slot_lock = threading.Lock()
 _nasdaq_inflight = 0
 _nasdaq_next_at = 0.0
+_nasdaq_queue: collections.deque = collections.deque()      # tickets of requests waiting for a slot, in arrival order
+_nasdaq_last_start = 0.0                                     # when the last request actually went out
+_nasdaq_seq_next = 0                                         # start order handed out with each slot (arrival order)
+_nasdaq_turn = 0                                             # the start order whose turn it is
+_nasdaq_abandoned: set = set()                               # start orders given up before starting (skipped)
+_nasdaq_tickets = itertools.count(1)
 _nasdaq_sessions_lock = threading.Lock()
 _nasdaq_sessions: dict[int, dict] = {}
 _nasdaq_classes_cache = None
@@ -4598,28 +4667,74 @@ def _get_nasdaq_loop_gate() -> dict:
 
 
 @contextlib.asynccontextmanager
-async def _nasdaq_network_slot():
-    """Hold one of NASDAQ_MAX_CONCURRENCY process-wide slots, spaced NASDAQ_MIN_GAP_SEC apart, across all event loops."""
+async def _nasdaq_network_slot(wait_s: float | None = None):
+    """Hold one of NASDAQ_MAX_CONCURRENCY process-wide slots, spaced NASDAQ_MIN_GAP_SEC apart, across all event loops.
+
+    Slots are given in arrival order (a ticket queue: a later request never overtakes a waiting one), and the wait is
+    bounded by wait_s (default NASDAQ_DEFAULT_TIMEOUT_SEC): past it the request fails with a rate-limit message and a
+    retry hint, never a hang or a generic timeout. A cooldown that starts while waiting ends the wait at once."""
     import asyncio
 
-    global _nasdaq_inflight, _nasdaq_next_at
+    global _nasdaq_inflight, _nasdaq_next_at, _nasdaq_last_start, _nasdaq_seq_next, _nasdaq_turn
     _check_nasdaq_cooldown()
-    while True:
-        with _nasdaq_slot_lock:
-            if _nasdaq_inflight < NASDAQ_MAX_CONCURRENCY:
-                _nasdaq_inflight += 1
-                break
-        await asyncio.sleep(0.02)
-        _check_nasdaq_cooldown()
+    limit_s = float(wait_s) if wait_s and wait_s > 0 else NASDAQ_DEFAULT_TIMEOUT_SEC
+    give_up = time.monotonic() + limit_s
+    with _nasdaq_slot_lock:
+        ticket = next(_nasdaq_tickets)
+        _nasdaq_queue.append(ticket)
     try:
-        _check_nasdaq_cooldown()
+        while True:
+            with _nasdaq_slot_lock:
+                if _nasdaq_queue and _nasdaq_queue[0] == ticket and _nasdaq_inflight < NASDAQ_MAX_CONCURRENCY:
+                    _nasdaq_queue.popleft()
+                    _nasdaq_inflight += 1
+                    seq, _nasdaq_seq_next = _nasdaq_seq_next, _nasdaq_seq_next + 1
+                    now = time.monotonic()
+                    slot_at = max(now, _nasdaq_next_at)          # start times in arrival order, NASDAQ_MIN_GAP_SEC apart
+                    _nasdaq_next_at = slot_at + NASDAQ_MIN_GAP_SEC
+                    wait = slot_at - now
+                    break
+                ahead = _nasdaq_queue.index(ticket) if ticket in _nasdaq_queue else 0
+            if time.monotonic() >= give_up:
+                raise _nasdaq_error(
+                    f"Nasdaq rate limit: no request slot within {limit_s:.0f}s ({ahead} requests ahead, at most "
+                    f"{NASDAQ_MAX_CONCURRENCY} at a time). Try again shortly or switch source on this card."
+                )
+            await asyncio.sleep(0.01)
+            _check_nasdaq_cooldown()
+    except BaseException:                         # timed out, cooled down or cancelled while queued: leave the queue
         with _nasdaq_slot_lock:
-            now = time.monotonic()
-            slot_at = max(now, _nasdaq_next_at)
-            _nasdaq_next_at = slot_at + NASDAQ_MIN_GAP_SEC
-            wait = slot_at - now
-        if wait > 0:
-            await asyncio.sleep(wait)
+            with contextlib.suppress(ValueError):
+                _nasdaq_queue.remove(ticket)
+        raise
+    try:
+        started = False
+        try:
+            if wait > 0:
+                await asyncio.sleep(wait)
+            # starts go out in the same order, each at least NASDAQ_MIN_GAP_SEC after the previous one actually went out
+            # (a timer that fired early, or a neighbour that started late, never shortens the gap)
+            while True:
+                with _nasdaq_slot_lock:
+                    while _nasdaq_turn in _nasdaq_abandoned:
+                        _nasdaq_abandoned.discard(_nasdaq_turn)
+                        _nasdaq_turn += 1
+                    now = time.monotonic()
+                    # not our turn yet: at least one gap per start still ahead of us (no busy polling under load)
+                    short = (_nasdaq_last_start + NASDAQ_MIN_GAP_SEC - now if _nasdaq_turn == seq
+                             else max(0.005, (seq - _nasdaq_turn) * NASDAQ_MIN_GAP_SEC - (now - _nasdaq_last_start)))
+                    if _nasdaq_turn == seq and short <= 0:
+                        _nasdaq_last_start = now
+                        _nasdaq_turn += 1
+                        started = True
+                        break
+                await asyncio.sleep(max(0.002, short))
+        except BaseException:
+            if not started:
+                with _nasdaq_slot_lock:
+                    if seq >= _nasdaq_turn:
+                        _nasdaq_abandoned.add(seq)       # cancelled before its turn: the ones behind it are not held up
+            raise
         _check_nasdaq_cooldown()
         yield
     finally:
@@ -4828,7 +4943,8 @@ def _get_nasdaq_session_classes():
             t = kwargs.get("timeout")
             if isinstance(t, (int, float)) and not isinstance(t, bool):
                 kwargs["timeout"] = aiohttp.ClientTimeout(total=float(t))
-            async with _nasdaq_network_slot():
+            total = getattr(kwargs.get("timeout"), "total", None) or getattr(self.timeout, "total", None)
+            async with _nasdaq_network_slot(total):      # the slot wait is bounded by the request's own timeout
                 return await super()._request(method, str_or_url, *args, **kwargs)
 
     try:
@@ -4984,13 +5100,19 @@ async def close_nasdaq_sessions(loop=None) -> None:
 
 
 def reset_nasdaq_rate_limit_state() -> None:
-    global _nasdaq_blocked_until, _nasdaq_blocked_reason, _nasdaq_inflight, _nasdaq_next_at
+    global _nasdaq_blocked_until, _nasdaq_blocked_reason, _nasdaq_inflight, _nasdaq_next_at, _nasdaq_last_start
+    global _nasdaq_seq_next, _nasdaq_turn
     with _nasdaq_rl_lock:
         _nasdaq_blocked_until = 0.0
         _nasdaq_blocked_reason = ""
     with _nasdaq_slot_lock:
         _nasdaq_inflight = 0
         _nasdaq_next_at = 0.0
+        _nasdaq_last_start = 0.0
+        _nasdaq_seq_next = 0
+        _nasdaq_turn = 0
+        _nasdaq_abandoned.clear()
+        _nasdaq_queue.clear()
     _nasdaq_loop_gates.clear()
     with _nasdaq_sessions_lock:
         entries = list(_nasdaq_sessions.values())
@@ -5690,6 +5812,67 @@ def install_guard(port: str):
     uc.Config.load = load
 
 
+# Every runtime fix, in the order it is installed (the order matters where noted on the installer).
+PATCHES = [
+    Patch("thread_offload", "sync fetchers off the event loop", install_thread_offload, critical=True, targets=_targets("openbb-core")),
+    Patch("fetch_cache", "disk cache for slow sources", install_fetch_cache, critical=True, targets=_targets("openbb-core")),
+    Patch("futures_curve_fix", "futures curves in their own thread", install_futures_curve_fix, targets=_targets("openbb-yfinance")),
+    Patch("fred_keyless", "FRED series without a key", install_fred_keyless, targets=_targets("openbb-fred")),
+    Patch("oecd_fail_fast", "OECD fails fast on rate limit", install_oecd_fail_fast, targets=_targets("openbb-oecd")),
+    Patch("eia_row_cap", "EIA row cap and retries", install_eia_row_cap, targets=_targets("openbb-us-eia")),
+    Patch("imf_arcgis_fix", "IMF PortWatch ArcGIS error checks", install_imf_arcgis_fix, targets=_targets("openbb-imf")),
+    Patch("tmx_filings_fix", "TMX SEDAR+ filings missing description coercion", install_tmx_filings_fix, targets=_targets("openbb-tmx")),
+    Patch("yfinance_losers_fix", "Yahoo Finance top losers filter", install_yfinance_losers_fix, targets=_targets("openbb-yfinance")),
+    Patch("sec_quarters_fix", "SEC company facts quarters from year-to-date chains", install_sec_quarters_fix, targets=_targets("openbb-sec")),
+    Patch("fx_session_closes", "Yahoo FX daily closes", install_fx_session_closes, targets=_targets("openbb-yfinance")),
+    Patch("montreal_times", "Montreal time for Yahoo intraday bars and Nasdaq Nordic notices", install_montreal_times, targets=_targets("openbb-yfinance", "openbb-nasdaq")),
+    Patch("nasdaq_etf_fallback", "Nasdaq ETF fallback for quotes, profiles, history and short interest", install_nasdaq_etf_fallback, targets=_targets("openbb-nasdaq")),
+    Patch("sec_growth_fix", "SEC growth units, adjacent quarters and TTM growth", install_sec_growth_fix, targets=_targets("openbb-sec")),
+    Patch("yfinance_price_target_fix", "Yahoo analyst actions order and empty price targets", install_yfinance_price_target_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_futures_curve_fix", "Yahoo futures curve prices (one-sided quotes, untraded months)", install_yfinance_futures_curve_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_quote_regular_market", "Yahoo quote last price for funds and day change", install_yfinance_quote_regular_market, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_fund_multiples_fix", "Yahoo fund multiples", install_yfinance_fund_multiples_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_recommendations_months", "Yahoo recommendations readable months", install_yfinance_recommendations_months, targets=_targets("openbb-yfinance")),
+    Patch("tmx_holdings_currency_fix", "TMX ETF holdings currency", install_tmx_holdings_currency_fix, targets=_targets("openbb-tmx")),
+    Patch("tmx_asset_info_escape_fix", "TMX Asset Info escaping", install_tmx_asset_info_escape_fix, targets=_targets("openbb-tmx")),
+    Patch("congress_search_bill_id", "Congressional search bill id", install_congress_search_bill_id, targets=_targets("openbb-congress-gov")),
+    Patch("fred_bond_index_unit", "FRED bond index unit column", install_fred_bond_index_unit, targets=_targets("openbb-fred")),
+    Patch("tmx_quote_symbol_order", "TMX quote symbol order", install_tmx_quote_symbol_order, targets=_targets("openbb-tmx")),
+    Patch("cboe_chain_symbols", "Cboe chain contract symbols", install_cboe_chain_symbols, targets=_targets("openbb-cboe")),
+    Patch("cboe_options_fallback", "Cboe options analytics fallback", install_cboe_options_fallback, targets=_targets("openbb-cboe")),
+    Patch("cboe_settlement_date", "Cboe settlement session date", install_cboe_settlement_date, targets=_targets("openbb-cboe")),
+    Patch("cboe_market_fallbacks", "Cboe market fallbacks", install_cboe_market_fallbacks, targets=_targets("openbb-cboe")),
+    Patch("cds_spread_bp", "CFTC CDS spread in bp", install_cds_spread_bp, targets=_targets("openbb-cftc")),
+    Patch("usaspending_format", "USAspending page amounts", install_usaspending_format, targets=_targets("openbb-government-us")),
+    Patch("imf_table_scale_label", "IMF presentation table scale label", install_imf_table_scale_label, targets=_targets("openbb-imf")),
+    Patch("oecd_dataflow_list", "OECD dataflow list", install_oecd_dataflow_list, targets=_targets("openbb-oecd")),
+    Patch("cot_search_aliases", "COT search aliases", install_cot_search_aliases, targets=_targets("openbb-cftc")),
+    Patch("sec_fact_any_tag", "SEC company facts tags", install_sec_fact_any_tag, targets=_targets("openbb-sec")),
+    Patch("deribit_funding_apr", "Deribit funding APR", install_deribit_funding_apr, targets=_targets("openbb-deribit")),
+    Patch("deribit_book_ladder", "Deribit order book ladder", install_deribit_book_ladder, targets=_targets("openbb-deribit")),
+    Patch("eia_aeo_identified", "EIA AEO unnamed rows", install_eia_aeo_identified, targets=_targets("openbb-us-eia")),
+    Patch("eia_grid_hours", "EIA grid hours", install_eia_grid_hours, targets=_targets("openbb-us-eia")),
+    Patch("oecd_gdp_units", "OECD GDP unit column", install_oecd_gdp_units, targets=_targets("openbb-oecd")),
+    Patch("rescales", "unit rescales (Nasdaq ratios, TMX short interest)", install_rescales, targets=_targets("openbb-nasdaq", "openbb-tmx")),
+    Patch("blocking_route_offload", "blocking route event-loop offload", install_blocking_route_offload, critical=True, targets=_targets("fastapi", "openbb-platform-api")),
+    Patch("session_leak_fix", "WeakSet ClientSession cleanup", install_session_leak_fix, targets=_targets("aiohttp")),
+    Patch("disable_mcp_subprocesses", "disable background MCP subprocesses", install_disable_mcp_subprocesses, targets=_targets("openbb-mcp-server")),
+    Patch("yfinance_crumb_fix", "Yahoo Finance crumb guard and 401 recovery", install_yfinance_crumb_fix, critical=True, targets=_targets("yfinance", "openbb-yfinance")),
+    Patch("yfinance_options_fix", "YFinance options chains recovery", install_yfinance_options_fix, targets=_targets("yfinance", "openbb-yfinance")),
+    Patch("tmx_gainers_fix", "TMX gainers missing longName fix", install_tmx_gainers_fix, targets=_targets("openbb-tmx")),
+    Patch("nasdaq_empty_json_fix", "Nasdaq empty JSON recovery", install_nasdaq_empty_json_fix, targets=_targets("openbb-nasdaq")),
+    Patch("nasdaq_rate_limit_fix", "Nasdaq rate-limit and transport guard", install_nasdaq_rate_limit_fix, critical=True, targets=_targets("openbb-nasdaq")),
+    Patch("user_settings_cache", "user_settings.json mtime cache", install_user_settings_cache, targets=_targets("openbb-core")),
+    Patch("tmx_movers_fix", "TMX market movers ranking", install_tmx_movers_fix, targets=_targets("openbb-tmx")),
+    Patch("tmx_asset_info_cache", "TMX asset info cache", install_tmx_asset_info_cache, targets=_targets("openbb-tmx")),
+    Patch("tvchart_fix", "TradingView chart cache & loading indicator", install_tvchart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
+    Patch("fx_chart_fix", "TradingView FX closes", install_fx_chart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
+    Patch("tv_legend_change", "TradingView legend change from the previous close", install_tv_legend_change, targets=_targets("openbb-yfinance", "pywry")),
+    Patch("cot_canada", "COT Canadian dollar", install_cot_canada, targets=_targets("openbb-cftc")),
+    Patch("guard", "request guard (Host and Origin checks, redacted errors)", _install_guard_patch, critical=True, targets=_targets("uvicorn")),
+]
+
+
 def main():
     name = sys.argv[1] if len(sys.argv) > 1 else "backend"
     args = sys.argv[2:]
@@ -5698,9 +5881,9 @@ def main():
         faulthandler.enable(file=sys.__stderr__)
     except Exception:  # noqa: BLE001  (no console stream: the watchdog's dumps still work)
         pass
-    write_patch_status(name, apply_fixes())
     port = _arg(args, "--port", "6900")
-    install_guard(port)
+    _GUARD_PORT[0] = port
+    write_patch_status(name, apply_fixes())
     threading.Thread(target=watchdog, args=(name, _arg(args, "--host", "127.0.0.1"), port), daemon=True, name="freeze-watchdog").start()
     sys.argv = ["openbb-api", *args]
     from openbb_platform_api.main import main as openbb_main

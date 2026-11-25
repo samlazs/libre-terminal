@@ -228,6 +228,33 @@ def create_snapshot(
     return {"created": True, "path": dst, "files": len(rels), "bytes": dst.stat().st_size}
 
 
+RELEASE_BUILD_FILE = "BUILD-INFO.json"      # inside the zip's top folder: what the zip was built from (gate G5 reads it)
+
+
+def build_info(root: Path, rels: list) -> dict:
+    """The version and git commit a release zip is built from, and the packed files that differ from that commit
+    (the zip is built from the working folder, so a dirty tree is not the commit; None when git cannot tell).
+    A packed file is the commit's only when git tracks it and it does not differ from HEAD: an ignored or untracked file
+    the folder walk packed is not. -z lists paths as UTF-8, unquoted (a non-ASCII name is not "\\303\\251" octal)."""
+    def git(*args):
+        try:
+            r = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+            return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+    sha = (git("rev-parse", "HEAD") or "").strip() or "unknown"
+    changed = git("diff", "-z", "--name-only", "--no-renames", "HEAD")
+    tracked = git("ls-files", "-z")
+    packed = {r.as_posix() for r in rels}
+    if changed is None or tracked is None or sha == "unknown":
+        dirty = None
+    else:
+        changed_set, tracked_set = set(changed.split("\0")) - {""}, set(tracked.split("\0")) - {""}
+        dirty = sorted(p for p in packed if p in changed_set or p not in tracked_set)
+    return {"version": VERSION, "commit": sha, "uncommitted_files": dirty,
+            "built": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+
+
 def create_release_zip(root: Path = ROOT, dst: Path | None = None) -> dict:
     """Package a clean, Windows-focused distribution zip wrapped in Libre-Terminal/."""
     dst = dst or (local_paths.LOCAL / "releases" / RELEASE_ZIP_NAME)
@@ -240,9 +267,11 @@ def create_release_zip(root: Path = ROOT, dst: Path | None = None) -> dict:
     ]
     tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
     readme_bytes = WINDOWS_README_TEXT.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8")
+    info = build_info(root, rels)
     try:
         with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"{RELEASE_ZIP_TOP_DIR}/READ-ME-FIRST.txt", readme_bytes)
+            zf.writestr(f"{RELEASE_ZIP_TOP_DIR}/{RELEASE_BUILD_FILE}", json.dumps(info, indent=2) + "\n")
             for rel in rels:
                 zf.write(root / rel, f"{RELEASE_ZIP_TOP_DIR}/{rel.as_posix()}")
         os.replace(tmp, dst)
@@ -253,7 +282,7 @@ def create_release_zip(root: Path = ROOT, dst: Path | None = None) -> dict:
             except OSError:
                 pass
     sha256 = hashlib.sha256(dst.read_bytes()).hexdigest()
-    return {"path": dst, "files": len(rels) + 1, "bytes": dst.stat().st_size, "sha256": sha256}
+    return {"path": dst, "files": len(rels) + 2, "bytes": dst.stat().st_size, "sha256": sha256, "build": info}
 
 
 def _matches_filter(rel_str: str, filters: list[str] | None) -> bool:
@@ -563,6 +592,9 @@ def main(argv=None) -> int:
     if a.cmd == "release-zip":
         res = create_release_zip(ROOT, Path(a.output) if a.output else None)
         print(f"Release zip created: {res['path']} ({res['files']} files, {res['bytes']:,} bytes, sha256={res['sha256']})")
+        b = res["build"]
+        print(f"  built from version {b['version']}, commit {b['commit'][:12]}"
+              + (f"; NOT the commit: {len(b['uncommitted_files'])} packed file(s) differ from it" if b["uncommitted_files"] else ""))
         return 0
     if a.cmd == "check":
         ok, results = run_checks(ROOT, live_sources=a.live_sources)

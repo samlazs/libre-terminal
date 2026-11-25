@@ -135,6 +135,9 @@ try:
     composite.api = _flaky_sec
     composite._cache.pop(("news_8k", "TESTSEC"), None)
     check(news._sec_8k("TESTSEC") == [], "_sec_8k returns [] on transient failure")
+    check(news._sec_8k("TESTSEC") == [] and _sec_calls[0] == 1, "within the 10 s negative-cache window the source is not asked again")
+    with composite._guard:                                  # the window lapses (10 s later)
+        composite._neg.clear()
     check(len(news._sec_8k("TESTSEC")) == 1, "_sec_8k retries on next call instead of caching [] after transient error")
 
     def _perm_sec(*a, **kw):
@@ -153,6 +156,9 @@ try:
     composite.api = _flaky_tmx
     composite._cache.pop(("news_tmx", "TESTTMX"), None)
     check(news._tmx_releases("TESTTMX") == [], "_tmx_releases returns [] on transient failure")
+    check(news._tmx_releases("TESTTMX") == [] and _tmx_calls[0] == 1, "within the 10 s negative-cache window TMX is not asked again")
+    with composite._guard:                                  # the window lapses (10 s later)
+        composite._neg.clear()
     check(len(news._tmx_releases("TESTTMX")) == 1, "_tmx_releases retries on next call after transient error")
 
     def _perm_tmx(*a, **kw):

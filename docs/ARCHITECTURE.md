@@ -34,6 +34,8 @@ scripts/check_sources.py     source-contract check (--offline or live; checks bu
 scripts/project_check.py     publishable snapshots, snapshot diffs, and encoding/lint/hygiene checks
 scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
+scripts/gate.py              release gate G1-G5 (launcher.py gate) -> local/notes/gates-YYYY-MM-DD.json
+scripts/probe.py             stdlib live probe of a running terminal: status counts, p50/p95 latency, envelope checks per view
 scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
 terminal/server.py           UI server: static page, dashboards, saved state, service status and restart, /x/* views (see UI server)
 terminal/version.py          release version constant (VERSION) shared by server.py, /api/config and project_check.py
@@ -58,9 +60,11 @@ terminal/option_math.py      implied volatility and Greeks for substitute option
 terminal/redact.py           strips key material from logs and error text
 terminal/local_paths.py      where local/ is and what goes in it (the only place those paths are defined)
 terminal/health.json         data functions broken upstream (shown in Data Explorers > Data status)
-terminal/static/             app.js (layout, state, routing, startup), widgets.js (cards, errors, sources),
-                             table.js, statements.js (financial statements), grid.js, controls.js, md.js,
-                             securities.js (search), app.css
+terminal/static/             request.js (T.request: the only fetch() caller, bounded waits; T.httpError and
+                             T.renderError: one error renderer keyed on error.kind; T.asOfText), app.js (layout,
+                             state, routing, startup), widgets.js (cards, errors, sources; every card footer shows
+                             sources, data as-of, status and notes from the envelope), table.js, statements.js
+                             (financial statements), grid.js, controls.js, md.js, securities.js (search), app.css
 config/                      key template, lock files (requirements-v5/v4), MCP example
 ruff.toml                    static bug-check configuration for terminal/ and scripts/
 ```
@@ -106,7 +110,33 @@ Every `/x/*` answer carries `sources: [{name, detail, url}]` (`composite.src`, `
 menu to switch source and links to the originals; chart footers, PNG and CSV exports carry the same source
 line. `scripts/check_sources.py` checks this live; `scripts/tests/test_sources.py` offline.
 
+The whole envelope is defined and checked in `terminal/composite/core/contract.py`:
+
+- **Success:** the view's payload plus `sources` (non-empty), `as_of` (ISO date or datetime of the newest data
+  point) or `as_of_na` (why there is none), `status` (`ok`, `partial`, `stale` or `fallback`) and `notes` (plain
+  text: stale, cached, delayed). `dispatch` derives `as_of` from the answer's own `as_of`, its row dates or its chart's
+  x values, and validates the result: a violation raises when `TERMINAL_STRICT_CONTRACT=1` (every offline test) and
+  is logged once per view otherwise.
+- **Error (every non-2xx, `/x/*` and `/api/*`):** `{error: {kind, message, retryable, retry_after?}, detail,
+  sources}`; `detail` repeats the message for older pages. Kinds: `input`, `not_covered`, `upstream`,
+  `rate_limited`, `timeout`, `unavailable`, `internal`. `server._json` adds the object to any error body built
+  elsewhere, from the status code.
+- **Kinds are set once:** the HTTP layer tags 429 `rate_limited` (with `retry_after` from Retry-After), timeouts
+  `timeout`, 5xx/refused/non-JSON `upstream`, 404 `not_covered`; `contract.kind_of` reads an untyped view error once.
+  The `/x/*` status follows the kind (400, 404, 429, 502, 503, 504, 500). The page renders from `error.kind`
+  (`T.classifyKind`, text passed through `T.cleanMessage`); `T.classifyError` regexes remain only for raw `/api/v1`
+  backend answers. `test_errors.py` holds the fault-kind to error-kind table.
+- **Parameters** are checked against the view's signature (a lazy wrapper's `_target`) before the call: an unknown
+  or missing parameter is 400 `input`, an unknown view 404; a TypeError inside a view is a defect (500 with a ref).
+- `scripts/tests/test_contract.py` runs every route under success, CompositeError and a defect through the real
+  handler, and every `/api/*` write route under malformed, oversize and cross-origin requests.
+
 ## UI server (`terminal/server.py`)
+
+Admission control: at most 24 views (`/x/*`, `TERMINAL_X_SLOTS`) run at once; a request that waits more than 5 s
+for a slot answers 503 (`unavailable`, `retry_after` 5, `Retry-After` header). The page, static files, state,
+config and service status never wait for a slot. HEAD on `/x/*` answers 405 without running the view.
+`/api/services` reports `ui_threads` and the free view slots.
 
 Standard library only. It serves the page and its static files, the built dashboards and saved state. It never proxies market data: the browser calls the two backends directly.
 
@@ -168,6 +198,14 @@ nothing covers it the card says so and names what each source covers.
 
 ## Runtime patches (`scripts/run_backend.py`)
 
+Every fix is one entry of the `PATCHES` registry: `Patch(id, title, install, critical, targets)`. `apply_fixes`
+installs them in registry order and records each outcome; `patches-<name>.json` (local/run/) lists id, title,
+applied, why, critical, the installed versions of the target packages and, when a version is outside the range in
+`VERIFIED`, `unverified for <pkg> <ver>`. Critical fixes (thread offload, fetch cache, route offload, Yahoo crumb
+guard, Nasdaq rate limit, request guard) that fail turn Data status red with a banner and fail `launcher.py gate`
+G2. `test_patch_registry.py` checks unique ids, that every `install_*` function is registered once, and that all
+patches apply on the installed `.venv-v5`.
+
 Applied in memory at start; no installed file is modified.
 
 - Synchronous fetchers run in worker threads, so one slow source cannot freeze the event loop.
@@ -175,6 +213,11 @@ Applied in memory at start; no installed file is modified.
   New York from hourly bars (last 2 years), older days on the next bar's open, days before 2010-08-04 on Yahoo's own
   close, which was real then (`fx_daily_bars`, `test_fx.py`). The TradingView datafeed is routed through the same
   bars, and its header counts from the previous of those closes (`install_fx_chart_fix`).
+- A day's change counts from the previous close wherever it is shown. The TradingView legend printed close - open of
+  the bar; its three sites now count from the previous bar's close (`install_tv_legend_change`, `test_day_change.py`,
+  browser half `test_legend_change.py`). Yahoo quotes give funds a last price (Yahoo has no `currentPrice` for an
+  ETF, so Snapshot showed none) and every symbol a change and a change percent from one previous close
+  (`install_yfinance_quote_regular_market`).
 - Output streams are guarded (no "I/O operation on closed file" crash), and log records are redacted.
 - **Disk cache for slow providers** (`CACHE_POLICY`, the only persistent cache policy; files in `local/cache/backend/`).
   Time to live: 3 h for FiscalData, CFTC, the Federal Reserve and FRED; 6 h for EIA, BLS and ECB; 12 h for USDA, IMF,
@@ -234,7 +277,50 @@ python scripts/launcher.py logs [ui|v5|v4] [--errors]  # tail logs, freeze dumps
 python scripts/launcher.py smoke                       # live data checks against the running backends
 python scripts/launcher.py health --dry-run            # paced card health runner (add --phase/--filter/--limit/--resume)
 python scripts/check_sources.py [--offline]            # source-contract check (live or against recorded catalogs)
+python scripts/probe.py --view snapshot --inputs symbol=AAPL symbol=SAP.DE --concurrent 8 --assert-envelope
+python scripts/launcher.py gate [--only G1,G4] [--offline]  # release gate G1-G5; exit 0 only when no gate failed
+python scripts/probe.py --all-routes --defaults        # every /x/ view in /widgets.json with its default parameters
+python scripts/probe.py --backend v5 --url /PATH       # raw /api/v1 calls: status counts and latency per URL
 ```
+
+All outbound HTTP goes through `composite.core.http.fetch(url, provider=..., parse="json"|"text"|"bytes")`
+(`http_json` and `_download` are thin wrappers; `fred_public`, `multpl`, `banks` and `news` call it too). Its
+`PROVIDERS` table sets per provider the timeout per attempt, attempts, statuses worth a retry, concurrency cap,
+pacing (`min_interval`, Google News 2.5 s), the cooldown after a 429 (Retry-After wins, capped at 600 s; calls during
+it fail at once with `rate_limited` and send nothing; the backend cools down per upstream `provider=`, unknown hosts
+per host), an outage gate (`down_for`, FRED 120 s) and the User-Agent. OECD and Nasdaq are never retried.
+`reset_runtime_caches` (service restart) also clears cooldowns.
+
+In-memory caches stamp entries with `time.monotonic()` (wall time only for disk records and shown ages; `_mono`
+converts a disk stamp). Process-lifetime maps (`_backoff`, `_STALE_SINCE`, `_HIST_REVALIDATING`, the news feed maps,
+the negative cache) are `LRUDict`/`LRUSet` capped at 2,000 entries. `cached()` remembers a failed fetch for 10 s (a
+rate limit: its retry_after), so callers queued on a failing key get the same typed error without another upstream
+call. `launcher.py gate` G2 ends with a 30-minute probe soak that must grow the UI process by less than 50 MB.
+
+Completeness: `cache(key, ttl, fn, disk=False, partial_ttl=None)` is the one caching primitive (memory, or memory ->
+`local/cache/<name>.json` -> fetch with the saved copy served when the fetch fails). A fn that lost one of its sources
+returns `Partial(value, missing=[...])`, or calls `partial_from(e, "what")` where it carries on without that part (a
+source with nothing for the input, `not_covered`/`input`, is a complete answer). A Partial is never written to disk, is
+held 60 s, and the view answers `status: "partial"` with a note naming what is missing; a cache whose fn used a partial
+answer is partial itself. `_safe` catches `CompositeError` only. `test_cache_lint` fails on any new
+`except CompositeError` that turns a failure into `[]`/`{}`/`None` silently.
+Substitutions say so the same way: `note_fallback(source, reason)` where a substitute is used (FRED's public download
+for the data service, FRED's curve for the U.S. Treasury curve, the last close for a chain without a spot). The view then
+answers `status: "fallback"` with the note. What an answer was built from (missing parts, substitutes, saved copies served
+because a source failed) travels with it into every cache that holds it, so a cache hit says what the first answer said.
+
+Time budgets: `core/contract.py` `ROUTE_BUDGETS` is the one table of how long a route may take on the server (per `/x/`
+view, per directly called backend route pattern, a default). `/api/config` serves it as `budgets` and the page's
+`T.requestTimeout` reads it, so the browser always waits 5 s longer than the server. `dispatch` starts a deadline for the
+view; `fetch()` cuts every outbound call to the time left (minus 1 s to answer) and refuses to start one when none is left,
+so a slow source makes the answer partial instead of the card timing out. The backend's slow-source waits
+(`CACHE_POLICY` "answer within") are all bounded and never longer than the slowest route budget (65 s).
+
+Shared fixtures and fault injection live in `scripts/tests/_fixtures.py`: `fault(kind)` for timeout, refused,
+http429(retry_after), http5xx, http404, empty_body, html_body, nan_values and partial; `serve({url_regex: payload})`
+for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts/tests/fixtures/`. They replace the
+single outbound seam `composite._transport` (used by `http_json` and `_download`), so a test needs no knowledge of a
+module's internals. `http_json` turns NaN/Infinity into None and a non-JSON body into a transient `CompositeError`.
 
 A full `test` run reports **4,729 checks across 43 test files**, all passing. `test_frontend.py` contributes 315 browser checks.
 The browser checks are skipped with a notice when no headless Edge or Chrome is installed.
@@ -252,6 +338,15 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_valuation.py`, `test_risk.py`, `test_bond_math.py`, `test_etf_options.py` | Valuation bands, ROIC/DuPont, risk statistics, bond math, N-PORT overlap, GEX, Max Pain, volatility cone |
 | `test_redact.py`, `test_backend_wrapper.py` | Key redaction, backend guard and sanitized 500s, TradingView bar repair, NaN/Inf scrubbing |
 | `test_launcher_server.py` | Restart policy, stop scope, V5-only default and CLI flags, UI server Host/Origin/state rules, corrupt-state recovery, ETags, CSP, key application, port guards |
+| `test_contract.py` | Response envelope for every route (success, CompositeError, defect), parameter checks, one error object on `/api/*` |
+| `test_errors.py` | Fault kind to error kind table (HTTP layer and real server), Retry-After, server-side classification |
+| `test_http.py` | Outbound client: provider policies, 429 cooldown without I/O, Retry-After cap, concurrency peak, pacing, outage gate |
+| `test_patch_registry.py` | Backend patch registry: unique ids, every installer registered, version ranges, status records, critical banner |
+| `test_admission.py` | 24 view slots, 503 after the wait, state/page never blocked, HEAD never runs a view, slots released after defects |
+| `test_cache.py` | 2,000-entry caps, monotonic TTLs, negative cache (20 concurrent callers -> 1 upstream call) |
+| `test_state.py` | Saved state under write faults: ENOSPC while writing, replace held 5 times, backup write failing -> 503, file unchanged, no temp |
+| `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
+| `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
 | `test_frontend.py` | Runs `frontend_checks.js` (315 browser checks) headless against a temporary UI server |
 

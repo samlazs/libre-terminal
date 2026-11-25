@@ -423,6 +423,112 @@ window.__fcPromise = (async function (T) {
   hHost.querySelector("td.click").click();
   ok(hActions.length === 1 && hActions[0][0] === "document_url" && /primary_doc\.xml$/.test(hActions[0][1]), "transposed Filing Headers click fires document_url");
 
+  // P4-04: /x/ errors render from error.kind; under the whole fault matrix no card text shows a URL, a traceback,
+  // "Error:" or a Python exception name.
+  (function () {
+    var FORBID = /Traceback|Error:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception)\b/;
+    var MSGS = [
+      "OpenBB V5 backend is not reachable (<urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>).",
+      "OpenBB V5 backend did not answer in time.", "HTTP 503 from http://127.0.0.1:6900/api/v1/equity/price/quote",
+      "Too many requests", "not found", "OpenBB V5 backend answered with an HTML page instead of data.",
+      "Traceback (most recent call last):\n  File \"x.py\", line 1\nKeyError: 'close'", "ValueError: could not convert string to float: 'n/a'",
+      "Internal error in the terminal (ref a1b2c3; details in local/logs/ui.log).", "SHEL.L was not found in the Cboe options directory (see https://www.cboe.com/).",
+      "Click a bond's CUSIP in the table or the curve above (or type a CUSIP in the settings)."];
+    var KINDS = ["input", "not_covered", "upstream", "rate_limited", "timeout", "unavailable", "internal"];
+    var seen = 0;
+    KINDS.forEach(function (k) {
+      MSGS.forEach(function (m) {
+        [true, false].forEach(function (um) {
+          var c = T.classifyKind(k, m, { source: "Yahoo Finance", symbol: "SAP.DE", userMessage: um }, { retryAfter: 30 });
+          var shown = (c.text || "") + " " + (c.hint || "");
+          ok(c.text && !FORBID.test(shown), "kind " + k + " never shows technical text: " + shown.slice(0, 120));
+          seen++;
+        });
+      });
+    });
+    ok(seen === KINDS.length * MSGS.length * 2, "fault matrix covered (" + seen + ")");
+    ok(T.classifyKind("rate_limited", "Too many requests", { source: "Nasdaq" }, { retryAfter: 30 }).hint === "Try again in about 30 seconds (press ↻).", "Retry-After 30 s reaches the hint");
+    ok(/about 3 minutes/.test(T.classifyKind("rate_limited", "x", { source: "Nasdaq" }, { retryAfter: 150 }).hint), "Retry-After 150 s -> about 3 minutes");
+    ok(/about 10 minutes/.test(T.classifyKind("rate_limited", "OECD limit", { source: "OECD" }, {}).hint), "no Retry-After from OECD -> 10 minutes");
+    var ic = T.classifyKind("internal", MSGS[8], {}, {});
+    ok(ic.cls === "bug" && ic.kind === "err" && ic.ref === "a1b2c3" && /ref a1b2c3/.test(ic.text), "internal keeps the server's ref");
+    var inp = T.classifyKind("input", MSGS[10], { userMessage: true }, {});
+    ok(inp.cls === "input" && inp.text === MSGS[10], "input shows the view's prompt as written");
+    var nc = T.classifyKind("not_covered", MSGS[9], { source: "Cboe", symbol: "SHEL.L" }, {});
+    ok(nc.cls === "covered" && nc.text === "SHEL.L was not found in the Cboe options directory.", "not covered keeps the message, drops the URL");
+    var up = T.classifyKind("upstream", MSGS[0], { source: "Yahoo Finance", userMessage: true }, {});
+    ok(up.cls === "upstream" && up.text === "Yahoo Finance is not answering properly right now.", "an unreachable source gets the plain upstream text");
+    var own = T.classifyKind("upstream", "Yahoo Finance has no bid/ask quotes for SPX right now, so strategies cannot be priced.", { source: "Cboe", userMessage: true }, {});
+    ok(own.cls === "message" && /no bid\/ask quotes/.test(own.text), "a view's own clean explanation is shown as is");
+    ok(T.classifyKind("timeout", "V5 is slow to answer the first request for this dataset. It keeps loading in the background", {}, {}).cls === "slow", "slow first request keeps its auto-retry class");
+    ok(T.cleanMessage("Traceback (most recent call last)") === null && T.cleanMessage("x (HTTPError 503)") === "x", "cleanMessage drops technical tails or refuses");
+  })();
+
+  // P4-06: one error renderer for every card type, fed the server's own error envelopes for each fault kind
+  (function () {
+    var FORBID = /Traceback|Error:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception)\b/;
+    var src = [{ name: "Yahoo Finance", detail: "quotes", url: "https://finance.yahoo.com/" }];
+    function env(kind, msg, status, extra) {
+      return [status, JSON.stringify(Object.assign({ error: { kind: kind, message: msg, retryable: kind !== "input" && kind !== "not_covered" && kind !== "internal" }, detail: msg, sources: src, user_message: true }, extra || {}))];
+    }
+    var FAULTS = {
+      timeout: env("timeout", "OpenBB V5 backend did not answer in time.", 504),
+      refused: env("upstream", "OpenBB V5 backend is not reachable (<urlopen error [WinError 10061] No connection could be made>).", 502),
+      http429: env("rate_limited", "Too many requests", 429, { error: { kind: "rate_limited", message: "Too many requests", retryable: true, retry_after: 30 } }),
+      http5xx: env("upstream", "HTTP 503 from http://127.0.0.1:6900/api/v1/equity/price/quote", 502),
+      http404: env("not_covered", "Yahoo Finance has nothing for 'ZZZZQ9'. Check the ticker.", 404),
+      html_body: env("upstream", "OpenBB V5 backend answered with an HTML page instead of data.", 502),
+      internal: env("internal", "Internal error in the terminal (ref q1w2e3; details in local/logs/ui.log).", 500),
+      raw_html: [502, "<!DOCTYPE html><html><body>Bad Gateway</body></html>"]
+    };
+    var TYPES = ["chart", "table", "news", "frame", "statements"], drawn = 0;
+    TYPES.forEach(function (ty) {
+      Object.keys(FAULTS).forEach(function (fk) {
+        var err = T.httpError(FAULTS[fk][0], FAULTS[fk][1]);
+        var box = document.createElement("div");
+        var c = T.renderError(box, err, { source: "Yahoo Finance", symbol: "SAP.DE", userMessage: err.userMessage, cardType: ty });
+        ok(box.textContent && !FORBID.test(box.textContent), ty + "/" + fk + ": no raw text in the card (" + box.textContent.slice(0, 100) + ")");
+        if (fk !== "raw_html") ok(box.firstChild.getAttribute("data-error-kind") === JSON.parse(FAULTS[fk][1]).error.kind, ty + "/" + fk + ": drawn by error.kind");
+        ok(c && c.text, ty + "/" + fk + ": classification returned");
+        drawn++;
+      });
+    });
+    ok(drawn === TYPES.length * Object.keys(FAULTS).length, "every card type x fault kind drawn (" + drawn + ")");
+    var e429 = T.httpError(429, FAULTS.http429[1]);
+    ok(e429.errorKind === "rate_limited" && e429.retryAfter === 30 && e429.sources.length === 1 && e429.userMessage, "httpError reads kind, retry_after, sources");
+    ok(T.httpError(502, "<html>").rawBackend === true && !T.httpError(502, "<html>").errorKind, "a raw non-envelope answer is marked rawBackend");
+    ok(!FORBID.test(T.userText(T.httpError(500, FAULTS.internal[1]))) && /ref q1w2e3/.test(T.userText(T.httpError(500, FAULTS.internal[1]))), "userText keeps the ref, no raw text");
+    var tE = new Error("x"); tE.timedOut = true;
+    ok(T.classifyFailure(tE, { source: "SEC" }).text === "SEC did not answer in time.", "a client-side timeout reads as timeout");
+    ok(T.classifyFailure(new TypeError("Failed to fetch"), {}).text === "The terminal is busy or restarting.", "a dropped connection reads as unavailable");
+
+    // footer: data as-of from the envelope, generic notes and status
+    ok(T.asOfText({ as_of: "2026-01-05" }, "10:00").text === "data as of 2026-01-05", "as_of date in the footer");
+    ok(T.asOfText({ as_of: "2026-02-03T15:30:00Z" }, "10:00").text === "data as of 2026-02-03 15:30 UTC", "as_of datetime in UTC");
+    var na = T.asOfText({ as_of_na: "This answer has no dated data points." }, "10:00");
+    ok(na.text === "updated 10:00" && /no dated/.test(na.title), "as_of_na: fetch time, with the reason as the title");
+    ok(T.asOfText(null, "10:00").text === "updated 10:00", "a raw backend answer keeps the fetch time");
+    var f1 = document.createElement("div");
+    T.renderTrust(f1, { stale: "Old copy", notes: ["Old copy", "Euro area rate substituted for Germany"], status: "stale" });
+    ok((f1.textContent.match(/Old copy/g) || []).length === 1 && /ⓘ Euro area rate substituted for Germany/.test(f1.textContent), "notes drawn once each, generically");
+    var f2 = document.createElement("div");
+    T.renderTrust(f2, { status: "partial" });
+    ok(/partial answer/.test(f2.textContent), "status partial without a note gets a badge");
+    var f3 = document.createElement("div");
+    T.renderTrust(f3, { status: "ok", notes: [] });
+    ok(f3.textContent === "", "status ok draws nothing");
+    // P2-03: what dispatch answers for a substituted, partial and stale answer: every note drawn once
+    var f4 = document.createElement("div");
+    T.renderTrust(f4, { status: "partial", stale: "Source not answering: showing the copy saved 2026-11-20 12:00 (30 h old)",
+      notes: ["Partial answer: no data from FRED DGS2 just now (asked again within a minute)", "FRED's public download used instead: no FRED key is set",
+              "Source not answering: showing the copy saved 2026-11-20 12:00 (30 h old)"] });
+    ok(/no data from FRED DGS2/.test(f4.textContent) && /public download used instead: no FRED key is set/.test(f4.textContent)
+      && (f4.textContent.match(/copy saved 2026-11-20/g) || []).length === 1, "partial, substitute and stale notes all drawn, once each");
+    var f5 = document.createElement("div");
+    T.renderTrust(f5, { status: "fallback", notes: ["the last daily close used instead: the options chain has no underlying price"] });
+    ok(/last daily close used instead/.test(f5.textContent) && !/substitute source/.test(f5.textContent), "fallback with its note: the note, not a bare badge");
+  })();
+
   ok(T.classifyError("CIK not found for symbol SAP.DE", 400, { source: "SEC", provider: "sec", symbol: "SAP.DE" }).cls === "covered", "CIK not found classifies as not covered");
   var xmlErr = T.classifyError("Invalid URL. Please a SEC URL that directs specifically to a HTM or HTML file.", 400, { source: "SEC", provider: "sec" });
   ok(xmlErr.cls === "input" && xmlErr.kind === "info", "sec/htm_file XML rejection classifies as input info, not bug");
@@ -552,7 +658,9 @@ window.__fcPromise = (async function (T) {
       "switching ticker clears off-screen Filing Viewer iframe back to prompt");
     ok(headersCard.node.querySelector(".w-params input").value === "" && /Pick a filing/.test(headersCard.node.querySelector(".msg").textContent),
       "switching ticker clears live selection and prompt on non-grouped Filing Headers");
-    ok(nasdaqIt.params.document_url === undefined, "switching ticker clears dependent fileSelector param on Nasdaq SEC Filings");
+    ok(Array.isArray(nasdaqIt.params.document_url) && nasdaqIt.params.document_url[0] === "https://pdf.example/aapl.pdf" && nasdaqCard.effParams().symbol === "NVDA" &&
+      (nasdaqCard.effParams().document_url == null || nasdaqCard.effParams().document_url === ""),
+      "switching ticker hides the old ticker's filing pick on Nasdaq SEC Filings for this view, without deleting it from the layout (P3-06)");
     ok(!T.S.cur.tabs[0].edited, "viewing filings and switching tickers does not mark tab edited");
 
     // Manual source pick to out-of-market provider (e.g., picking TMX on dual-listed ENB) must stick, attach Symbol, and survive tab open;
@@ -604,17 +712,6 @@ window.__fcPromise = (async function (T) {
 
   // ---- P4: readable month sort, bounded per-card timeouts, and 3-tier board widths at 1440 px
   ok(T.monthKey("Nov 2026") === 202611 && T.monthKey("Oct 2026") < T.monthKey("Nov 2026"), "readable recommendation months sort chronologically");
-  ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
-    && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
-    && T.requestTimeout("/x/chart?symbol=AAPL", false) === 60000
-    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 70000
-    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 70000
-    && T.requestTimeout("/x/policy_path?currency=USD", false) === 70000
-    && T.requestTimeout("/x/global_yields?countries=g10", false) === 70000
-    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 70000
-    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 70000
-    && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
-    "bounded per-card timeouts by route/provider");
   ok(T.boardTier(1200) === 0 && T.boardTier(700) === 1 && T.boardTier(520) === 2 && T.boardTier(400) === 3 && T.boardTier(0) === 0,
     "board width tiers step cleanly");
 
@@ -945,9 +1042,39 @@ window.__fcPromise = (async function (T) {
         setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; },
         onChange: function () {}, onRemove: function () {}, relayout: function () {}
       });
+      var depEff = depCard.effParams();
+      ok(depEff.report_type === "FR Y-9C" && depEff.section === "HI" && depEff.period === "20251231", "saved picks apply for the bank the card was built with");
+      rssdG.value = "1068025";
       depCard.redrawParams("rssd_id");
-      ok(depIt.params.report_type === undefined && depIt.params.section === undefined && depIt.params.period === undefined,
-        "transitive clearDepParams clears report_type, section and period when rssd_id changes");
+      depEff = depCard.effParams();
+      ok(depIt.params.report_type === "FR Y-9C" && depIt.params.section === "HI" && depIt.params.period === "20251231" &&
+        depEff.rssd_id === "1068025" && depEff.report_type == null && depEff.section == null && depEff.period == null,
+        "another bank (rssd_id) hides report_type, section and period transitively for this view, without editing the layout (P3-06)");
+      rssdG.value = "1039502";
+      depCard.redrawParams("rssd_id");
+      depEff = depCard.effParams();
+      ok(depEff.report_type === "FR Y-9C" && depEff.section === "HI" && depEff.period === "20251231", "back on the first bank, its saved picks apply again");
+      // P3-06: a strike or target price belongs to its ticker. Another dashboard ticker hides it for this view (no +611,011%
+      // rows, review B5), never deletes it from the layout, and never calls onChange (which would mark the tab edited).
+      var pxG = { name: "Symbol", paramName: "symbol", value: "AAPL" }, pxChanges = 0;
+      var pxIt = { uid: "px-1", widgetId: "px_target", backend: "v5", params: { target_price: 250, strike: 240 }, groups: ["Symbol"] };
+      var pxCard = T.widget({
+        item: pxIt, def: { widgetId: "px_target", name: "Price target", type: "table", endpoint: "/__test_px",
+          params: [{ paramName: "symbol", type: "text", value: "AAPL" }, { paramName: "target_price", type: "number" }, { paramName: "strike", type: "number" }] },
+        backend: { id: "v5", name: "Test", url: "" }, scroller: stage4,
+        groupOf: function (it, p) { return p === "symbol" ? pxG : null; }, groupsOf: function () { return [pxG]; },
+        setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; },
+        onChange: function () { pxChanges++; }, onRemove: function () {}, relayout: function () {}
+      });
+      ok(pxCard.effParams().target_price === 250 && pxCard.effParams().strike === 240, "saved target price and strike apply to their ticker");
+      pxG.value = "^SPX";
+      pxCard.redrawParams("symbol");
+      ok(pxIt.params.target_price === 250 && pxIt.params.strike === 240 && pxCard.effParams().target_price == null && pxCard.effParams().strike == null && pxChanges === 0,
+        "another ticker hides target price and strike for this view, keeps them in the layout, and does not call onChange");
+      pxG.value = "AAPL";
+      pxCard.redrawParams("symbol");
+      ok(pxCard.effParams().target_price === 250 && pxCard.effParams().strike === 240 && pxChanges === 0, "back on AAPL, its target price and strike apply again");
+      pxCard.destroy();
       depCard.destroy();
 
       var frIt = { uid: "fr-1", widgetId: "tmx_equity_asset_info_obb", backend: "v5", params: { symbol: "RY", theme: "dark" }, groups: [] };
@@ -1046,9 +1173,7 @@ window.__fcPromise = (async function (T) {
       if (closeHelp) closeHelp.click();
 
       // v0.6.0 UX checks: Stage 3 requestTimeout 70s, / focuses goto, double-click header maximizes, chart footer note helper
-      ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 70000
-        && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 70000
-        && T.requestTimeout("/x/gex_strike?symbol=SPY") === 70000, "Stage 3 composite routes get 70s requestTimeout");
+      // (the Stage 3 70 s requestTimeout check runs after boot, with the per-route table)
       ok(T.chartFooterNote({ warning: "Test warning", convention: "5Y window" }) === "⚠ Test warning · 5Y window"
         && T.chartFooterNote({ convention: "5Y window" }) === "5Y window"
         && T.chartFooterNote({ convention: "5Y window", layout: { annotations: [{ text: "5Y window" }] } }) === ""
@@ -1329,6 +1454,49 @@ window.__fcPromise = (async function (T) {
     await new Promise(function (r) { setTimeout(r, 50); });
   }
   ok(!!T.S.booted, "UI booted before async integration checks");
+  // per-route timeouts: the table /api/config served at boot
+  ok(T.requestTimeout("/x/valuation_bands?symbol=TTWO") === 70000
+    && T.requestTimeout("/x/roic_dupont?symbol=AMZN") === 70000
+    && T.requestTimeout("/x/gex_strike?symbol=SPY") === 70000, "Stage 3 composite routes get 70s requestTimeout");
+  ok(T.requestTimeout("/x/board?preset=us_equity", false) === 30000
+    && T.requestTimeout("/api/v1/yfinance/estimates/recommendations?symbol=AAPL", false) === 30000
+    && T.requestTimeout("/x/chart?symbol=AAPL", false) === 60000
+    && T.requestTimeout("/api/v1/cboe/options/surface?symbol=SPX", false) === 70000
+    && T.requestTimeout("/api/v1/derivatives/options/chains?provider=cboe&symbol=SPX", false) === 70000
+    && T.requestTimeout("/x/policy_path?currency=USD", false) === 70000
+    && T.requestTimeout("/x/global_yields?countries=g10", false) === 70000
+    && T.requestTimeout("/api/v1/oecd/gdp?country=US", false) === 70000
+    && T.requestTimeout("/api/v1/sec/filing_headers", true) === 70000
+    && T.requestTimeout("/api/v1/custom/endpoint", false) === 45000,
+    "bounded per-card timeouts by route/provider");
+  // the table is the server's (/api/config budgets): a different table changes the answer; a bad pattern is skipped
+  var servedBudgets = T.budgetTable;
+  T.setBudgets({ default_ms: 11000, files_ms: 12000, views: { board: 13000 }, patterns: [["(", 1], ["provider=oecd", 14000]] });
+  ok(T.requestTimeout("/x/board?preset=fx", false) === 13000 && T.requestTimeout("/api/v1/x?provider=oecd", false) === 14000
+    && T.requestTimeout("/x/chart?symbol=A", false) === 11000 && T.requestTimeout("/api/v1/sec/a", true) === 12000,
+    "per-route timeouts come from the served table");
+  T.setBudgets(servedBudgets);
+
+  // P4-06: T.request bounds every wait and relays the caller's abort
+  await (async function () {
+    var saved = window.fetch;
+    window.fetch = function (u, init) {
+      return new Promise(function (res, rej) { init.signal.addEventListener("abort", function () { var a = new Error("aborted"); a.name = "AbortError"; rej(a); }); });
+    };
+    try {
+      var te = null;
+      try { await T.request("/never", { timeout: 40 }); } catch (e) { te = e; }
+      ok(te && te.timedOut && te.name === "TimeoutError" && te.errorKind === "timeout", "T.request times out with a typed error");
+      var outer = new AbortController(), ae = null;
+      var pr = T.request("/never", { timeout: 0, signal: outer.signal });
+      outer.abort();
+      try { await pr; } catch (e) { ae = e; }
+      ok(ae && ae.name === "AbortError" && !ae.timedOut, "the caller's abort is relayed, not reported as a timeout");
+    } finally {
+      window.fetch = saved;
+    }
+  })();
+
 
   // Awaited getJSON retry, non-OK preservation, OECD no-retry & hidden-tab needPlotResize checks
   var origFetch = window.fetch;
@@ -1639,6 +1807,118 @@ window.__fcPromise = (async function (T) {
   } finally {
     window.fetch = origFetch;
   }
+
+  // ---- long session (P1-09): 200 tab switches through the real tab bar leave no window/document listener, interval
+  // or DOM growth; the browser heap after 200 switches is within 20% of the value after 20; the popover anchor check
+  // runs only while a popover is open and the page is visible
+  await (async function () {
+    var proto = EventTarget.prototype, addL = proto.addEventListener, remL = proto.removeEventListener;
+    var setI = window.setInterval, clrI = window.clearInterval, origFetch = window.fetch;
+    var entries = [], live = new Set();
+    function capOf(o) { return typeof o === "boolean" ? o : !!(o && o.capture); }
+    function find(t, type, fn, c) {
+      for (var i = 0; i < entries.length; i++) { var e = entries[i]; if (e.t === t && e.type === type && e.fn === fn && e.c === c) return i; }
+      return -1;
+    }
+    function drop(t, type, fn, c) { var i = find(t, type, fn, c); if (i >= 0) entries.splice(i, 1); }
+    var keepCurId = T.S.cur && T.S.cur.id, keepTab = T.S.tabId, keepDefs = T.S.widgets.x;
+    var tabsEl = document.getElementById("tabs");
+    try {
+      proto.addEventListener = function (type, fn, o) {
+        var t = this, c = capOf(o);
+        if ((t === window || t === document) && fn && !(o && o.once) && find(t, type, fn, c) < 0) {
+          entries.push({ t: t, type: type, fn: fn, c: c });
+          if (o && o.signal) addL.call(o.signal, "abort", function () { drop(t, type, fn, c); });
+        }
+        return addL.apply(this, arguments);
+      };
+      proto.removeEventListener = function (type, fn, o) {
+        if (this === window || this === document) drop(this, type, fn, capOf(o));
+        return remL.apply(this, arguments);
+      };
+      window.setInterval = function () { var id = setI.apply(window, arguments); live.add(id); return id; };
+      window.clearInterval = function (id) { live.delete(id); return clrI.apply(window, arguments); };
+      var probe = function () {};
+      window.addEventListener("resize", probe);
+      var counted = entries.length;
+      window.removeEventListener("resize", probe);
+      ok(counted === 1 && entries.length === 0, "the listener count sees a window listener come and go");
+
+      // the popover anchor check: no interval while nothing is open or the page is hidden
+      var anchor = document.createElement("button");
+      document.body.appendChild(anchor);
+      var before = live.size;
+      T.popover(anchor, document.createElement("div"));
+      ok(live.size === before + 1, "an open popover runs one anchor check");
+      Object.defineProperty(document, "hidden", { configurable: true, get: function () { return true; } });
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(live.size === before, "the anchor check pauses while the page is hidden");
+      delete document.hidden;
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(live.size === before + 1, "it resumes when the page is visible again with the popover still open");
+      anchor.remove();
+      document.dispatchEvent(new Event("visibilitychange"));
+      ok(!document.querySelector("#pop-root .pop") && live.size === before, "a popover whose anchor is gone closes and its check stops");
+      T.closePop();
+      ok(live.size === before, "closing a popover leaves no interval");
+
+      // a dashboard with four identical tabs of real cards: two tables (one with auto-refresh) and one failing source
+      T.S.widgets.x = Object.assign({}, keepDefs, {
+        x_soak_a: { widgetId: "x_soak_a", name: "Soak A", endpoint: "/x/soak_a", type: "table", params: [], source: ["SEC"], refetchInterval: 60000 },
+        x_soak_b: { widgetId: "x_soak_b", name: "Soak B", endpoint: "/x/soak_b", type: "table", params: [], source: ["FRED"] },
+        x_soak_c: { widgetId: "x_soak_c", name: "Soak C", endpoint: "/x/soak_c", type: "table", params: [], source: ["ECB"] }
+      });
+      var rows = JSON.stringify([{ date: "2026-11-20", value: 1.5 }, { date: "2026-11-21", value: 1.6 }]);
+      window.fetch = async function (u, opts) {
+        var su = String(u);
+        if (su.indexOf("/x/soak_c") >= 0) return { ok: false, status: 502, headers: new Headers({ "Content-Type": "application/json" }), text: async function () { return JSON.stringify({ error: { kind: "upstream", message: "ECB did not answer" }, sources: ["ECB"] }); } };
+        if (su.indexOf("/x/soak_") >= 0) return { ok: true, status: 200, headers: new Headers({ "Content-Type": "application/json" }), text: async function () { return rows; } };
+        return origFetch(u, opts);
+      };
+      var tabs = [0, 1, 2, 3].map(function (i) {
+        return { id: "s" + i, name: "S" + i, items: ["a", "b", "c"].map(function (k, j) { return { uid: "s" + i + k, backend: "x", widgetId: "x_soak_" + k, x: j * 4, y: 0, w: 4, h: 6, params: {} }; }) };
+      });
+      T.S.state.dashboards["user:soak"] = { id: "user:soak", name: "Soak", description: "", source: "user", groups: [], tabs: tabs };
+      ok(T.openDashboard("user:soak", "s0"), "the long-session dashboard opens");
+      var settle = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+      var heap = function () {
+        if (window.gc) { window.gc(); window.gc(); }
+        return performance.memory ? performance.memory.usedJSHeapSize : null;
+      };
+      var measure = function () {
+        return { listeners: entries.length, intervals: live.size, nodes: document.getElementsByTagName("*").length, heap: heap() };
+      };
+      var first = null, at20 = null;
+      for (var k = 1; k <= 200; k++) {
+        var tabNodes = [].slice.call(tabsEl.querySelectorAll(".tab:not(.add)"));
+        tabNodes[k % 4].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await settle(k === 1 || k === 20 || k === 200 ? 60 : 4);
+        if (k === 1) first = measure();
+        if (k === 20) at20 = measure();
+      }
+      // switch 200 lands on tab 0 and switch 1 on tab 1: one more switch compares the same tab
+      [].slice.call(tabsEl.querySelectorAll(".tab:not(.add)"))[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await settle(60);
+      var last = measure();
+      ok(T.S.tabId === "s1" && T.S.cards.length === 3 && document.querySelectorAll("#canvas .w").length >= 3, "the cards of the last tab are on the page (" + T.S.cards.length + ")");
+      ok(last.listeners === first.listeners, "window/document listeners after 200 switches equal those after the first (" + first.listeners + " -> " + last.listeners + ")");
+      ok(last.intervals === first.intervals && first.intervals >= 1, "live intervals after 200 switches equal those after the first (" + first.intervals + " -> " + last.intervals + ")");
+      ok(last.nodes === first.nodes, "DOM nodes after 200 switches equal those after the first (" + first.nodes + " -> " + last.nodes + ")");
+      ok(!!performance.memory && at20.heap > 0, "the browser reports its heap");
+      var growth = (last.heap - at20.heap) / at20.heap;
+      ok(growth <= 0.2, "heap after 200 switches within 20% of the value after 20 (" + at20.heap + " -> " + last.heap + ")");
+      window.__fcNotes = (window.__fcNotes || []).concat(["long session: listeners " + first.listeners + "->" + last.listeners + ", intervals " + first.intervals + "->" + last.intervals
+        + ", DOM nodes " + first.nodes + "->" + last.nodes + ", heap after 20 " + (at20.heap / 1048576).toFixed(2) + " MB, after 200 " + (last.heap / 1048576).toFixed(2)
+        + " MB (" + (growth >= 0 ? "+" : "") + (growth * 100).toFixed(1) + "%)" + (window.gc ? "" : ", no forced GC")]);
+    } finally {
+      proto.addEventListener = addL; proto.removeEventListener = remL;
+      window.setInterval = setI; window.clearInterval = clrI; window.fetch = origFetch;
+      delete T.S.state.dashboards["user:soak"];
+      T.S.widgets.x = keepDefs;
+      if (keepCurId && T.openDashboard(keepCurId, keepTab)) { /* back where the checks started */ }
+      else { (T.S.cards || []).forEach(function (c) { try { c.destroy(); } catch (e) { /* already gone */ } }); }
+    }
+  })();
 
   console.log("frontend checks: " + n + " passed");
   return n;

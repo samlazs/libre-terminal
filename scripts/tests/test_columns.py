@@ -293,4 +293,40 @@ check("open_interest_pct_non_commercial_long_all" in cot_p and "open_interest_pc
       and cot_h["open_interest_pct_non_commercial_long_all"] == "Non-comm. long (% OI)"
       and cot_h["open_interest_pct_non_commercial_short_all"] == "Non-comm. short (% OI)", "COT % OI columns and headers")
 
+# ---- P3-02: declared units on the Terminal's own tables; tooltip inference only on raw backend cards, never growing
+import xwidgets  # noqa: E402
+
+xw = xwidgets.widgets()
+xcols = {(wid, c["field"]): c for wid, w in xw.items() for c in (((w.get("data") or {}).get("table") or {}).get("columnsDefs") or [])
+         if c.get("cellDataType") == "number"}
+check(all(C.x_unit_ok(c.get("unit")) for c in xcols.values()), "every /x/* number column carries a known unit")
+check(xcols[("x_comps", "div_yield")]["unit"] == "fraction", "comps dividend yield is declared a fraction (Yahoo percent / 100)")
+check(xcols[("x_country_monitor", "cpi_yoy")]["unit"] == "fraction" and xcols[("x_country_monitor", "gdp_yoy")]["unit"] == "fraction",
+      "country monitor CPI and GDP y/y are declared fractions")
+check(xcols[("x_comps", "mcap_usd")]["unit"] == "USD bn" and xcols[("x_bond_lookup", "g_spread")]["unit"] == "bp", "hand-declared units")
+check(xcols[("x_board", "chg")]["unit"] == "row", "board change: unit per row (bp on a yield row)")
+stale_x = [f"{wid}.{f}" for wid, fs in C.X_UNITS.items() for f in fs if (wid, f) not in xcols]
+check(not stale_x, "every X_UNITS entry names an /x/* number column: " + ", ".join(stale_x[:6]))
+clash = [f"{wid}.{f}" for wid, fs in C.X_UNITS.items() for f, u in fs.items()
+         if (wid, f) in xcols and C.format_unit(xcols[(wid, f)]) not in (None, u)]
+check(not clash, "a declared unit never contradicts the column's own format: " + ", ".join(clash[:6]))
+check(C.format_unit({"formatterFn": "normalizedPercent"}) == "fraction" and C.format_unit({"suffix": "%"}) == "percent"
+      and C.format_unit({"suffix": " bp"}) == "bp" and C.format_unit({"suffix": "x"}) == "x" and C.format_unit({"suffix": "M"}) is None,
+      "units from formats; '$M' is not a unit by itself (declared)")
+check(C.x_unit_ok("USD bn") and C.x_unit_ok("EUR") and not C.x_unit_ok("usd") and not C.x_unit_ok("") and not C.x_unit_ok(None),
+      "currency units: ISO code with an optional scale")
+check(C.undeclared({"widgetId": "x_t", "data": {"table": {"columnsDefs": [{"field": "a", "cellDataType": "number"},
+                                                                          {"field": "b", "cellDataType": "number", "unit": "bp"}]}}}) == ["a"],
+      "an /x/* number column without a unit is reported")
+check(C.inferred({"data": {"table": {"columnsDefs": [
+    {"field": "a", "cellDataType": "number", "headerTooltip": "Change, in basis points."},
+    {"field": "b", "cellDataType": "number", "headerTooltip": "Level (thousands)."},
+    {"field": "c", "cellDataType": "number", "headerTooltip": "Rate.", "formatterFn": "percent"},
+    {"field": "d", "cellDataType": "number", "headerTooltip": "Share, in percent.", "formatterFn": "percent"}]}}}) == ["a", "b"],
+      "inferred(): tooltip-read formats and units, not source-declared ones")
+INFERRED_MAX = 196          # raw backend columns whose unit is read from tooltip text (2026-11-24: v5 175 + v4 21): may shrink, never grow
+if all(p.exists() for p in cat.values()):
+    n_inf = sum(len(C.inferred(w)) for p in cat.values() for w in json.loads(p.read_text(encoding="utf-8")).values() if isinstance(w, dict))
+    check(n_inf <= INFERRED_MAX, f"tooltip unit inference on backend cards is frozen: {n_inf} <= {INFERRED_MAX}")
+
 done("test_columns")

@@ -51,7 +51,7 @@
 
   function errText(status, body) {
     var d = body;
-    try { var j = JSON.parse(body); d = j.detail != null ? j.detail : j; } catch (e) { /* plain text */ }
+    try { var j = JSON.parse(body); d = j.error && typeof j.error.message === "string" ? j.error.message : j.detail != null ? j.detail : j; } catch (e) { /* plain text */ }
     if (Array.isArray(d)) d = d.map(function (x) { return (x.loc ? x.loc.slice(1).join(".") + ": " : "") + (x.msg || JSON.stringify(x)); }).join("; ");
     else if (typeof d === "object" && d) d = d.loc && d.msg ? d.loc.slice(1).join(".") + ": " + d.msg : JSON.stringify(d);
     d = T.redact(String(d || "HTTP " + status)).replace(/Unexpected Error -> /g, "").replace(/\s*For further information visit \S+/g, "");
@@ -119,6 +119,41 @@
     return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: m };
   };
 
+  /**
+   * The terminal's own views (/x/*) say what kind of error they hit: {error: {kind, message, retryable, retry_after}}.
+   * Cards render from that kind; T.classifyError above stays only for raw /api/v1 backend answers.
+   * Text shown never carries a URL, a traceback, "Error:" or a Python exception name (T.cleanMessage).
+   */
+  var TECH_TEXT = /Traceback|\bError:|https?:\/\/|\b[A-Z][A-Za-z]*(?:Error|Exception|Warning)\b|\bErrno\b|WinError|<urlopen|\bKeyError\b/;
+  T.cleanMessage = function (m) {
+    var t = String(m || "")
+      .replace(/\s*\((?:[^()]*?(?:https?:\/\/|Error|Exception|Errno|urlopen|Traceback)[^()]*)\)/g, "")   // technical tails in parentheses
+      .replace(/\s*\(?https?:\/\/[^\s)]+\)?/g, "").replace(/\s+/g, " ").trim();
+    return !t || TECH_TEXT.test(t) || t.length > 300 ? null : t;
+  };
+  function waitText(secs, fallbackMin) {
+    if (!(secs > 0)) return fallbackMin + " minutes";
+    return secs < 90 ? Math.round(secs) + " seconds" : Math.ceil(secs / 60) + " minutes";
+  }
+  T.classifyKind = function (kind, msg, ctx, info) {
+    ctx = ctx || {}; info = info || {};
+    var src = ctx.source || "The source", clean = T.cleanMessage(msg), atSource = "The problem is at the source, not in your settings. Try again later (press ↻).";
+    if (kind === "input") return { cls: "input", kind: "info", text: clean || "Choose the missing setting to load this card.", hint: null, param: null };
+    if (kind === "not_covered") return { cls: "covered", kind: "info", text: clean || ("Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + "."), hint: "Try another symbol." };
+    if (kind === "rate_limited") return { cls: "ratelimit", kind: "info", text: src + " is limiting how often it can be asked right now.", hint: "Try again in about " + waitText(info.retryAfter, /OECD/i.test(String(msg) + src) ? 10 : 2) + " (press ↻)." };
+    if (kind === "timeout") {
+      if (/keeps loading in the background/i.test(String(msg))) return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
+      return { cls: "upstream", kind: "info", text: src + " did not answer in time.", hint: atSource };
+    }
+    if (kind === "unavailable") return { cls: "upstream", kind: "info", text: "The terminal is busy or restarting.", hint: "Press ↻ in a moment." };
+    if (kind === "upstream") {
+      var own = ctx.userMessage && clean && !/not reachable|did not answer|answered with|^HTTP \d{3}\b|not answering/i.test(clean);
+      return { cls: own ? "message" : "upstream", kind: "info", text: own ? clean : src + " is not answering properly right now.", hint: own ? null : atSource };
+    }
+    var ref = (/\(ref (\w+)/.exec(String(msg)) || [])[1] || T.errorRef(msg);
+    return { cls: "bug", kind: "err", text: "This card failed inside the terminal (ref " + ref + ").", hint: "Press ↻ to retry. The details are written to local/logs/ui.log under that reference.", ref: ref, detail: String(msg) };
+  };
+
   /** What really answered, when the backend had to substitute the source asked (X-Terminal-Source: "Yahoo Finance"). */
   T.substituteSources = function (names, note) {
     return String(names || "").split(",").map(function (n) { return n.trim(); }).filter(Boolean).map(function (n) {
@@ -137,6 +172,12 @@
       if (typeof lj[k[0]] === "string" && lj[k[0]]) foot.appendChild(el("span", { class: "stale-note", title: lj[k[0]] }, k[1] + lj[k[0]]));
     });
     if (typeof lj.delayed === "string" && lj.delayed) foot.appendChild(el("span", { class: "delay-note", title: lj.delayed }, "delayed"));
+    // the envelope's notes and status (core/contract.py), drawn generically: a view that adds a note needs no change here
+    var said = [lj.stale, lj.cached, lj.fallback, lj.truncated, lj.delayed].filter(function (x) { return typeof x === "string" && x; });
+    var extra = (Array.isArray(lj.notes) ? lj.notes : []).filter(function (n) { return typeof n === "string" && n && said.indexOf(n) < 0; });
+    extra.forEach(function (n) { foot.appendChild(el("span", { class: "stale-note", title: n }, "ⓘ " + n)); });
+    if ((lj.status === "partial" || lj.status === "fallback") && !extra.length && !lj.fallback)
+      foot.appendChild(el("span", { class: "stale-note", title: "Part of this answer is missing or came from a substitute source." }, lj.status === "partial" ? "⚠ partial answer" : "↻ substitute source"));
   };
   T.chartFooterNote = function (d) {
     var hasAnnot = !!(d && d.layout && Array.isArray(d.layout.annotations) && d.layout.annotations.length);
@@ -183,19 +224,26 @@
   }
 
   // OECD limits requests per hour and its data is monthly or slower: keep its answers in the browser for 12 hours.
-  var REQUEST_TIMEOUT = 45000;
+  // Per-route timeouts come from the server (/api/config "budgets", core/contract.py ROUTE_BUDGETS): the server's budget for
+  // the route plus a margin, so a view always answers (data, partial, or a typed timeout) before the card gives up.
+  var REQUEST_TIMEOUT = 45000;                // only until /api/config has answered
+  var budgets = null;
+  T.setBudgets = function (b) {
+    if (!b || typeof b !== "object") return;
+    var pats = [];
+    (Array.isArray(b.patterns) ? b.patterns : []).forEach(function (p) {
+      try { pats.push([new RegExp(p[0]), +p[1]]); } catch (e) { /* a pattern this browser cannot read: skipped */ }
+    });
+    budgets = { def: +b.default_ms || REQUEST_TIMEOUT, files: +b.files_ms || REQUEST_TIMEOUT, views: b.views || {}, pats: pats };
+    T.budgetTable = b;                        // the table as served (read-only use: diagnostics)
+  };
   T.requestTimeout = function (url, isFiles) {
-    var u = String(url || "");
-    if (isFiles
-      || /\/api\/v1\/(?:cboe\/options\/|derivatives\/options\/chains)\b/.test(u)
-      || /\/x\/(global_yields|policy_path|yield_curves|yield_curve_table|rate_history|rates_by_country|compare|earnings_release|valuation_bands|roic_dupont|gex_strike|vol_cone|debt_maturity_wall|etf_overlap|correlation|risk_stats|fx_rate_diff)\b/.test(u)
-      || /[?&]provider=(oecd|imf|eia|bls|sec|cftc|usda|fred|congress_gov|famafrench|us_treasury|federal_reserve|ecb)(&|$)/.test(u)
-      || /\/api\/v1\/(oecd|imf|eia|bls|sec|cftc|usda|uscongress|ustreasury|federal_reserve|ecb|famafrench|jodi)\//.test(u)) return 70000;
-    if (/\/x\/chart\b/.test(u)) return 60000;
-    if (/\/x\/(board|watchlist|perf_bars|performance|style_box|snapshot|comps|news|fx_matrix|fx_moves|fx_trend|crypto_vol|cds_indices)\b/.test(u)
-      || /[?&]provider=(yfinance|cboe|tmx|nasdaq|deribit|finviz)(&|$)/.test(u)
-      || /\/api\/v1\/(yfinance|cboe|tmx|nasdaq|deribit|finviz)\//.test(u)) return 30000;
-    return REQUEST_TIMEOUT;
+    if (!budgets) return REQUEST_TIMEOUT;
+    if (isFiles) return budgets.files;
+    var u = String(url || ""), m = /\/x\/([A-Za-z0-9_]+)/.exec(u);
+    if (m && Object.prototype.hasOwnProperty.call(budgets.views, m[1])) return +budgets.views[m[1]];
+    for (var i = 0; i < budgets.pats.length; i++) if (budgets.pats[i][0].test(u)) return budgets.pats[i][1];
+    return budgets.def;
   };
   var limitedBy = {};                         // cooldowns: OECD per provider; Nasdaq per URL (the backend still serves its cache hits)
   T.clearAllCaches = function () { dataCache.clear(); limitedBy = {}; };
@@ -207,7 +255,8 @@
   }
   function isRateLimited(url) { return !!rateLimitKey(url); }
   function fetchOptions(force, signal) {
-    return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" } } : { signal: signal };
+    // timeout 0: getJSON and postText bound the wait themselves (T.requestTimeout per route)
+    return force ? { signal: signal, headers: { "X-Terminal-Refresh": "1" }, timeout: 0 } : { signal: signal, timeout: 0 };
   }
   T._reqSlots = { acquire: acquire, release: release, slots: slots, rateLimitKey: rateLimitKey, isRateLimited: isRateLimited, fetchOptions: fetchOptions, max: MAX_PARALLEL };
   // Server CACHE_POLICY is now the sole authoritative persistent cache; remove any legacy browser Cache API store once on boot.
@@ -230,22 +279,13 @@
   async function postText(url, bodyObj, outerSignal) {
     var host = /^https?:\/\/[^/]+/.exec(url); host = host ? host[0] : "self";
     await acquire(host, outerSignal);
-    var timeoutMs = T.requestTimeout(url, true);
-    var ctl = new AbortController(), timedOut = false;
-    var timer = setTimeout(function () { timedOut = true; ctl.abort(); }, timeoutMs);
-    function relay() { ctl.abort(); }
-    if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
     try {
-      var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj), signal: ctl.signal });
+      var r = await T.request(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bodyObj),
+        signal: outerSignal, timeout: T.requestTimeout(url, true) });
       var txt = await r.text();
-      if (!r.ok) { var err = new Error(errText(r.status, txt)); err.status = r.status; throw err; }
+      if (!r.ok) throw T.httpError(r.status, txt, errText(r.status, txt));
       return txt;
-    } catch (e) {
-      if (timedOut) throw new Error("No answer after " + Math.round(timeoutMs / 1000) + " seconds. The source is slow or not responding.");
-      throw e;
     } finally {
-      clearTimeout(timer);
-      if (outerSignal) outerSignal.removeEventListener("abort", relay);
       release(host);
     }
   }
@@ -269,29 +309,28 @@
     if (outerSignal) { if (outerSignal.aborted) ctl.abort(); else outerSignal.addEventListener("abort", relay); }
     var fetchOpts = fetchOptions(force, signal);
     function throwHttpErr(resp, bodyTxt) {
-      var err = new Error(errText(resp.status, bodyTxt)); err.status = resp.status;
+      var err = T.httpError(resp.status, bodyTxt, errText(resp.status, bodyTxt));
       var subE = resp.headers && resp.headers.get("X-Terminal-Source");
-      if (subE) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
-      try { var ej = JSON.parse(bodyTxt); err.userMessage = ej.user_message === true; if (Array.isArray(ej.sources)) err.sources = ej.sources; } catch (e3) { /* not JSON */ }
-      if (rlKey && (resp.status === 429 || /rate limit|too many requests|temporarily blocked/i.test(err.message))) {
-        var rlSecs = /~(\d+)\s*s\b/.exec(err.message);
-        limitedBy[limKey] = { until: Date.now() + (rlSecs ? +rlSecs[1] * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
+      if (subE && !err.sources) err.sources = T.substituteSources(subE, resp.headers.get("X-Terminal-Fallback"));
+      if (rlKey && (err.errorKind === "rate_limited" || resp.status === 429 || (!err.errorKind && /rate limit|too many requests|temporarily blocked/i.test(err.message)))) {
+        var rlSecs = err.retryAfter || +((/~(\d+)\s*s\b/.exec(err.message) || [])[1] || 0);
+        limitedBy[limKey] = { until: Date.now() + (rlSecs ? rlSecs * 1000 : (rlKey === "nasdaq" ? 120000 : 600000)), msg: err.message };
       }
       throw err;
     }
     try {
       if (signal && signal.aborted) { var ab = new Error("aborted"); ab.name = "AbortError"; throw ab; }
       var r;
-      try { r = await fetch(url, fetchOpts); }
+      try { r = await T.request(url, fetchOpts); }
       catch (e) {
         // one automatic retry for a dropped connection, but only while the backend itself still answers (never for OECD)
         if (e && e.name === "AbortError") throw e;
         var base = /^https?:\/\/[^/]+/.exec(url);
-        var alive = base ? await fetch(base[0] + "/", { mode: "no-cors", signal: signal }).then(function () { return true; }, function () { return false; }) : true;
+        var alive = base ? await T.request(base[0] + "/", { mode: "no-cors", signal: signal, timeout: 5000 }).then(function () { return true; }, function () { return false; }) : true;
         if (!alive) { var down = new Error("BACKEND_DOWN"); down.backendDown = true; throw down; }
         if (slow) throw e;
         await wait(1500, signal);
-        r = await fetch(url, fetchOpts);
+        r = await T.request(url, fetchOpts);
       }
       if (!r.ok) {
         var etxt = await r.text();
@@ -303,7 +342,7 @@
           || ((r.status === 502 || r.status === 503 || r.status === 504) && !isUserMsg && !/rate limit|too many requests/i.test(etxt)));
         if (shouldRetry) {
           await wait(1200 + Math.random() * 1200, signal);
-          r = await fetch(url, fetchOpts);
+          r = await T.request(url, fetchOpts);
           etxt = r.ok ? null : await r.text();
         }
       }
@@ -314,7 +353,7 @@
       var txt = await r.text();
       if (!txt && !slow && /[?&]provider=yfinance(&|$)|\/api\/v1\/yfinance\/|\/x\/chart\b/.test(url)) {     // "no content" from Yahoo: usually throttling, so try once more
         await wait(1200, signal);
-        r = await fetch(url, fetchOpts);
+        r = await T.request(url, fetchOpts);
         if (!r.ok) throwHttpErr(r, await r.text());
         txt = await r.text();
       }
@@ -324,7 +363,7 @@
         } catch (parseErr) {
           if (slow) throw new Error("The source returned an incomplete response. Try reloading this card.");
           await wait(800, signal);
-          r = await fetch(url, fetchOpts);
+          r = await T.request(url, fetchOpts);
           if (!r.ok) throwHttpErr(r, await r.text());
           txt = await r.text();
           if (!txt) {
@@ -584,7 +623,7 @@
     var rz = el("div", { class: "w-resize", title: "Resize" });
     node.appendChild(head); node.appendChild(strip); node.appendChild(pbar); node.appendChild(body); node.appendChild(foot); node.appendChild(rz);
 
-    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, chartMsgHandler = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
+    var abort = null, visible = false, pending = true, alive = true, failed = false, lastJson = null, lastEnvelope = null, tv = null, plotNode = null, blobUrls = [], timer = null, frameTimer = null, frameHardTimer = null, chartMsgHandler = null, loadTimer = null, slowTimer = null, slowRetries = 0, showAllParams = false, seq = 0, filterVal = "";
     var fileParam = def.params.filter(function (p) { return (p.roles || []).indexOf("fileSelector") >= 0; })[0] || null;
     var lastFileSig = null;          // the other parameters the current document pick was made for
     var isFrame = def.type === "iframe" || def.type === "html";
@@ -614,18 +653,48 @@
     // saved into the layout (viewing must not pin an NVIDIA filing on the Filings tab forever). Cleared when the
     // dashboard's ticker changes.
     var live = {};
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function pdef(name) { return def.params.filter(function (x) { return x.paramName === name; })[0]; }
+    function cur(name, depth) {                    // the value a parameter has now: a row click, the saved pick, a group
+      var p = pdef(name), g = ctx.groupOf(item, name);
+      if (g && !empty(g.value)) return p && name === "country" ? countryFor(p, g.value) : g.value;
+      if (own(live, name)) return live[name];
+      if (own(item.params, name) && !masked(name, depth)) return item.params[name];
+      return p ? p.value : undefined;
+    }
+    function same(a, b) {
+      a = T.resolveParam(a); b = T.resolveParam(b);
+      return (a == null ? "" : String(a).trim().toUpperCase()) === (b == null ? "" : String(b).trim().toUpperCase());
+    }
+    // A saved pick that belongs to another parameter's value (a strike or a target price to its symbol, an expiration to
+    // the symbol it was listed for) applies only while that parameter still shows its saved value. Another dashboard
+    // ticker or a row click hides it for this view; the layout keeps it, so viewing never edits a tab (P3-06).
+    var loaded = {};                               // anchor values when the card was built: what an unanchored saved pick belongs to
+    function moved(name, depth) {
+      var now = cur(name, depth);
+      if (own(item.params, name)) return !same(now, item.params[name]);
+      if (!own(loaded, name)) loaded[name] = now;
+      return !same(now, loaded[name]);
+    }
+    function anchors(name) {
+      var p = pdef(name), out = PRICE_PARAMS.indexOf(name) >= 0 ? ["symbol"] : [];
+      if (p && p.optionsParams) Object.keys(p.optionsParams).forEach(function (k) {
+        var ref = p.optionsParams[k];
+        if (typeof ref === "string" && ref.charAt(0) === "$" && ref.slice(1) !== name && out.indexOf(ref.slice(1)) < 0) out.push(ref.slice(1));
+      });
+      return out;
+    }
+    function masked(name, depth) {
+      depth = (depth || 0) + 1;
+      if (depth > 4) return false;
+      return anchors(name).some(function (a) { return moved(a, depth); });
+    }
     function eff() {
       var out = {};
-      def.params.forEach(function (p) {
-        var v = Object.prototype.hasOwnProperty.call(live, p.paramName) ? live[p.paramName]
-          : Object.prototype.hasOwnProperty.call(item.params, p.paramName) ? item.params[p.paramName] : p.value;
-        var g = ctx.groupOf(item, p.paramName);
-        if (g && !empty(g.value)) v = p.paramName === "country" ? countryFor(p, g.value) : g.value;
-        out[p.paramName] = T.resolveParam(v);
-      });
+      def.params.forEach(function (p) { out[p.paramName] = T.resolveParam(cur(p.paramName)); });
       // Some widget definitions omit a parameter the endpoint still needs (e.g. the ticker):
       // pass through values the dashboard pinned on the item, and the values of groups it follows.
-      Object.keys(item.params).forEach(function (k) { if (!(k in out) && !empty(item.params[k])) out[k] = T.resolveParam(item.params[k]); });
+      Object.keys(item.params).forEach(function (k) { if (!(k in out) && !empty(item.params[k]) && !masked(k)) out[k] = T.resolveParam(item.params[k]); });
       Object.keys(live).forEach(function (k) { if (!(k in out) && !empty(live[k])) out[k] = live[k]; });
       (ctx.groupsOf ? ctx.groupsOf(item) : []).forEach(function (g) { if (!(g.paramName in out) && !empty(g.value)) out[g.paramName] = g.value; });
       if (def.symbolList && T.lists) T.lists.inject(def, item, out);      // watchlist symbols / the user's peers, kept in saved state
@@ -651,7 +720,7 @@
       return out;
     }
     function stripParams() { return (def.strip || []).map(function (s) { return s.param; }); }
-    function clearDepParams(paramName, keepNull) {
+    function clearDepParams(paramName, mode) {
       var cleared = false;
       if (!paramName) return false;
       var pending = [paramName], seen = {};
@@ -663,8 +732,8 @@
           if (d.optionsParams && Object.keys(d.optionsParams).some(function (k) { return d.optionsParams[k] === "$" + curParam; })) {
             if (Object.prototype.hasOwnProperty.call(item.params, d.paramName) && item.params[d.paramName] != null) cleared = true;
             if (Object.prototype.hasOwnProperty.call(live, d.paramName)) cleared = true;
-            if (keepNull) item.params[d.paramName] = null;
-            else delete item.params[d.paramName];
+            if (mode === "null") item.params[d.paramName] = null;
+            else if (mode === "delete") delete item.params[d.paramName];
             delete live[d.paramName];
             pending.push(d.paramName);
           }
@@ -686,11 +755,14 @@
     function setParam(p, v) {
       if (typeof v === "string") v = v.trim();
       if (p.paramName === "symbol" && typeof v === "string" && p.type !== "endpoint") v = v.toUpperCase();
-      if (p.paramName === "symbol") dropPriceParams();
       var g = ctx.groupOf(item, p.paramName);
-      // dependants (options driven by this param) are no longer valid
-      clearDepParams(p.paramName, true);
-      if (g) { ctx.setGroup(g, v); return; }
+      // a group pick is a preference: saved picks that depended on it are hidden for this view (masked), never deleted
+      if (g) { clearDepParams(p.paramName, "live"); ctx.setGroup(g, v); return; }
+      if (p.paramName === "symbol") dropPriceParams();
+      // dependants (options driven by this param) are no longer valid: an edit of this card, so they are cleared in it
+      clearDepParams(p.paramName, "null");
+      // a pick that belongs to another value (a strike to its symbol) is saved with the value it belongs to
+      anchors(p.paramName).forEach(function (a) { if (pdef(a) && moved(a)) item.params[a] = cur(a); });
       // the settings panel wins over the strip (and over a statement's Annual / Quarterly switch)
       if (ctx.setView && (stripParams().indexOf(p.paramName) >= 0 || (p.paramName === "period" && T.statementKind && T.statementKind(def)))) ctx.setView(item, p.paramName, null);
       delete live[p.paramName];
@@ -707,16 +779,9 @@
         var q = T.optionsQuery(p.optionsParams, eff());
         var url = (/^https?:/.test(p.optionsEndpoint) ? "" : base) + p.optionsEndpoint + qs(q);
         if (!optCache.has(url)) {
-          var oCtl = new AbortController(), oTimer = setTimeout(function () { oCtl.abort(); }, 30000);
-          optCache.set(url, fetch(url, { signal: oCtl.signal }).then(function (r) {
-            return r.text().then(function (txt) {
-              if (!r.ok) throw new Error(errText(r.status, txt));
-              if (!txt || !txt.trim()) return [];
-              return JSON.parse(txt);
-            });
-          }).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) {
+          optCache.set(url, getJSON(url, false).then(function (j) { return Array.isArray(j) ? j : (j && j.results) || []; }).catch(function (e) {
             optCache.delete(url); throw e;
-          }).finally(function () { clearTimeout(oTimer); }));
+          }));
         }
         return optCache.get(url);
       };
@@ -890,14 +955,16 @@
         ? "Switch to a free source with the selector at the top of this card."
         : "Try another source with the selector at the top of this card (" + (alts ? alts.length : list.length + 1) + " available).";
     }
+    /** Every card type's footer: sources, status and notes from the envelope, and the data's own as-of date. */
     function stamp(extra) {
       foot.textContent = "";
-      var chartShown = plotNode && ((def.type === "chart" && item.view !== "table") || item.view === "chart");
-      var line = chartShown ? T.sourceLine(sources()) : "";
+      var env = lastEnvelope || lastJson;
+      var line = T.sourceLine(sources());
       if (line) foot.appendChild(el("span", { class: "src-line", title: line }, line));      // part of the card, never clipped; PNG exports carry it too
-      T.renderTrust(foot, lastJson);
+      T.renderTrust(foot, env);
       if (extra) foot.appendChild(el("span", { class: "foot-note", title: extra }, extra));
-      foot.appendChild(el("span", { style: { marginLeft: "auto" } }, "updated " + T.mtlNow()));
+      var asOf = T.asOfText(env, T.mtlNow());
+      foot.appendChild(el("span", { class: "as-of", title: asOf.title, style: { marginLeft: "auto" } }, asOf.text));
     }
 
     // ---------- export (same ⤓ menu on every card that shows data) ----------
@@ -1175,7 +1242,7 @@
           if (item.view === "chart") renderQuickChart(data); else renderTable(data);
         }
       } catch (e) {
-        var rc = T.classifyError("render: " + (e && e.message || e), 0, {});
+        var rc = T.classifyError("render: " + T.errDetail(e), 0, {});
         reportBug(rc);
         message("err", rc.text, rc.hint);
       }
@@ -1234,26 +1301,15 @@
             // a terminal view picks the document ({frame} or {message}); the frame then loads the backend's viewer directly,
             // since Firefox calls a redirected frame load cross-site and the backend's request guard refuses it
             message("load", "Loading…");
-            var fCtl = new AbortController(), fTimedOut = false, fMs = T.requestTimeout(frameSrc, false);
-            var fTmo = setTimeout(function () { fTimedOut = true; fCtl.abort(); }, fMs);
-            var onMainAbort = function () { fCtl.abort(); };
-            abort.signal.addEventListener("abort", onMainAbort, { once: true });
-            var fr, fj;
-            try {
-              fr = await fetch(frameSrc, { headers: { Accept: "application/json" }, signal: fCtl.signal });
-              fj = await fr.json().catch(function () { return null; });
-            } catch (fe) {
-              if (fTimedOut) throw new Error("No answer after " + Math.round(fMs / 1000) + " seconds. The source is slow or not responding.");
-              throw fe;
-            } finally {
-              clearTimeout(fTmo);
-              abort.signal.removeEventListener("abort", onMainAbort);
-            }
+            var fr = await T.request(frameSrc, { headers: { Accept: "application/json" }, signal: abort.signal, timeout: T.requestTimeout(frameSrc, false) });
+            var ftxt = await fr.text().catch(function () { return ""; }), fj = null;
+            try { fj = JSON.parse(ftxt); } catch (fe) { /* not JSON */ }
             if (my !== seq || !alive) return;
-            if (!fr.ok || !fj) throw new Error((fj && fj.detail) || "The terminal could not pick a document (HTTP " + fr.status + ").");
+            if (!fr.ok || !fj) throw T.httpError(fr.status, ftxt, fj ? null : "The terminal could not pick a document (HTTP " + fr.status + ").");
+            lastEnvelope = fj;
             if (Array.isArray(fj.sources)) answerSources = fj.sources;
             if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+\/api\/v1\/sec\/filing_viewer_app\?/.test(fj.frame || "")) {
-              clearBody(); drawTools(); foot.textContent = "";
+              clearBody(); drawTools(); stamp();
               return message("info", fj.message || "Nothing to show for this choice.");
             }
             frameSrc = fj.frame;
@@ -1315,7 +1371,7 @@
             if (chartMsgHandler === onChartMsg) chartMsgHandler = null;
             if (!alive || my !== seq) return;
             if (base && ctx.backendDown && ctx.backend) {
-              fetch(base + "/", { mode: "no-cors" }).catch(function () { ctx.backendDown(ctx.backend.id); });
+              T.request(base + "/", { mode: "no-cors", timeout: 5000 }).catch(function () { ctx.backendDown(ctx.backend.id); });
             }
             clearBody();
             body.appendChild(el("div", { class: "msg err center" }, [el("b", null, "Could not load"), el("span", null, "This view did not load."),
@@ -1324,7 +1380,7 @@
           fr2.src = frameSrc;
           body.appendChild(waitBox);
           body.appendChild(fr2);
-          foot.textContent = ""; drawTools();
+          drawTools(); stamp();                         // frames too: sources and as-of in the footer
           return;
         }
         if (item.manual && !force) {
@@ -1383,7 +1439,7 @@
         }
         var json = await getJSON(endpoint + qs(p), force, abort.signal);
         if (my !== seq || !alive) return;
-        lastJson = json;
+        lastJson = json; lastEnvelope = json && typeof json === "object" && !Array.isArray(json) ? json : null;
         if (json && Array.isArray(json.sources)) answerSources = json.sources;
         else if (ctx.backend.id !== "x") answerSources = null;      // the named source answers again
         paintSource();
@@ -1408,7 +1464,7 @@
         foot.textContent = ""; drawTools();
         var backendGone = e && e.backendDown;
         if (!backendGone && /Failed to fetch|NetworkError|Load failed/i.test(msg)) {
-          var up = await fetch(base + "/", { mode: "no-cors" }).then(function () { return true; }, function () { return false; });
+          var up = await T.request(base + "/", { mode: "no-cors", timeout: 5000 }).then(function () { return true; }, function () { return false; });
           if (my !== seq || !alive) return;
           backendGone = !up;
           if (up) msg = "upstream failed: the source did not answer (Bad Gateway)";
@@ -1418,12 +1474,14 @@
           if (ctx.backendDown) ctx.backendDown(ctx.backend.id);
           return message("info", "The data backend is restarting.", "This card reloads by itself as soon as it is back (usually within a minute).");
         }
-        var c = T.classifyError(msg, e && e.status, {
+        var cctx = {
           userMessage: !!(e && e.userMessage), source: srcName(), provider: provName(),
           hasFreeOnTab: ctx.hasFreeOnTab ? ctx.hasFreeOnTab(item) : false,
           symbol: def.params.some(function (p) { return p.paramName === "symbol"; }) ? String(eff().symbol || "").toUpperCase().split(",")[0] : null,
           param: function (n) { var np = def.params.filter(function (x) { return x.paramName === n; })[0]; return np ? (np.label || pretty(n)) : pretty(n); }
-        });
+        };
+        // the terminal's own views name the kind; only raw backend answers are still read by T.classifyError
+        var c = e && e.errorKind ? T.classifyKind(e.errorKind, msg, cctx, e) : T.classifyError(msg, e && e.status, cctx);
         failed = true;
         if (c.cls === "slow" && slowRetries < T.SLOW_RETRY_DELAYS.length) {
           var delayS = T.SLOW_RETRY_DELAYS[slowRetries++];
@@ -1509,7 +1567,7 @@
       var had = Object.keys(live).length > 0;
       live = {};
       filterVal = "";
-      if (clearDepParams(changedParam, false)) had = true;
+      if (clearDepParams(changedParam, "live")) had = true;
       drawParams(); paintTitle(); paintSource();
       if (had) {
         if (abort) { abort.abort(); abort = null; }
@@ -1532,10 +1590,10 @@
       backend: ctx.backend.id,
       redrawParams: function (changedParam) {      // the dashboard ticker changed: row picks no longer apply
         slowRetries = 0;
-        if (changedParam === "symbol" && dropPriceParams()) ctx.onChange();
-        clearLive(changedParam);
+        clearLive(changedParam);             // saved picks of the old ticker are masked in eff(), the layout is not edited
       },
       clearLive: clearLive,
+      effParams: function () { return eff(); },    // the parameters the next request sends (checks read them)
       hasParam: function (name) {
         return def.params.some(function (p) {
           if (p.paramName !== name) return false;

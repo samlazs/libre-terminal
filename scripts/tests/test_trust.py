@@ -60,9 +60,9 @@ finally:
 # ---- delayed: terminal views over Yahoo prices, backend price snapshots by path and provider
 saved = dict(c.ROUTES)
 try:
-    c.ROUTES["board"] = lambda **p: {"results": []}
-    c.ROUTES["chart"] = lambda **p: {"data": []}
-    c.ROUTES["gpr_table"] = lambda **p: {"results": []}
+    c.ROUTES["board"] = lambda **p: {"results": [{"symbol": "AAPL", "as_of": "2026-11-20"}]}
+    c.ROUTES["chart"] = lambda **p: {"data": [{"x": ["2026-11-19", "2026-11-20"], "y": [1, 2]}]}
+    c.ROUTES["gpr_table"] = lambda **p: {"results": [{"date": "2026-10-01", "gpr": 100}]}
     check(c.dispatch("board", {}).get("delayed") == c.DELAYED_YAHOO, "board: delayed")
     check("delayed" not in c.dispatch("chart", {"symbol": "FRED:DGS10"}) and c.dispatch("chart", {"symbol": "AAPL"}).get("delayed"), "FRED chart not delayed, AAPL chart delayed")
     check("delayed" not in c.dispatch("gpr_table", {}), "monthly index: not a price, no marker")
@@ -91,7 +91,7 @@ try:
     c._cache.clear()
     c._backoff.clear()
     c._STALE_SINCE.clear()
-    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1}]}}), encoding="utf-8")
+    (c.CACHE_DIR / "disk_fail.json").write_text(json.dumps({"t": time.time() - 7200, "v": {"results": [{"x": 1, "date": "2026-11-20"}], "sources": [{"name": "OECD", "detail": "d", "url": ""}]}}), encoding="utf-8")
     saved_r = dict(c.ROUTES)
     try:
         def _fail_fn():
@@ -100,6 +100,7 @@ try:
         out_df = c.dispatch("__disk_fail", {})
         check("stale" in out_df and "Source not answering:" in out_df["stale"] and "cached" not in out_df,
               "cached_disk fallback after CompositeError still emits 'stale' (not 'cached')")
+        check(out_df["status"] == "stale" and out_df["notes"] == [out_df["stale"]], "a stale fallback answers status 'stale' with the note")
     finally:
         c.ROUTES.clear()
         c.ROUTES.update(saved_r)
@@ -150,6 +151,11 @@ try:
         check(False, "429 should raise")
     except c.CompositeError as e:
         check(e.transient and _calls_429[0] == 1, "http_json 429 raises transient=True without retrying")
+    try:
+        _http.http_json("https://example.com/rate")
+    except c.CompositeError as e:
+        check(e.kind == "rate_limited" and _calls_429[0] == 1, "during the 429 cooldown nothing more is sent to that host")
+    c.reset_outbound()                    # the cases below are about retries, not the cooldown
 
     for _oecd_url in ("http://127.0.0.1:6900/api/v1/economy/gdp?provider=oecd", "http://127.0.0.1:6900/api/v1/oecd/nominal"):
         _oecd_calls = [0]
@@ -239,6 +245,7 @@ try:
 
     for _code, _exp_t in ((429, True), (404, False)):
         _dl_calls[0] = 0
+        c.reset_outbound()                # each status on its own (a 429 leaves the host cooling down)
         def _dl_no_retry(req, timeout=None, _c=_code, **kw):
             _dl_calls[0] += 1
             raise _ue.HTTPError(req.full_url, _c, "Err", {}, _io.BytesIO(b""))
@@ -264,12 +271,12 @@ finally:
     _ur.urlopen = _saved_urlopen
 
 # ---- cached_disk backoff tiers + memory cache non-shadowing + OECD / Too Many Requests 600s protection
-_saved_time_fn = _cache_mod.time.time
+_saved_time_fn, _saved_mono_fn = _cache_mod.time.time, _cache_mod.time.monotonic
 _saved_cd = c.CACHE_DIR
 _tmp_bo = tempfile.TemporaryDirectory()
 _clk = [10000.0]
 try:
-    _cache_mod.time.time = lambda: _clk[0]
+    _cache_mod.time.time = _cache_mod.time.monotonic = lambda: _clk[0]     # one fake clock for wall and monotonic time
     c.CACHE_DIR = pathlib.Path(_tmp_bo.name)
     c.reset_runtime_caches()
 
@@ -389,7 +396,7 @@ try:
     check(c.cached_disk("oecd_rates_long", 3600, _bo_oecd) == {"ok": "oecd"} and _oecd_bo_calls[0] == 2,
           "non-429 OECD error retries after 600s")
 finally:
-    _cache_mod.time.time = _saved_time_fn
+    _cache_mod.time.time, _cache_mod.time.monotonic = _saved_time_fn, _saved_mono_fn
     c.CACHE_DIR = _saved_cd
     c.reset_runtime_caches()
     _tmp_bo.cleanup()

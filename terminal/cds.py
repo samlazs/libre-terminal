@@ -17,7 +17,6 @@ Each day is summarised once and kept on disk (past files do not change; 366 days
 import datetime as dt
 import json
 import threading
-import time
 
 import composite as C
 
@@ -37,12 +36,14 @@ RANGES = {"1M": 1, "3M": 3, "6M": 6, "1Y": 12}
 STANDARD_MATURITY = {"-06-20", "-12-20"}
 SUMMARY_REV = "r3"              # bump when summarise() changes: summaries of past days are kept for good
 FINAL_AFTER_DAYS = 2            # a dissemination file older than this is complete: its summary is kept for good
+RECENT_TTL = 1800               # seconds a recent day, or a day with no index prints, is kept before it is fetched again
+FINAL_TTL = 10 * 365 * 86400    # a final day with prints: kept for good
 CDS_URL = "https://pddata.dtcc.com/ppd/cftcdashboard"
 SOURCE = C.src("CFTC", "swap-repository prints (DTCC public dissemination): index CDS, 5Y, new trades; level = notional-weighted "
                        "average of the on-the-run series (most-traded maturity)", CDS_URL)
 
 _lock = threading.Lock()
-_days = None                    # {date: {"t": fetched, "s": summary}}; loaded from disk once
+_days = None                    # the old one-file store {date: {"t", "s"}}: read once, only to seed final days without a fetch
 
 
 def level(r, convention):
@@ -108,36 +109,40 @@ def on_the_run(mats):
 
 
 def _path():
-    return C.CACHE_DIR / f"cds_index_days_{SUMMARY_REV}.json"      # a new rule for summarising a day = a new file
+    return C.CACHE_DIR / f"cds_index_days_{SUMMARY_REV}.json"      # the old one-file store (read-only seed)
 
 
 def _load():
     global _days
-    if _days is None:
-        try:
-            _days = json.loads(_path().read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            _days = {}
-    return _days
+    with _lock:
+        if _days is None:
+            try:
+                _days = json.loads(_path().read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                _days = {}
+        return _days
 
 
 def _fetch_day(d):
     return summarise(C.api(C.V5, "cftc/cds_index_trades", tenor="5Y", date=d))
 
 
+def day_name(d):
+    return f"cdsday_{SUMMARY_REV}_{d}"             # a new rule for summarising a day = new entries
+
+
 def day(d, today=None):
-    """Summary of dissemination date d (ISO), from disk when final, else fetched (recent days refreshed every 30 min)."""
+    """Summary of dissemination date d (ISO), on the shared cache: a final day with prints is kept for good; a recent
+    day, or a day with no index prints (an empty file is as likely a late or failed dissemination as a quiet day), is
+    fetched again after 30 minutes. A failed fetch serves the saved summary, or raises."""
     today = today or dt.datetime.now(dt.timezone.utc).date()
     final = (today - dt.date.fromisoformat(d)).days >= FINAL_AFTER_DAYS
-    with _lock:
-        hit = _load().get(d)
-    if hit and (final or time.time() - hit["t"] < 1800):
-        return hit["s"]
-    s = _fetch_day(d)
-    with _lock:
-        _load()[d] = {"t": time.time(), "s": s}
-        C._write_json(_path(), _days)
-    return s
+
+    def fetch():
+        old = (_load().get(d) or {}).get("s") if final else None
+        return old if old else _fetch_day(d)       # a final day with prints in the old store needs no fetch
+
+    return C.cache(("cds_day", d), lambda s: FINAL_TTL if final and s else RECENT_TTL, fetch, disk=day_name(d))
 
 
 def days(dates, today=None):
@@ -148,7 +153,8 @@ def days(dates, today=None):
         for f, d in futs.items():
             try:
                 out[d] = f.result()
-            except C.CompositeError:
+            except C.CompositeError as e:
+                C.partial_from(e, f"CFTC swap file of {d}")
                 continue
     return out
 
