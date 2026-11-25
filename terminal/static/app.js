@@ -130,6 +130,8 @@
   T.serializeState = serializeState;
   function savedItem(it) {
     var o = Object.assign({}, it, it._orig || {}, it._origLib || {});
+    if (it._orig && it._orig._noChart && !it._origLib) delete o.chart;          // a source pick added these; the layout had none
+    if (it._orig && it._orig._noGroups && !it._origLib) delete o.groups;
     if (it._origLib && it._choiceBase) {
       if (normJson(it.params || {}) !== normJson(it._choiceBase.params || {})) o.params = cloneVal(it.params || {});
       if (!it._guessedChart && normJson(it.chart || null) !== normJson(it._choiceBase.chart || null)) {
@@ -1159,7 +1161,11 @@
       if (hits.length === 1) { cid = hits[0].id; m = hits[0].member; }
     }
     var names = nd.params.map(function (x) { return x.paramName; }), keep = {};
-    if (!item._orig) item._orig = { widgetId: item.widgetId, backend: item.backend, params: Object.assign({}, item.params), needsKey: item.needsKey };
+    if (!item._orig) {           // the layout's own card, which savedItem() writes back: a source pick is a preference (srcsel)
+      item._orig = { widgetId: item.widgetId, backend: item.backend, params: Object.assign({}, item.params), needsKey: item.needsKey };
+      if (Object.prototype.hasOwnProperty.call(item, "chart")) item._orig.chart = cloneVal(item.chart); else item._orig._noChart = true;
+      if (Array.isArray(item.groups)) item._orig.groups = item.groups.slice(); else item._orig._noGroups = true;
+    }
     if (cid) item._concept = cid;
     Object.keys(item.params || {}).forEach(function (k) {
       if (k === "provider" || (m && m.dp && m.dp.indexOf(k) >= 0)) return;
@@ -1715,6 +1721,7 @@
     return hit;
   }
   T.broadcast = broadcast; T.setGroup = setGroup;
+  T.setView = setView; T.setCols = setCols; T.setPref = setPref;      // exposed for the offline checks (viewing never edits)
 
   /** Some stock dashboards name a widget slightly differently from the backend; find the closest real one. */
   var aliasCache = {};

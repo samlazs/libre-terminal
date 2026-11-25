@@ -658,7 +658,9 @@ window.__fcPromise = (async function (T) {
       "switching ticker clears off-screen Filing Viewer iframe back to prompt");
     ok(headersCard.node.querySelector(".w-params input").value === "" && /Pick a filing/.test(headersCard.node.querySelector(".msg").textContent),
       "switching ticker clears live selection and prompt on non-grouped Filing Headers");
-    ok(nasdaqIt.params.document_url === undefined, "switching ticker clears dependent fileSelector param on Nasdaq SEC Filings");
+    ok(Array.isArray(nasdaqIt.params.document_url) && nasdaqIt.params.document_url[0] === "https://pdf.example/aapl.pdf" && nasdaqCard.effParams().symbol === "NVDA" &&
+      (nasdaqCard.effParams().document_url == null || nasdaqCard.effParams().document_url === ""),
+      "switching ticker hides the old ticker's filing pick on Nasdaq SEC Filings for this view, without deleting it from the layout (P3-06)");
     ok(!T.S.cur.tabs[0].edited, "viewing filings and switching tickers does not mark tab edited");
 
     // Manual source pick to out-of-market provider (e.g., picking TMX on dual-listed ENB) must stick, attach Symbol, and survive tab open;
@@ -1040,9 +1042,39 @@ window.__fcPromise = (async function (T) {
         setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; },
         onChange: function () {}, onRemove: function () {}, relayout: function () {}
       });
+      var depEff = depCard.effParams();
+      ok(depEff.report_type === "FR Y-9C" && depEff.section === "HI" && depEff.period === "20251231", "saved picks apply for the bank the card was built with");
+      rssdG.value = "1068025";
       depCard.redrawParams("rssd_id");
-      ok(depIt.params.report_type === undefined && depIt.params.section === undefined && depIt.params.period === undefined,
-        "transitive clearDepParams clears report_type, section and period when rssd_id changes");
+      depEff = depCard.effParams();
+      ok(depIt.params.report_type === "FR Y-9C" && depIt.params.section === "HI" && depIt.params.period === "20251231" &&
+        depEff.rssd_id === "1068025" && depEff.report_type == null && depEff.section == null && depEff.period == null,
+        "another bank (rssd_id) hides report_type, section and period transitively for this view, without editing the layout (P3-06)");
+      rssdG.value = "1039502";
+      depCard.redrawParams("rssd_id");
+      depEff = depCard.effParams();
+      ok(depEff.report_type === "FR Y-9C" && depEff.section === "HI" && depEff.period === "20251231", "back on the first bank, its saved picks apply again");
+      // P3-06: a strike or target price belongs to its ticker. Another dashboard ticker hides it for this view (no +611,011%
+      // rows, review B5), never deletes it from the layout, and never calls onChange (which would mark the tab edited).
+      var pxG = { name: "Symbol", paramName: "symbol", value: "AAPL" }, pxChanges = 0;
+      var pxIt = { uid: "px-1", widgetId: "px_target", backend: "v5", params: { target_price: 250, strike: 240 }, groups: ["Symbol"] };
+      var pxCard = T.widget({
+        item: pxIt, def: { widgetId: "px_target", name: "Price target", type: "table", endpoint: "/__test_px",
+          params: [{ paramName: "symbol", type: "text", value: "AAPL" }, { paramName: "target_price", type: "number" }, { paramName: "strike", type: "number" }] },
+        backend: { id: "v5", name: "Test", url: "" }, scroller: stage4,
+        groupOf: function (it, p) { return p === "symbol" ? pxG : null; }, groupsOf: function () { return [pxG]; },
+        setGroup: function () {}, broadcast: function () {}, siblings: function () { return []; },
+        onChange: function () { pxChanges++; }, onRemove: function () {}, relayout: function () {}
+      });
+      ok(pxCard.effParams().target_price === 250 && pxCard.effParams().strike === 240, "saved target price and strike apply to their ticker");
+      pxG.value = "^SPX";
+      pxCard.redrawParams("symbol");
+      ok(pxIt.params.target_price === 250 && pxIt.params.strike === 240 && pxCard.effParams().target_price == null && pxCard.effParams().strike == null && pxChanges === 0,
+        "another ticker hides target price and strike for this view, keeps them in the layout, and does not call onChange");
+      pxG.value = "AAPL";
+      pxCard.redrawParams("symbol");
+      ok(pxCard.effParams().target_price === 250 && pxCard.effParams().strike === 240 && pxChanges === 0, "back on AAPL, its target price and strike apply again");
+      pxCard.destroy();
       depCard.destroy();
 
       var frIt = { uid: "fr-1", widgetId: "tmx_equity_asset_info_obb", backend: "v5", params: { symbol: "RY", theme: "dark" }, groups: [] };

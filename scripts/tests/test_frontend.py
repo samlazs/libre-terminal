@@ -4,7 +4,6 @@ temporary local/ folder and no data backends. Skipped with a notice when Edge (o
 The page is the real index.html with every script, plus frontend_checks.js at the end; its result is read from the DOM.
 """
 
-import os
 import re
 import shutil
 import socket
@@ -12,21 +11,9 @@ import subprocess
 import sys
 import tempfile
 import threading
-from pathlib import Path
 
+from _browser import CAPTURE, REPORT, find_browser
 from _common import ROOT, check, done
-
-
-def find_browser():
-    env = os.environ.get("TERMINAL_TEST_BROWSER", "").strip()
-    cands = [env] if env else []
-    for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")):
-        if base:
-            cands += [str(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
-                      str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe")]
-    cands += [shutil.which(n) or "" for n in ("msedge", "microsoft-edge", "google-chrome", "chromium", "chromium-browser")]
-    cands.append("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
-    return next((c for c in cands if c and Path(c).is_file()), None)
 
 
 browser = find_browser()
@@ -41,36 +28,6 @@ import local_paths  # noqa: E402
 local_paths.ensure()
 STATIC = ROOT / "terminal" / "static"
 CHECKS = (ROOT / "scripts" / "tests" / "frontend_checks.js").read_text(encoding="utf-8")
-CAPTURE = """
-(function () {
-  window.addEventListener("error", function (e) { window.__fcError = window.__fcError || ("uncaught " + e.message + " (" + String(e.filename || "").split("/").pop() + ":" + e.lineno + ")"); });
-  window.addEventListener("unhandledrejection", function (e) { var r = e && e.reason; window.__fcError = window.__fcError || ("unhandled rejection: " + String(r && r.message || r)); });
-  var log = console.log;
-  console.log = function (m) { if (/^frontend checks: \\d+ passed$/.test(String(m))) window.__fc = String(m); return log.apply(console, arguments); };
-})();
-"""
-REPORT = """
-(function () {
-  function emit() {
-    if (document.getElementById("frontend-result")) return;
-    var out = document.createElement("pre"); out.id = "frontend-result";
-    out.textContent = window.__fcError ? "FRONTEND FAILED: " + window.__fcError : (window.__fc || "FRONTEND FAILED: no result");
-    document.body.appendChild(out);
-    var notes = document.createElement("pre"); notes.id = "frontend-notes";
-    notes.textContent = (window.__fcNotes || []).join(" | ");
-    document.body.appendChild(notes);
-  }
-  var p = window.__fcPromise;
-  if (p && typeof p.then === "function") {
-    p.then(function () { setTimeout(emit, 0); }, function (e) {
-      window.__fcError = window.__fcError || String(e && e.message || e);
-      setTimeout(emit, 0);
-    });
-  } else {
-    emit();
-  }
-})();
-"""
 page = (STATIC / "index.html").read_text(encoding="utf-8").replace(
     "</body>", '<script src="/__capture.js"></script><script src="/__checks.js"></script><script src="/__report.js"></script>\n</body>')
 SCRIPTS = {

@@ -653,18 +653,48 @@
     // saved into the layout (viewing must not pin an NVIDIA filing on the Filings tab forever). Cleared when the
     // dashboard's ticker changes.
     var live = {};
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function pdef(name) { return def.params.filter(function (x) { return x.paramName === name; })[0]; }
+    function cur(name, depth) {                    // the value a parameter has now: a row click, the saved pick, a group
+      var p = pdef(name), g = ctx.groupOf(item, name);
+      if (g && !empty(g.value)) return p && name === "country" ? countryFor(p, g.value) : g.value;
+      if (own(live, name)) return live[name];
+      if (own(item.params, name) && !masked(name, depth)) return item.params[name];
+      return p ? p.value : undefined;
+    }
+    function same(a, b) {
+      a = T.resolveParam(a); b = T.resolveParam(b);
+      return (a == null ? "" : String(a).trim().toUpperCase()) === (b == null ? "" : String(b).trim().toUpperCase());
+    }
+    // A saved pick that belongs to another parameter's value (a strike or a target price to its symbol, an expiration to
+    // the symbol it was listed for) applies only while that parameter still shows its saved value. Another dashboard
+    // ticker or a row click hides it for this view; the layout keeps it, so viewing never edits a tab (P3-06).
+    var loaded = {};                               // anchor values when the card was built: what an unanchored saved pick belongs to
+    function moved(name, depth) {
+      var now = cur(name, depth);
+      if (own(item.params, name)) return !same(now, item.params[name]);
+      if (!own(loaded, name)) loaded[name] = now;
+      return !same(now, loaded[name]);
+    }
+    function anchors(name) {
+      var p = pdef(name), out = PRICE_PARAMS.indexOf(name) >= 0 ? ["symbol"] : [];
+      if (p && p.optionsParams) Object.keys(p.optionsParams).forEach(function (k) {
+        var ref = p.optionsParams[k];
+        if (typeof ref === "string" && ref.charAt(0) === "$" && ref.slice(1) !== name && out.indexOf(ref.slice(1)) < 0) out.push(ref.slice(1));
+      });
+      return out;
+    }
+    function masked(name, depth) {
+      depth = (depth || 0) + 1;
+      if (depth > 4) return false;
+      return anchors(name).some(function (a) { return moved(a, depth); });
+    }
     function eff() {
       var out = {};
-      def.params.forEach(function (p) {
-        var v = Object.prototype.hasOwnProperty.call(live, p.paramName) ? live[p.paramName]
-          : Object.prototype.hasOwnProperty.call(item.params, p.paramName) ? item.params[p.paramName] : p.value;
-        var g = ctx.groupOf(item, p.paramName);
-        if (g && !empty(g.value)) v = p.paramName === "country" ? countryFor(p, g.value) : g.value;
-        out[p.paramName] = T.resolveParam(v);
-      });
+      def.params.forEach(function (p) { out[p.paramName] = T.resolveParam(cur(p.paramName)); });
       // Some widget definitions omit a parameter the endpoint still needs (e.g. the ticker):
       // pass through values the dashboard pinned on the item, and the values of groups it follows.
-      Object.keys(item.params).forEach(function (k) { if (!(k in out) && !empty(item.params[k])) out[k] = T.resolveParam(item.params[k]); });
+      Object.keys(item.params).forEach(function (k) { if (!(k in out) && !empty(item.params[k]) && !masked(k)) out[k] = T.resolveParam(item.params[k]); });
       Object.keys(live).forEach(function (k) { if (!(k in out) && !empty(live[k])) out[k] = live[k]; });
       (ctx.groupsOf ? ctx.groupsOf(item) : []).forEach(function (g) { if (!(g.paramName in out) && !empty(g.value)) out[g.paramName] = g.value; });
       if (def.symbolList && T.lists) T.lists.inject(def, item, out);      // watchlist symbols / the user's peers, kept in saved state
@@ -690,7 +720,7 @@
       return out;
     }
     function stripParams() { return (def.strip || []).map(function (s) { return s.param; }); }
-    function clearDepParams(paramName, keepNull) {
+    function clearDepParams(paramName, mode) {
       var cleared = false;
       if (!paramName) return false;
       var pending = [paramName], seen = {};
@@ -702,8 +732,8 @@
           if (d.optionsParams && Object.keys(d.optionsParams).some(function (k) { return d.optionsParams[k] === "$" + curParam; })) {
             if (Object.prototype.hasOwnProperty.call(item.params, d.paramName) && item.params[d.paramName] != null) cleared = true;
             if (Object.prototype.hasOwnProperty.call(live, d.paramName)) cleared = true;
-            if (keepNull) item.params[d.paramName] = null;
-            else delete item.params[d.paramName];
+            if (mode === "null") item.params[d.paramName] = null;
+            else if (mode === "delete") delete item.params[d.paramName];
             delete live[d.paramName];
             pending.push(d.paramName);
           }
@@ -725,11 +755,14 @@
     function setParam(p, v) {
       if (typeof v === "string") v = v.trim();
       if (p.paramName === "symbol" && typeof v === "string" && p.type !== "endpoint") v = v.toUpperCase();
-      if (p.paramName === "symbol") dropPriceParams();
       var g = ctx.groupOf(item, p.paramName);
-      // dependants (options driven by this param) are no longer valid
-      clearDepParams(p.paramName, true);
-      if (g) { ctx.setGroup(g, v); return; }
+      // a group pick is a preference: saved picks that depended on it are hidden for this view (masked), never deleted
+      if (g) { clearDepParams(p.paramName, "live"); ctx.setGroup(g, v); return; }
+      if (p.paramName === "symbol") dropPriceParams();
+      // dependants (options driven by this param) are no longer valid: an edit of this card, so they are cleared in it
+      clearDepParams(p.paramName, "null");
+      // a pick that belongs to another value (a strike to its symbol) is saved with the value it belongs to
+      anchors(p.paramName).forEach(function (a) { if (pdef(a) && moved(a)) item.params[a] = cur(a); });
       // the settings panel wins over the strip (and over a statement's Annual / Quarterly switch)
       if (ctx.setView && (stripParams().indexOf(p.paramName) >= 0 || (p.paramName === "period" && T.statementKind && T.statementKind(def)))) ctx.setView(item, p.paramName, null);
       delete live[p.paramName];
@@ -1534,7 +1567,7 @@
       var had = Object.keys(live).length > 0;
       live = {};
       filterVal = "";
-      if (clearDepParams(changedParam, false)) had = true;
+      if (clearDepParams(changedParam, "live")) had = true;
       drawParams(); paintTitle(); paintSource();
       if (had) {
         if (abort) { abort.abort(); abort = null; }
@@ -1557,10 +1590,10 @@
       backend: ctx.backend.id,
       redrawParams: function (changedParam) {      // the dashboard ticker changed: row picks no longer apply
         slowRetries = 0;
-        if (changedParam === "symbol" && dropPriceParams()) ctx.onChange();
-        clearLive(changedParam);
+        clearLive(changedParam);             // saved picks of the old ticker are masked in eff(), the layout is not edited
       },
       clearLive: clearLive,
+      effParams: function () { return eff(); },    // the parameters the next request sends (checks read them)
       hasParam: function (name) {
         return def.params.some(function (p) {
           if (p.paramName !== name) return false;
