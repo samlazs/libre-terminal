@@ -33,20 +33,42 @@ PARTIAL_HOLD = 60.0                    # seconds an incomplete answer (Partial) 
 # answers status=partial with a note naming what is missing. A cache whose fn used a partial answer is partial itself
 # (the inner notes are collected while fn runs), so nesting caches never turns an incomplete answer into a complete one.
 class Partial:
-    """value with parts missing. missing names them for the reader ("FRED DGS10", "Germany"); an empty list only holds
-    the answer short without reporting it (a background refresh is already on its way)."""
+    """value that is not the whole, fresh answer from its own sources, and says so on every request it serves.
 
-    __slots__ = ("value", "missing")
+    missing    parts that failed, named for the reader ("FRED DGS10", "Germany")
+    fallbacks  substitutions made ("FRED public download used instead: the FRED key is not set")
+    stale      wall times of saved copies it was built from (shown as "showing the copy saved ...")
+    An answer with missing parts or stale copies is held short and never written to disk; one with only substitutions
+    keeps its normal life (the substitute's data is complete). With none of the three it only holds short, unreported
+    (a background refresh is already on its way)."""
 
-    def __init__(self, value, missing=()):
+    __slots__ = ("value", "missing", "fallbacks", "stale")
+
+    def __init__(self, value, missing=(), fallbacks=(), stale=()):
         self.value = value
         self.missing = list(dict.fromkeys(str(m) for m in (missing or ()) if m))
+        self.fallbacks = list(dict.fromkeys(str(m) for m in (fallbacks or ()) if m))
+        self.stale = sorted({float(t) for t in (stale or ()) if t})
+
+    @property
+    def short(self):
+        """Held PARTIAL_HOLD seconds and never written to disk."""
+        return bool(self.missing or self.stale) or not self.fallbacks
 
     def __repr__(self):
-        return f"Partial(missing={self.missing!r})"
+        return f"Partial(missing={self.missing!r}, fallbacks={self.fallbacks!r}, stale={len(self.stale)})"
 
 
 _PARTIAL_NOTES = contextvars.ContextVar("partial_notes", default=None)
+_FALLBACK_NOTES = contextvars.ContextVar("fallback_notes", default=None)
+
+
+def note_fallback(source, reason):
+    """Record, for the request (or cache fetch) running now, that `source` was used instead of the usual one, and why."""
+    notes = C._FALLBACK_NOTES.get()
+    text = f"{source} used instead: {reason}"
+    if notes is not None and text not in notes:
+        notes.append(text)
 
 
 def note_partial(missing):
@@ -72,24 +94,34 @@ def partial_text(missing):
 
 
 def _collect(fn):
-    """Run fn and return its answer as a Partial when fn, or any cache it used, reported a missing part."""
-    inner = []
-    token = C._PARTIAL_NOTES.set(inner)
+    """Run fn and return its answer as a Partial when fn, or any cache it used, reported a missing part, a substitution
+    or a stale copy: what an answer is built from travels with it into every cache that holds it."""
+    inner, subs, ages = [], [], []
+    tokens = (C._PARTIAL_NOTES.set(inner), C._FALLBACK_NOTES.set(subs), C._STALE_NOTES.set(ages))
     try:
         val = fn()
     finally:
-        C._PARTIAL_NOTES.reset(token)
+        C._STALE_NOTES.reset(tokens[2])
+        C._FALLBACK_NOTES.reset(tokens[1])
+        C._PARTIAL_NOTES.reset(tokens[0])
     if isinstance(val, Partial):
-        if inner:
-            val.missing = list(dict.fromkeys(val.missing + inner))
+        val.missing = list(dict.fromkeys(val.missing + inner))
+        val.fallbacks = list(dict.fromkeys(val.fallbacks + subs))
+        val.stale = sorted(set(val.stale) | {float(t) for t in ages if t})
         return val
-    return Partial(val, inner) if inner else val
+    return Partial(val, inner, subs, ages) if (inner or subs or ages) else val
 
 
 def _serve(val):
-    """A cached value as callers see it: a Partial is unwrapped and its missing parts noted on the request."""
+    """A cached value as callers see it: a Partial is unwrapped and what it says about itself noted on the request."""
     if isinstance(val, Partial):
         C.note_partial(val.missing)
+        for f in val.fallbacks:
+            fb = C._FALLBACK_NOTES.get()
+            if fb is not None and f not in fb:
+                fb.append(f)
+        for t in val.stale:
+            C._note_stale_ts(t)
         return val.value
     return val
 
@@ -191,8 +223,8 @@ def cached(key, ttl, fn, partial_ttl=None):
     partial_ttl seconds (PARTIAL_HOLD by default) and reported on every request it serves."""
     hold = C.PARTIAL_HOLD if partial_ttl is None else partial_ttl
 
-    def fresh(hit):                              # a Partial is good for at most `hold` seconds after it was fetched
-        return hit and time.monotonic() - hit[0] < (min(ttl, hold) if isinstance(hit[1], Partial) else ttl)
+    def fresh(hit):                              # a short Partial is good for at most `hold` seconds after it was fetched
+        return hit and time.monotonic() - hit[0] < (min(ttl, hold) if isinstance(hit[1], Partial) and hit[1].short else ttl)
 
     with C._guard:
         hit = C._cache.get(key)
@@ -327,7 +359,8 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
             if now - saved["t"] < good:
                 with C._guard:
                     C._STALE_SINCE.pop(name, None)
-                return saved["v"], min(mem_ttl, max(1.0, good - (now - saved["t"])))
+                v = Partial(saved["v"], fallbacks=saved["fb"]) if saved.get("fb") else saved["v"]     # a substitute's answer says so
+                return v, min(mem_ttl, max(1.0, good - (now - saved["t"])))
         except (OSError, ValueError, KeyError, TypeError):
             saved = None
         with C._guard:
@@ -369,9 +402,12 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
         with C._guard:
             C._backoff.pop(name, None)
             C._STALE_SINCE.pop(name, None)
-        if isinstance(val, Partial):             # never saved as complete; asked again after partial_ttl
+        if isinstance(val, Partial) and val.short:   # never saved as complete; asked again after partial_ttl
             hold = C.PARTIAL_HOLD if partial_ttl is None else partial_ttl
             return val, min(mem_ttl, max(1.0, float(hold)))
+        if isinstance(val, Partial):                  # a substitute's complete answer: saved, with what it substituted
+            C._write_json(path, {"t": time.time(), "v": val.value, "fb": val.fallbacks})
+            return val, min(mem_ttl, float(ttl_of(val.value)))
         C._write_json(path, {"t": time.time(), "v": val})
         return val, min(mem_ttl, float(ttl_of(val)))
 

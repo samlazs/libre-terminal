@@ -22,6 +22,7 @@ from .core.cache import (  # noqa: F401
     _CfShim, cf, _note_stale, _note_stale_ts, _note_swr_ts, _age_text, stale_text, cached_text, mtl_time, cached_disk,
     _write_json, cached_complete, _curve_store, reset_runtime_caches, LRUDict, LRUSet, STATE_CAP, NEG_TTL, _neg, _mono,
     cache, Partial, PARTIAL_HOLD, _PARTIAL_NOTES, note_partial, partial_from, partial_text, _collect, _serve,
+    _FALLBACK_NOTES, note_fallback,
 )
 from .core.dates import (  # noqa: F401
     minus_months, HORIZON_MONTHS, horizon_date, RANGE_YEARS, DAILY_RANGES, MONTHLY_RANGES,
@@ -109,27 +110,27 @@ def dispatch(name, params):
     why = _contract.bad_params(fn, params)
     if why:
         raise CompositeError("Bad parameters for this view: " + why[:200], kind="input", status=400)
-    notes, swr_notes, missing = [], [], []
+    notes, swr_notes, missing, subs = [], [], [], []
     token = _STALE_NOTES.set(notes)
     swr_token = _SWR_NOTES.set(swr_notes)
     part_token = _PARTIAL_NOTES.set(missing)
+    fb_token = _FALLBACK_NOTES.set(subs)
     dl_token = _contract.set_deadline(_contract.budget_for(name))       # every outbound call is cut to the time left
     try:
-        out = fn(**params)
+        out = _serve(fn(**params))                      # a view that returns a Partial reports it directly
     finally:
         _contract._DEADLINE.reset(dl_token)
+        _FALLBACK_NOTES.reset(fb_token)
         _PARTIAL_NOTES.reset(part_token)
         _SWR_NOTES.reset(swr_token)
         _STALE_NOTES.reset(token)
-    if isinstance(out, Partial):                        # a view that reports its own missing parts directly
-        missing += [m for m in out.missing if m not in missing]
-        out = out.value
     if not isinstance(out, dict):
         out = {"results": out}
-    if missing:                                         # some source failed: never presented as the whole answer
+    if missing or subs:                                 # never presented as the whole answer from the usual sources
         prior = out.get("status")
-        out = dict(out, status="partial" if prior in (None, "ok", "stale") else prior,
-                   notes=list(out.get("notes") or []) + [partial_text(missing)])
+        new = "partial" if missing else "fallback"
+        out = dict(out, status=new if prior in (None, "ok", "stale") or (missing and prior == "fallback") else prior,
+                   notes=list(out.get("notes") or []) + ([partial_text(missing)] if missing else []) + subs)
     if not out.get("sources"):
         out = dict(out, sources=static_sources(name, params))       # the cached object itself is never changed
     if isinstance(out, dict) and notes:

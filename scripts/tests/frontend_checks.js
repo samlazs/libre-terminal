@@ -517,6 +517,16 @@ window.__fcPromise = (async function (T) {
     var f3 = document.createElement("div");
     T.renderTrust(f3, { status: "ok", notes: [] });
     ok(f3.textContent === "", "status ok draws nothing");
+    // P2-03: what dispatch answers for a substituted, partial and stale answer: every note drawn once
+    var f4 = document.createElement("div");
+    T.renderTrust(f4, { status: "partial", stale: "Source not answering: showing the copy saved 2026-11-20 12:00 (30 h old)",
+      notes: ["Partial answer: no data from FRED DGS2 just now (asked again within a minute)", "FRED's public download used instead: no FRED key is set",
+              "Source not answering: showing the copy saved 2026-11-20 12:00 (30 h old)"] });
+    ok(/no data from FRED DGS2/.test(f4.textContent) && /public download used instead: no FRED key is set/.test(f4.textContent)
+      && (f4.textContent.match(/copy saved 2026-11-20/g) || []).length === 1, "partial, substitute and stale notes all drawn, once each");
+    var f5 = document.createElement("div");
+    T.renderTrust(f5, { status: "fallback", notes: ["the last daily close used instead: the options chain has no underlying price"] });
+    ok(/last daily close used instead/.test(f5.textContent) && !/substitute source/.test(f5.textContent), "fallback with its note: the note, not a bare badge");
   })();
 
   ok(T.classifyError("CIK not found for symbol SAP.DE", 400, { source: "SEC", provider: "sec", symbol: "SAP.DE" }).cls === "covered", "CIK not found classifies as not covered");

@@ -114,16 +114,16 @@ def _meta(symbols):
                     C._cache[("msym", s)] = (C._mono(rec["t"]), rec["v"])
                 out[s] = rec["v"]
                 continue
-            fallback[s] = rec["v"]
+            fallback[s] = (rec["v"], float(rec["t"]))
         need.append(s)
 
     if need:
-        fresh = {}
+        fresh, failed = {}, None
         for i in range(0, len(need), 25):
             try:
                 rows = C.api(C.V5, "equity/price/quote", _timeout=25, symbol=",".join(need[i:i + 25]), provider="yfinance")
             except C.CompositeError as e:
-                C.partial_from(e, "Yahoo Finance quotes")
+                failed = e                       # symbols left without names: their saved copy (stale) or partial, below
                 continue
             for r in rows or []:
                 sym = r.get("symbol")
@@ -146,8 +146,13 @@ def _meta(symbols):
                         merged[sym] = {"t": ts, "v": info}
                 C._write_json(disk_path, merged)
         for s in need:
-            if s not in out and s in fallback:
-                out[s] = fallback[s]
+            if s in out:
+                continue
+            if s in fallback:
+                out[s] = fallback[s][0]
+                C._note_stale_ts(fallback[s][1])          # an expired name/currency is served flagged, never as fresh
+            elif failed is not None:
+                C.partial_from(failed, "Yahoo Finance quotes")
     return out
 
 

@@ -26,12 +26,14 @@ def curves(countries, dates=None, us_source="auto"):
             src = C.COUNTRIES[c][1]
             if src == "fed":
                 if us_source != "fred":
+                    why = "the data service's Treasury curve was empty"
                     try:
                         got = C._backend_curve(src, dates)
                         if got:
                             return got
-                    except C.CompositeError:
-                        pass
+                    except C.CompositeError as e:
+                        why = f"the data service's Treasury curve did not answer ({C.kind_of(e).replace('_', ' ')})"
+                    C.note_fallback("FRED's Treasury yields", why)
                 used[c] = "fred"
                 return C._nearest(C._src_fred_us(), dates)
             if src == "ecb":

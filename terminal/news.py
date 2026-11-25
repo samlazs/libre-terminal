@@ -17,6 +17,7 @@ Views: mode "top" (ranked; Markets Summary, subject cards) and "monitor" (newest
 """
 
 import concurrent.futures as _cf
+import contextvars
 import datetime as dt
 import email.utils
 import html
@@ -193,6 +194,20 @@ def _get(url, ua=C.BROWSER_UA, gnews=False):
     return C.fetch(url, provider="google_news" if gnews else None, parse="bytes", timeout=15, ua=ua)
 
 
+def _degraded(url, hit):
+    """A failed feed's answer: its last items, flagged as an old copy, or nothing, flagged as a missing feed."""
+    if hit:
+        C._note_stale_ts(time.time() - (time.monotonic() - hit[0]))
+        return hit[1]
+    C.note_partial([f"news feed {urllib.parse.urlsplit(url).netloc or url[:40]}"])
+    return []
+
+
+def _submit(fn, *args):
+    """_pool.submit carrying the request's context (its notes and deadline) into the worker."""
+    return _pool.submit(contextvars.copy_context().run, fn, *args)
+
+
 def fetch(url, ttl=300, gnews=False):
     """A feed's items, at most `ttl` seconds old. A feed that fails keeps its last items (they age out of the time
     window by themselves) and is not asked again for 10 minutes."""
@@ -203,7 +218,7 @@ def fetch(url, ttl=300, gnews=False):
             return hit[1]
         failed_at = _FEED_FAIL.get(url)
         if failed_at is not None and now - failed_at < 600:
-            return hit[1] if hit else []
+            return _degraded(url, hit)
     try:
         body = _get(url, gnews=gnews)
         items = parse_feed(body)
@@ -211,7 +226,7 @@ def fetch(url, ttl=300, gnews=False):
         with _lock:
             _FEED_FAIL[url] = time.monotonic()
             _FEED_ERR[url] = str(e)[:200]
-        return hit[1] if hit else []
+        return _degraded(url, hit)
     with _lock:
         _FEED_CACHE[url] = (time.monotonic(), items)
         _FEED_FAIL.pop(url, None)
@@ -669,13 +684,13 @@ def collect(subj, feed_ids, queries=True):
     for fid in feed_ids:
         f = FEEDS.get(fid)
         if f:
-            jobs[_pool.submit(fetch, f[1], 900 if f[2] == 1 else 300)] = fid
+            jobs[_submit(fetch, f[1], 900 if f[2] == 1 else 300)] = fid
     if queries:
         for q, lang, gl in subj.queries:
-            jobs[_pool.submit(fetch, gnews_url(q, lang, gl), 900, True)] = "gnews"
-    prim = _pool.submit(subj.primary) if subj.primary else None
+            jobs[_submit(fetch, gnews_url(q, lang, gl), 900, True)] = "gnews"
+    prim = _submit(subj.primary) if subj.primary else None
     out, used = [], set()
-    deadline = time.monotonic() + 30.0
+    deadline = time.monotonic() + max(0.1, C.time_left(30.0))       # never past the view's own budget
     try:
         for fut in _cf.as_completed(jobs, timeout=max(0.1, deadline - time.monotonic())):
             fid = jobs[fut]

@@ -57,7 +57,8 @@ def chart(currency="BTC", range="1Y", today=None, **_):
     def load():
         dv = C.api(C.V5, "deribit/volatility/index", provider="deribit", currency=ccy, interval="1d", start_date=start.isoformat()) or []
         px = C.api(C.V5, "crypto/price/historical", provider="yfinance", symbol=ticker, start_date=fetch_from) or []
-        return dv, px
+        gone = (["Deribit DVOL"] if not dv else []) + (["Yahoo Finance daily closes"] if not px else [])
+        return C.Partial((dv, px), gone) if gone else (dv, px)
     dv, px = C.cached(("cryptovol", ccy, start.isoformat()), 900, load)
     done = today.isoformat()                                   # complete UTC days only
     implied = sorted((_day(r.get("date")), c) for r in dv for c in [_fin(r.get("close"))] if c is not None and _day(r.get("date")) < done)

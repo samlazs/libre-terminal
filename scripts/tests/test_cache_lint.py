@@ -1,7 +1,7 @@
 """Lint: a source failure (CompositeError) is never turned into empty data without saying so.
 
 Every `except ... CompositeError` in terminal/ whose body swallows the failure (returns or assigns [] / {} / None, or is
-only pass / continue) must mark the answer partial (C.partial_from / note_partial), re-raise, or be listed below with
+only pass / continue) must mark the answer partial (C.partial_from / note_partial) or substituted (note_fallback), re-raise, or be listed below with
 the reason it is not a cached empty answer. A new site fails this test until it is one of those three."""
 
 import ast
@@ -19,7 +19,6 @@ ALLOWED = {
     "composite/macro/sources.py::_fred_points": "falls back to FRED's public CSV on the next line; that failure raises",
     "composite/markets/prices.py::_fetch_history": "retried symbol by symbol below; history() reports symbols still missing",
     "composite/markets/prices.py::_ohlc.run": "retried once; an empty result raises below",
-    "composite/rates/curves.py::curves.run.one": "falls back to FRED's U.S. curve, recorded in __src__ and shown as the source",
     "valuation.py::_figures": "SEC figures fall back to Yahoo; the basis used is named in the answer",
     "valuation.py::bands": "SEC figures fall back to Yahoo; the basis used is named in the answer",
     "valuation.py::roic_dupont": "SEC figures fall back to Yahoo; the basis used is named in the answer",
@@ -52,7 +51,7 @@ def _says_so(h):
     for node in ast.walk(ast.Module(body=h.body, type_ignores=[])):
         if isinstance(node, ast.Raise):
             return True
-        if isinstance(node, ast.Call) and ast.unparse(node.func).split(".")[-1] in ("partial_from", "note_partial"):
+        if isinstance(node, ast.Call) and ast.unparse(node.func).split(".")[-1] in ("partial_from", "note_partial", "note_fallback"):
             return True
     return False
 

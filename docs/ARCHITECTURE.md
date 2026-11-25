@@ -299,6 +299,10 @@ source with nothing for the input, `not_covered`/`input`, is a complete answer).
 held 60 s, and the view answers `status: "partial"` with a note naming what is missing; a cache whose fn used a partial
 answer is partial itself. `_safe` catches `CompositeError` only. `test_cache_lint` fails on any new
 `except CompositeError` that turns a failure into `[]`/`{}`/`None` silently.
+Substitutions say so the same way: `note_fallback(source, reason)` where a substitute is used (FRED's public download
+for the data service, FRED's curve for the U.S. Treasury curve, the last close for a chain without a spot). The view then
+answers `status: "fallback"` with the note. What an answer was built from (missing parts, substitutes, saved copies served
+because a source failed) travels with it into every cache that holds it, so a cache hit says what the first answer said.
 
 Time budgets: `core/contract.py` `ROUTE_BUDGETS` is the one table of how long a route may take on the server (per `/x/`
 view, per directly called backend route pattern, a default). `/api/config` serves it as `budgets` and the page's

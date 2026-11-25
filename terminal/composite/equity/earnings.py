@@ -315,6 +315,7 @@ def _implied_move(chain, target_date, spot=None, today=None, timing=None):
     if td < now_d or (td - now_d).days > 120:
         return None
     rows, chain_spot, as_of = C._parse_option_chain(chain)
+    spot_from = "chain" if chain_spot else "close"
     spot = chain_spot or C._f(spot)
     if not spot or spot <= 0:
         return None
@@ -348,6 +349,7 @@ def _implied_move(chain, target_date, spot=None, today=None, timing=None):
             "dte": dte,
             "strike": strike,
             "spot": spot,
+            "spot_from": spot_from,                  # "close" when the chain had no underlying price (flagged by the caller)
             "straddle": straddle,
             "move": straddle / spot,
             "pricing": pricing,
@@ -489,6 +491,8 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
             got = C._options_chain(sym)
             chain, opt_prov = got if isinstance(got, tuple) else (got, "cboe")
             implied = C._implied_move(chain, imp_target, spot=spot_fallback, today=today, timing=imp_timing)
+            if implied and implied.get("spot_from") == "close":
+                C.note_fallback("the last daily close", "the options chain has no underlying price for the implied move")
             if implied:
                 implied["provider"] = opt_prov or "nasdaq"
                 if moves:

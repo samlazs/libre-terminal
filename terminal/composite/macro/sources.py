@@ -166,6 +166,8 @@ def _fred_any(ids, start):
         if "Missing credential" in str(first) or "api_key" in str(first):
             raise C.CompositeError(str(e)) from None
         raise first from None
+    keyless = "Missing credential" in str(first) or "api_key" in str(first)
+    C.note_fallback("FRED's public download", "no FRED key is set" if keyless else "the data service's FRED route did not answer")
     with C.cf.ThreadPoolExecutor(max_workers=4) as ex:
         def one(sid):
             try:

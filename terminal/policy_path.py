@@ -150,7 +150,8 @@ def _fred_last(sid):
         return rows[-1] if rows else None
     try:
         return C.cached(("fred_last", sid), 3 * 3600, run)
-    except Exception:              # noqa: BLE001 - a missing fixing leaves the current period undrawn, never an error
+    except C.CompositeError as e:  # a missing fixing leaves the current period undrawn, never an error, and says so
+        C.partial_from(e, f"FRED {sid} (latest overnight fixing)")
         return None
 
 

@@ -190,7 +190,10 @@ def vol_cone(symbol="SPY", today=None, **_):
     note_iv = ""
     try:
         raw = _chain(sym)
-        spot = next((r.get("underlying_price") for r in raw if isinstance(r.get("underlying_price"), (int, float))), None) or closes[-1][1]
+        spot = next((r.get("underlying_price") for r in raw if isinstance(r.get("underlying_price"), (int, float))), None)
+        if not spot:
+            spot = closes[-1][1]
+            C.note_fallback("the last daily close", "the options chain has no underlying price for the ATM implied volatility")
         term = atm_term(_rows(raw), spot, today)
     except C.CompositeError as e:
         term, note_iv = [], f" · no implied volatility ({e})"
