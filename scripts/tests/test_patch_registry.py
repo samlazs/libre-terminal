@@ -15,7 +15,7 @@ spec.loader.exec_module(rb)
 
 # ---- registry shape
 ids = [p.id for p in rb.PATCHES]
-check(len(ids) == len(set(ids)) == 54, f"54 patches with unique ids ({len(ids)})")
+check(len(ids) == len(set(ids)) == 55, f"55 patches with unique ids ({len(ids)})")
 titles = [p.title for p in rb.PATCHES]
 check(len(titles) == len(set(titles)) and all(t.strip() for t in titles), "titles are unique and non-empty")
 tree = ast.parse((ROOT / "scripts" / "run_backend.py").read_text(encoding="utf-8"))
@@ -98,8 +98,8 @@ code = ("import importlib.util,json,sys\n"
 r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300, cwd=ROOT)
 line = next((ln for ln in reversed((r.stdout or "").splitlines()) if ln.startswith("{")), None)
 res = json.loads(line) if line else {}
-check(res.get("n") == 54 and res.get("failed") == [], f"all 54 patches apply on .venv-v5 ({res}; {(r.stderr or '')[-300:]})")
-check(res.get("applied") == 57, f"57 applied lines, as before the registry ({res.get('applied')})")
+check(res.get("n") == 55 and res.get("failed") == [], f"all 55 patches apply on .venv-v5 ({res}; {(r.stderr or '')[-300:]})")
+check(res.get("applied") == 58, f"58 applied lines (57 before the registry, plus the legend day-change fix) ({res.get('applied')})")
 check(res.get("unverified") == [], f"no patch is unverified on .venv-v5 ({res.get('unverified')})")
 
 done("test_patch_registry")

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BROWSER_TESTS = {"test_frontend.py", "test_viewing.py"}          # headless Edge/Chrome: skipped by --fast
+BROWSER_TESTS = {"test_frontend.py", "test_viewing.py", "test_legend_change.py"}          # headless Edge/Chrome: skipped by --fast
 
 
 def select_tests(all_tests: list[Path], patterns: list[str] | None = None, fast: bool = False) -> list[Path]:

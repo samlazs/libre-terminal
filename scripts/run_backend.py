@@ -1786,6 +1786,89 @@ def install_fx_chart_fix(applied: list, tvdf=None, tvn=None):
     applied.append("TradingView FX candles, header change and session use 17:00 New York closes")
 
 
+# The chart legend (pywry 2.0 tvchart: 02-helpers.js _tvRenderHoverLegend, 11-legend.js last-bar and hover legends)
+# printed close - open of the bar as its change: a daily candle showed its open-to-close move, not the day's change.
+# EUNL.DE 2026-11-25: open 124.525, close 122.24 -> "-2.29 (-1.83%)" beside Yahoo's -2.325 (-1.87%) from the
+# previous close 124.565. Each site now counts from the previous bar's close (TradingView's convention, and the
+# boards' 1D: the bar before), and colours the values by that change. The previous bar is found by the hovered
+# bar's own time, so the zone a bar is stamped in (Berlin midnight is 23:00 UTC the day before) does not matter;
+# a point that is not a raw bar (Heikin Ashi) or the first bar keeps the open.
+LEGEND_CHANGE = re.compile(
+    r"var chg\s*=\s*(?:Number\()?(?P<v>\w+)\.close\)?\s*-\s*(?:Number\()?(?P=v)\.open\)?;\s*"
+    r"var chgPct\s*=\s*[^;]*?\b(?P=v)\.open[^;]*;\s*"
+    r"var clr\s*=\s*(?P<fn>[\w$]+)\(\s*(?P=v)\.close\s*,\s*(?P=v)\.open\s*\);")
+LEGEND_ROWS = {          # (colour function, point variable) -> the raw bars of the series that point belongs to
+    ("_tvLegendColorize", "d"): "entry && entry._seriesRawData && entry._seriesRawData[mainKey]",
+    ("colorize", "last"): "rows",
+    ("colorize", "d"): "entry && entry._seriesRawData && entry._seriesRawData[sKey]",
+}
+LEGEND_BASE_SCRIPT = """<script>(function () {
+  function secs(v) {
+    if (typeof v === "number") return v;
+    if (typeof v === "string") { var n = Date.parse(v.length === 10 ? v + "T00:00:00Z" : v); return isNaN(n) ? null : n / 1000; }
+    if (v && typeof v === "object" && v.year) return Date.UTC(v.year, v.month - 1, v.day) / 1000;
+    return null;
+  }
+  /* The close a bar's change counts from: the bar before it in its own series; the bar's open when there is none. */
+  window.__terminalChangeBase = function (rows, p) {
+    var open = Number(p && p.open), want = secs(p && p.time);
+    if (!rows || !rows.length || want === null) return open;
+    for (var i = rows.length - 1; i > 0; i--) {
+      var at = secs(rows[i] && rows[i].time);
+      if (at === null || at < want) break;
+      if (at === want) {
+        var prev = Number(rows[i - 1] && rows[i - 1].close);
+        return Number(rows[i].close) === Number(p.close) && isFinite(prev) && prev > 0 ? prev : open;
+      }
+    }
+    return open;
+  };
+})();</script>"""
+
+
+def legend_change_from_previous_close(html: str) -> tuple[str, int]:
+    """(page, sites changed): every legend change counts from the previous bar's close. All three sites or none: a
+    page whose legend code changed (another pywry) is returned untouched, so it never mixes two conventions."""
+    def base(m):
+        rows = LEGEND_ROWS.get((m.group("fn"), m.group("v")))
+        if rows is None:
+            raise KeyError(m.group(0)[:60])
+        v, fn = m.group("v"), m.group("fn")
+        return (f"var __base = (window.__terminalChangeBase ? window.__terminalChangeBase({rows}, {v}) : Number({v}.open)); "
+                f"var chg = Number({v}.close) - __base; var chgPct = __base !== 0 ? ((chg / __base) * 100) : 0; "
+                f"var clr = {fn}({v}.close, __base);")
+    try:
+        out, n = LEGEND_CHANGE.subn(base, html)
+    except KeyError:
+        return html, 0
+    if n != len(LEGEND_ROWS):
+        return html, 0
+    head = out.find("<head>")
+    if head >= 0:
+        out = out[:head + 6] + LEGEND_BASE_SCRIPT + out[head + 6:]
+    else:
+        out = LEGEND_BASE_SCRIPT + out
+    return out, n
+
+
+def install_tv_legend_change(applied: list, tvn=None):
+    """TradingView chart legend: a bar's change from the previous bar's close, not from its own open."""
+    if tvn is None:
+        from openbb_yfinance.utils import tvchart_native as tvn
+    orig_html = tvn.tvchart_widget_html
+    warned = []
+
+    async def tvchart_widget_html(symbol: str = "AAPL", interval: str = "1d", theme: str = "dark") -> str:
+        html, n = legend_change_from_previous_close(await orig_html(symbol, interval, theme))
+        if not n and not warned:
+            warned.append(1)
+            say("[tvchart] legend code not recognised: its change still counts from the bar's open")
+        return html
+
+    tvn.tvchart_widget_html = tvchart_widget_html
+    applied.append("TradingView legend change from the previous close (was the bar's open)")
+
+
 def install_cot_canada(applied: list):
     """The curated COT universe has five currencies and not the Canadian dollar (CME contract 090741)."""
     import openbb_cftc.models.cot_index as ci
@@ -3172,6 +3255,7 @@ def install_yfinance_futures_curve_fix(applied: list):
     applied.append("Yahoo futures curves: traded months only, mid or previous close (labelled), no 0.00 or half prices")
 
 
+
 def sec_standalone_quarters(records: list, frames) -> list:
     """Standalone quarters from SEC year-to-date chains, grouped by the period start (one fiscal year per chain).
 
@@ -3600,7 +3684,7 @@ VERIFIED = {
     "openbb-fred": ">=2.0,<2.1", "openbb-nasdaq": ">=2.0,<2.1", "openbb-cboe": ">=2.0,<2.1", "openbb-tmx": ">=2.0,<2.1",
     "openbb-sec": ">=2.0,<2.1", "openbb-imf": ">=3.0,<3.1", "openbb-cftc": ">=2.0,<2.1", "openbb-deribit": ">=2.0,<2.1",
     "openbb-government-us": ">=2.0,<2.1", "openbb-federal-reserve": ">=2.0,<2.1", "openbb-congress-gov": ">=2.0,<2.1",
-    "fastapi": ">=0.162,<0.163", "uvicorn": ">=0.54,<0.55", "aiohttp": ">=3.14,<3.15",
+    "fastapi": ">=0.162,<0.163", "uvicorn": ">=0.54,<0.55", "aiohttp": ">=3.14,<3.15", "pywry": ">=2.0,<2.1",
 }
 
 
@@ -5717,6 +5801,7 @@ PATCHES = [
     Patch("tmx_asset_info_cache", "TMX asset info cache", install_tmx_asset_info_cache, targets=_targets("openbb-tmx")),
     Patch("tvchart_fix", "TradingView chart cache & loading indicator", install_tvchart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
     Patch("fx_chart_fix", "TradingView FX closes", install_fx_chart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
+    Patch("tv_legend_change", "TradingView legend change from the previous close", install_tv_legend_change, targets=_targets("openbb-yfinance", "pywry")),
     Patch("cot_canada", "COT Canadian dollar", install_cot_canada, targets=_targets("openbb-cftc")),
     Patch("guard", "request guard (Host and Origin checks, redacted errors)", _install_guard_patch, critical=True, targets=_targets("uvicorn")),
 ]
