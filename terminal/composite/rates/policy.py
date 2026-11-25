@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import io
-import math
 
 import composite as C
 
@@ -33,12 +32,9 @@ def _bis_rates(flow, start):
         raise C.CompositeError("The BIS policy-rate service is not reachable right now.") from None
     out = {}
     for row in csv.DictReader(io.StringIO(text)):
-        try:
-            v = float(row.get("OBS_VALUE") or "nan")
-        except ValueError:
-            continue
+        v = C.num(row.get("OBS_VALUE"))
         area, per = row.get("REF_AREA"), row.get("TIME_PERIOD")
-        if not math.isfinite(v) or not area or not per:
+        if v is None or not area or not per:
             continue
         out.setdefault(area, []).append((per, v))
     for k in out:

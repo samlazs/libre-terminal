@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -134,8 +133,7 @@ def _last_price(sym):
         except C.CompositeError as e:
             C.partial_from(e, "Yahoo Finance intraday price")
             return None
-        rows = [(str(r.get("date"))[:19], float(r["close"])) for r in rows
-                if isinstance(r.get("close"), (int, float)) and not isinstance(r.get("close"), bool) and math.isfinite(r["close"])]
+        rows = [(str(r.get("date"))[:19], c) for r in rows if (c := C.num(r.get("close"))) is not None]
         return rows[-1] if rows else None
     return C.cached(("last_price", sym), 60, run)
 
@@ -158,11 +156,16 @@ def _consensus_store(sym, date=None, entry=None):
 
 
 def _f(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def _surprise(actual, est):
     return (actual - est) / abs(est) if actual is not None and est else None
+
+
+def _eps_surprise(actual, est, what=None):
+    """EPS surprise as a fraction, inside its plausible range (+-500%: a near-zero estimate makes it meaningless)."""
+    return C.banded("eps_surprise_pct", C._surprise(actual, est), what)
 
 
 def _cons(row):
@@ -175,7 +178,8 @@ def _two_day(closes, d):
     the open and after the close."""
     before = [c for x, c in closes if x < d]
     after = [c for x, c in closes if x > d]
-    return after[0] / before[-1] - 1 if before and after and before[-1] else None
+    move = after[0] / before[-1] - 1 if before and after and before[-1] else None
+    return C.banded("move_2d_pct", move, f"the {d} report")      # -80%..+300%: outside it is a bad print
 
 
 def _yahoo_q0_is(reported, d, eps, saved=None):
@@ -476,7 +480,8 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
             reaction["move"] = reaction["price"] / reaction["base"] - 1 if reaction["base"] else None
     elif not pending:
         reaction.update(move=C._two_day(closes, d), when="2-day move")
-    hist_rows = [dict(r, surprise=C._surprise(r["actual"], r["est"]), move_2d=C._two_day(closes, r["date"])) for r in reported[:12]]
+    hist_rows = [dict(r, surprise=C._eps_surprise(r["actual"], r["est"], f"the {r['date']} report"), move_2d=C._two_day(closes, r["date"]))
+                 for r in reported[:12]]
     last8 = hist_rows[:8]
     moves = [abs(r["move_2d"]) for r in last8 if r["move_2d"] is not None]
     surp = [r["surprise"] for r in last8 if r["surprise"] is not None]
@@ -501,7 +506,7 @@ def _earn_model(sym, today=None, report=None, need_implied=True):
     return {"symbol": sym, "currency": ccy, "track": track, "history": hist_rows, "raw": raw, "is_latest": is_latest, "note": note,
             "implied": implied,
             "latest": {"date": d, "pending": pending, "timing": timing, "quarter": info.get("period"), "release": release, "reaction": reaction,
-                       "eps": dict(e_c, actual=e_act, surprise=C._surprise(e_act, e_c["est"])),
+                       "eps": dict(e_c, actual=e_act, surprise=C._eps_surprise(e_act, e_c["est"], f"the {d} report")),
                        "rev": dict(r_c, actual=r_act, surprise=C._surprise(r_act, r_c["est"])), "rev_from": rev_from},
             "next": {"date": nxt_date, **next_q}, "next_quarter": next_q}
 

@@ -137,6 +137,17 @@ def enforce(name: str, out) -> None:
         _log.warning("view %s answered outside the envelope: %s", name, "; ".join(v))
 
 
+def enforce_finite(name: str, out) -> None:
+    """Strict mode: a NaN or Inf anywhere in a view's answer raises (in production the server scrubs it to null and
+    logs the view once, server.py _dumps_strict)."""
+    if not strict():
+        return
+    from .num import nonfinite_path
+    where = nonfinite_path(out)
+    if where:
+        raise ContractViolation(f"view {name}: non-finite number at {where}")
+
+
 def kind_of(exc) -> str:
     """The one place an error is classified: the kind the raiser gave, else read once from its message."""
     k = getattr(exc, "kind", None)

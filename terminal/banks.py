@@ -7,7 +7,6 @@
 """
 
 import datetime as dt
-import math
 import urllib.parse
 
 import composite as C
@@ -53,7 +52,8 @@ def failure_rows(raw):
     for r in raw:
         def mn(k):
             v = r.get(k)
-            return round(float(v) / 1000, 1) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+            x = C.num(v)
+            return round(x / 1000, 1) if x is not None else None
         out.append({"failed": _date_us(r.get("FAILDATE")), "bank": _title(r.get("NAME")),
                     "location": ", ".join(x for x in (str(r.get("CITY") or "").title(), r.get("PSTALP")) if x),
                     "assets_mn": mn("QBFASSET"), "deposits_mn": mn("QBFDEP"), "est_loss_mn": mn("COST"),
@@ -92,9 +92,9 @@ def quality_series(raw):
             continue
         iso = f"{d[:4]}-{d[4:6]}-{d[6:]}"
         for k in FIELDS:
-            v = r.get(k)
-            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
-                out[k].append([iso, round(float(v), 3)])
+            v = C.num(r.get(k))
+            if v is not None:
+                out[k].append([iso, round(v, 3)])
     return out
 
 

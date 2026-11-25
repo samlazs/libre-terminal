@@ -149,7 +149,16 @@ _METRICS_LOCK = threading.Lock()
 _METRICS_MAX = 512
 
 
-def _ev_parts(m, ccy, fx):
+def _ev_parts(m, ccy, fx, what=None):
+    """_ev_figures with each multiple inside its plausible range (core/num.py BANDS: EV/EBITDA and P/B (0, 200],
+    EV/sales (0, 100]); one outside it is a source error, left blank with a note naming `what` (the symbol)."""
+    out = C._ev_figures(m, ccy, fx)
+    for f in ("ev_ebitda", "ev_sales", "pb"):
+        out[f] = C.banded(f, out[f], what)
+    return out
+
+
+def _ev_figures(m, ccy, fx):
     """Enterprise-value figures for one company, currency-consistent.
 
     Yahoo adds the market cap (trading currency) to net debt (reporting currency, metrics["currency"]) without converting,
@@ -158,7 +167,8 @@ def _ev_parts(m, ccy, fx):
     fx: USD per unit, keyed by currency code as quoted (minor units such as GBp included). Amounts returned in USD billions.
     """
     def pos(v):
-        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
+        v = C.num(v)
+        return v if v is not None and v > 0 else None
     q = C.MINOR_UNITS.get(ccy, (ccy,))[0]
     rq = fx.get(ccy)
     if rq and ccy in C.MINOR_UNITS:
@@ -166,7 +176,7 @@ def _ev_parts(m, ccy, fx):
     f = m.get("currency")
     f = C.MINOR_UNITS.get(f, (f,))[0] if f else None
     mc, ev = pos(m.get("market_cap")), m.get("enterprise_value")
-    ev = float(ev) if isinstance(ev, (int, float)) and not isinstance(ev, bool) and math.isfinite(ev) else None
+    ev = C.num(ev)
     eve, evs, pb = pos(m.get("enterprise_to_ebitda")), pos(m.get("enterprise_to_revenue")), pos(m.get("price_to_book"))
     out = {"mcap_usd": mc * rq / 1e9 if mc and rq else None, "ev_usd": None, "ev_ebitda": None, "ev_sales": None, "pb": None,
            "nd_ebitda": None, "note": None, "ev_q": None}
@@ -257,7 +267,8 @@ def comps(symbol="AAPL", peers=None, **_):
     fx = C._usd_rates({(meta.get(s) or {}).get("currency") for s in syms} | {(met.get(s) or {}).get("currency") for s in syms} - {None})
 
     def pos(v):
-        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0 else None
+        v = C.num(v)
+        return v if v is not None and v > 0 else None
     rows = []
     for s in syms:
         m, q = met.get(s), meta.get(s) or {}
@@ -266,17 +277,16 @@ def comps(symbol="AAPL", peers=None, **_):
             rows.append({"name": name, "symbol": s, "note": "no data on Yahoo Finance", "_hl": s == sym})
             continue
         ccy = q.get("currency")
-        e = C._ev_parts(m, ccy, fx)                       # EV rebuilt in one currency (ADRs, dollar reporters listed abroad)
+        e = C._ev_parts(m, ccy, fx, s)                    # EV rebuilt in one currency (ADRs, dollar reporters listed abroad)
         nd = e["nd_ebitda"]
-        dy = m.get("dividend_yield")
-        dy_ok = isinstance(dy, (int, float)) and not isinstance(dy, bool) and math.isfinite(dy)
+        dy = C.num(m.get("dividend_yield"))
         rows.append({
             "name": name, "symbol": s, "currency": ccy,
             "mcap_usd": e["mcap_usd"], "ev_usd": e["ev_usd"],
             "pe": pos(m.get("pe_ratio")), "fwd_pe": pos(m.get("forward_pe")), "ev_ebitda": e["ev_ebitda"], "ev_sales": e["ev_sales"], "pb": e["pb"],
             "gross_margin": m.get("gross_margin"), "ebitda_margin": m.get("ebitda_margin"), "op_margin": m.get("operating_margin"), "net_margin": m.get("profit_margin"),
             "rev_growth": m.get("revenue_growth"), "eps_growth": m.get("earnings_growth"), "roe": m.get("return_on_equity"), "nd_ebitda": nd,
-            "div_yield": float(dy) / 100 if dy_ok else None,                    # Yahoo now reports the dividend yield in percent
+            "div_yield": dy / 100 if dy is not None else None,                  # Yahoo now reports the dividend yield in percent
             "beta": m.get("beta"), "ret_1y": m.get("price_return_1y"), "_hl": s == sym,
             "note": e["note"],
         })
@@ -285,7 +295,7 @@ def comps(symbol="AAPL", peers=None, **_):
             rows[-1]["note"] = "; ".join(x for x in (e["note"], "bank: EV, EBITDA and gross margin " + BANK_NA) if x)
     med = {"name": "Peer median", "symbol": "", "_pin": True}
     for f in COMP_FIELDS:
-        vals = sorted(r[f] for r in rows[1:] if isinstance(r.get(f), (int, float)) and not isinstance(r.get(f), bool) and math.isfinite(r[f]))
+        vals = sorted(v for r in rows[1:] if (v := C.num(r.get(f))) is not None)
         if vals:
             k = len(vals) // 2
             med[f] = vals[k] if len(vals) % 2 else (vals[k - 1] + vals[k]) / 2

@@ -10,7 +10,6 @@ from __future__ import annotations
 import datetime as dt
 import html
 from html.parser import HTMLParser
-import math
 
 import composite as C
 
@@ -130,11 +129,7 @@ def _parse_value(raw: str) -> tuple[float | None, bool]:
     txt = raw.replace("†", "").replace("\u2002", "").replace("\xa0", "").replace("$", "").replace("%", "").replace(",", "").strip()
     if not txt:
         return None, is_est
-    try:
-        val = float(txt)
-    except ValueError:
-        return None, is_est
-    return (val, is_est) if math.isfinite(val) else (None, is_est)
+    return C.num(txt), is_est
 
 
 def parse_table(html_text: str) -> list[tuple[str, float, bool]]:

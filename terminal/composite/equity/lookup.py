@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -207,9 +206,10 @@ def snapshot(symbol="AAPL", **_):
             raise C.CompositeError(f"Yahoo Finance has nothing for '{sym}'. Check the ticker: non-U.S. listings need their exchange suffix (7203.T, SHEL.L, RHM.DE). Type a company name in the search box at the top.", kind="not_covered")
         ccy = q.get("currency") or p.get("currency") or ""
         last, prev = q.get("last_price"), q.get("prev_close")
-        ok_last = isinstance(last, (int, float)) and not isinstance(last, bool) and math.isfinite(last)
-        ok_prev = isinstance(prev, (int, float)) and not isinstance(prev, bool) and math.isfinite(prev) and prev != 0
-        chg = f" ({(last / prev - 1) * 100:+.2f}%)" if ok_last and ok_prev else ""
+        last_n, prev_n = C.num(last), C.num(prev)
+        ok_last = last_n is not None
+        ok_prev = prev_n is not None and prev_n != 0
+        chg = f" ({(last_n / prev_n - 1) * 100:+.2f}%)" if ok_last and ok_prev else ""
         head = f"### {p.get('name') or q.get('name') or sym}  `{sym}`"
         bits = [b for b in (q.get("exchange") or p.get("stock_exchange"), ccy, " › ".join(x for x in (p.get("sector"), p.get("industry_category")) if x),
                             p.get("hq_country"), f"{p['employees']:,} employees" if isinstance(p.get("employees"), int) else None) if b]
@@ -221,7 +221,7 @@ def snapshot(symbol="AAPL", **_):
         if len(desc) > 560:
             cut = desc[:560].rfind(". ")
             desc = desc[:cut + 1] if cut > 200 else desc[:560] + "…"
-        dy = m.get("dividend_yield")
+        dy = C.num(m.get("dividend_yield"))
         try:                                               # EV rebuilt in the trading currency (see _ev_parts)
             e_ = C._ev_parts(m, ccy, C._usd_rates({ccy, m.get("currency")} - {None}))
         except C.CompositeError:
@@ -237,9 +237,10 @@ def snapshot(symbol="AAPL", **_):
         tgt, cur = st.get("target_consensus"), st.get("current_price") or last
         t_ccy = str(st.get("currency") or "")      # audit C9: Yahoo states the target's currency (ADRs: USD; SHEL.L: GBp); no upside across currencies
         same = bool(t_ccy) and t_ccy == ccy
-        ok_tgt = isinstance(tgt, (int, float)) and not isinstance(tgt, bool) and math.isfinite(tgt)
-        ok_cur = isinstance(cur, (int, float)) and not isinstance(cur, bool) and math.isfinite(cur) and cur != 0
-        upside = (f" ({(tgt / cur - 1) * 100:+.0f}%)" if ok_tgt and ok_cur else "") if same else \
+        tgt_n, cur_n = C.num(tgt), C.num(cur)
+        ok_tgt = tgt_n is not None
+        ok_cur = cur_n is not None and cur_n != 0
+        upside = (f" ({(tgt_n / cur_n - 1) * 100:+.0f}%)" if ok_tgt and ok_cur else "") if same else \
             "" if tgt is None else f" (target in {t_ccy}, price in {ccy}: no upside computed)" if t_ccy else " (target currency not stated: no upside computed)"
         rec = str(st.get("recommendation") or "").replace("_", " ")
         rows = [
@@ -251,7 +252,7 @@ def snapshot(symbol="AAPL", **_):
             ("EV / EBITDA", C._num(m.get("enterprise_to_ebitda"), "{:,.1f}", "x"), "Return on equity", C._pc(m.get("return_on_equity"))),
             ("EV / Sales", C._num(m.get("enterprise_to_revenue"), "{:,.1f}", "x"), "Debt / equity", C._num(m.get("debt_to_equity"), "{:,.0f}", "%")),
             ("Price / book", C._num(m.get("price_to_book"), "{:,.1f}", "x"), "Beta", C._num(m.get("beta") or p.get("beta"))),
-            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if isinstance(dy, (int, float)) and not isinstance(dy, bool) and math.isfinite(dy) else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
+            ("Dividend yield", C._num(dy, "{:,.2f}", "%") if dy is not None else "–", "1-year price return", C._pc(m.get("price_return_1y"), True)),
         ]
         fdic, fdic_missing = None, False
         if bank:                                           # a bank: EV, EBITDA, gross margin and debt/equity carry no meaning

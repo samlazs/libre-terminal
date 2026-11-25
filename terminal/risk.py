@@ -215,7 +215,8 @@ def risk_stats(symbols=DEFAULT, benchmark="SPY", range="1Y", freq="auto", symbol
                 row["beta"] = None if b is None else round(b, 2)
         if len(px) > 1:
             row["max_dd"] = round(max_drawdown(px), 2)
-            row["ret_1y"] = round((px[-1] / px[0] - 1) * 100, 2) if (px[0] and px[0] > 0 and math.isfinite(px[0]) and math.isfinite(px[-1])) else None
+            p0, p1 = C.num(px[0]), C.num(px[-1])
+            row["ret_1y"] = round((p1 / p0 - 1) * 100, 2) if (p0 and p0 > 0 and p1 is not None) else None
         rows.append(row)
     if not any(r["vol"] is not None for r in rows):
         raise C.CompositeError("Too few common prices to compute risk statistics.")

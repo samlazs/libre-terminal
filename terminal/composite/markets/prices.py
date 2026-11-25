@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import datetime as dt
 import json
-import math
 import re
 import threading
 import time
@@ -47,13 +46,13 @@ def _fetch_history(symbols, start, interval, _retry=True):
     single = symbols[0] if len(symbols) == 1 else None
     for r in rows or []:
         sym = r.get("symbol") or single
-        c = r.get("close")
+        c = C.num(r.get("close"))
         d = str(r.get("date") or "")[:10]
-        if sym in out and isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and len(d) == 10:
-            out[sym].append((d, float(c)))
-            div = r.get("dividend")
-            if isinstance(div, (int, float)) and not isinstance(div, bool) and math.isfinite(div) and div > 0:
-                out.divs.setdefault(sym, {})[d] = float(div)
+        if sym in out and c is not None and len(d) == 10:
+            out[sym].append((d, c))
+            div = C.num(r.get("dividend"))
+            if div is not None and div > 0:
+                out.divs.setdefault(sym, {})[d] = div
     for s in out:
         out[s].sort()
     missing = [s for s, v in out.items() if not v]
@@ -288,12 +287,12 @@ def fx_pair_label(symbol):
 
 
 def _opt_num(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def _invert(series):
     """A USD/XXX series as the value of XXX in dollars (same dates), so that up = currency stronger."""
-    return [(d, 1.0 / c) for d, c in series if isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and c > 0]
+    return [(d, 1.0 / x) for d, c in series if (x := C.num(c)) is not None and x > 0]
 
 
 def _usd_rates(currencies):

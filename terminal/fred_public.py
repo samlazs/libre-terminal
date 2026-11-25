@@ -18,6 +18,8 @@ import re
 import sys
 import urllib.parse
 
+from composite.core.num import num
+
 UA = f"Python-urllib/{sys.version_info[0]}.{sys.version_info[1]}"     # policy "fred" in composite/core/http.py
 CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 PAGE_URL = "https://fred.stlouisfed.org/series/"
@@ -64,11 +66,7 @@ def parse_csv(text):
     out = []
     for row in csv.reader(io.StringIO(text)):
         if len(row) >= 2 and re.match(r"\d{4}-\d{2}-\d{2}$", row[0]):
-            v = row[1].strip()
-            try:
-                out.append((row[0], float(v) if v not in ("", ".") else None))
-            except ValueError:
-                out.append((row[0], None))
+            out.append((row[0], num(row[1])))
     return out
 
 

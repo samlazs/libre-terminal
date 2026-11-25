@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
-import math
 
 import composite as C
 
+from .num import banded, finite, num
+
 
 def _is_finite_num(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    return isinstance(v, (int, float)) and finite(v) is not None
 
 def _at_or_before(series, iso):
     # series items may be tuples (fresh) or lists (read back from the disk cache)
@@ -32,7 +33,8 @@ def _ret(series, key):
     base = C._base(series, key)
     if not (_is_finite_num(last) and _is_finite_num(base)) or base == 0:
         return None
-    return last / base - 1
+    r = last / base - 1
+    return banded("daily_return", r) if key == "1D" else r     # a one-day move past -90%/+900% is a bad print
 
 
 def _diff_bp(series, key):
@@ -42,6 +44,8 @@ def _diff_bp(series, key):
     last = series[-1][1]
     base = C._base(series, key)
     if not (_is_finite_num(last) and _is_finite_num(base)):
+        return None
+    if banded("yield_pct", last) is None or banded("yield_pct", base) is None:      # a yield outside -5%..40% is a bad print
         return None
     return round((last - base) * 100, 1)
 
@@ -66,11 +70,8 @@ def total_return(series, divs):
 
 
 def _num_or_none(s):
-    try:
-        v = float(str(s).strip().replace(",", "."))
-        return v if math.isfinite(v) else None
-    except ValueError:
-        return None
+    """A number from text that may use a decimal comma ("4,25"), or None."""
+    return num(str(s).strip().replace(",", "."))
 
 
 def _nearest(hist, dates, max_gap=20):

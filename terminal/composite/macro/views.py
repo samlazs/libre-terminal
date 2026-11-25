@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
-import math
 
 import composite as C
 
@@ -201,7 +200,7 @@ def _imf_cpi(keys, start):
                     vf = float(v)
                 except (TypeError, ValueError):
                     continue
-                if not math.isfinite(vf):
+                if C.num(vf) is None:
                     continue
                 key = C._imf_key(r.get("country"), r.get("country_code"), names)
                 if key:
@@ -237,7 +236,7 @@ def _oecd_all(path, start):
                 vf = float(r.get("value"))
             except (TypeError, ValueError):
                 continue
-            if math.isfinite(vf):
+            if C.num(vf) is not None:
                 out.setdefault(str(r.get("country")).replace("’", "'"), []).append([str(r.get("date"))[:10], vf])
         for k in out:
             out[k].sort()
@@ -267,8 +266,9 @@ def country_monitor(**_):
             label, _, _, iso = C.COUNTRIES.get(k, (k.replace("_", " ").title(), None, None, None))
             row = {"country": MONITOR_LABELS.get(k, label), "key": k}
             g = C._oecd_for(gdp, k)
-            if len(g) >= 5 and g[-5][1] and math.isfinite(g[-5][1]) and math.isfinite(g[-1][1]):
-                row["gdp_yoy"], row["gdp_q"] = (g[-1][1] / g[-5][1] - 1), C._quarter(g[-1][0])
+            g5, g1 = (C.num(g[-5][1]), C.num(g[-1][1])) if len(g) >= 5 else (None, None)
+            if g5 and g1 is not None:
+                row["gdp_yoy"], row["gdp_q"] = C.banded("gdp_yoy_pct", g1 / g5 - 1, k), C._quarter(g[-1][0])     # +-30%
             c = cpi.get(k) or []
             if c:
                 row["cpi_yoy"], row["cpi_m"] = c[-1][1] / 100, c[-1][0][:7]

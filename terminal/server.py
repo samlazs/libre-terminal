@@ -17,7 +17,6 @@ import gzip
 import hashlib
 import importlib.util
 import json
-import math
 import mimetypes
 import os
 import socket
@@ -50,6 +49,7 @@ X_SLOTS = int(os.environ.get("TERMINAL_X_SLOTS", "24") or 24)
 X_WAIT = 5.0
 X_RETRY_AFTER = 5
 _x_slots = threading.BoundedSemaphore(X_SLOTS)
+_nonfinite_logged: set = set()      # views whose answer had a NaN/Inf scrubbed at serialization (logged once each)
 
 # The product name shown in the browser title and the sidebar. Renaming the product is this one line
 # (static/app.js has the same name only as a fallback for the moment before /api/config answers).
@@ -453,7 +453,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _clean_json(v):
         if isinstance(v, float):
-            return v if math.isfinite(v) else None
+            return composite.finite(v)
         if isinstance(v, dict):
             return {k: Handler._clean_json(val) for k, val in v.items()}
         if isinstance(v, (list, tuple)):
@@ -461,16 +461,19 @@ class Handler(BaseHTTPRequestHandler):
         return v
 
     @classmethod
-    def _dumps_strict(cls, obj) -> bytes:
+    def _dumps_strict(cls, obj, view: str | None = None) -> bytes:
         try:
             return json.dumps(obj, allow_nan=False).encode("utf-8")
         except (TypeError, ValueError):
+            if view and view not in _nonfinite_logged:  # scrubbed to null, but the producing view is named (once)
+                _nonfinite_logged.add(view)
+                log(f"non-finite in {view}: {composite.nonfinite_path(obj) or 'a value json cannot encode'} (sent as null)")
             return json.dumps(cls._clean_json(obj), allow_nan=False).encode("utf-8")
 
-    def _json(self, code: int, obj, headers: dict | None = None):
+    def _json(self, code: int, obj, headers: dict | None = None, view: str | None = None):
         if code >= 400:
             obj = contract.with_error(code, obj)        # every error answer carries the same {error: {kind, ...}} object
-        self._send(code, self._dumps_strict(obj), "application/json; charset=utf-8", headers=headers)
+        self._send(code, self._dumps_strict(obj, view), "application/json; charset=utf-8", headers=headers)
 
     def _frame_answer(self, result: dict):
         """A frame card's answer from a view (earnings release), as JSON: {"frame": the main backend's SEC filing viewer URL,
@@ -537,7 +540,7 @@ class Handler(BaseHTTPRequestHandler):
                                                        sources=_safe_sources(name, params), ref=ref))
         if isinstance(result, dict) and ("_frame" in result or "_message" in result):
             return self._frame_answer(result)
-        return self._json(200, result)
+        return self._json(200, result, view=name)
 
     def _host_ok(self) -> bool:
         """Only requests addressed to this computer by name are answered (blocks DNS-rebinding pages)."""

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import os
 import re
 import time
@@ -28,11 +27,8 @@ def _fred(ids, start):
         for r in j.get("results") or []:
             d = str(r.get("date"))[:10]
             for i in ids:
-                try:
-                    vf = float(r.get(i))
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(vf):
+                vf = C.num(r.get(i))
+                if vf is not None:
                     out[i].append([d, vf])
         if not any(out.values()):
             raise C.CompositeError("FRED returned no data for: " + ", ".join(ids))
@@ -69,9 +65,8 @@ def _eia_one(sid):
             raise C.CompositeError(f"EIA did not answer for {sid} ({last}).")
         pts, title, units = [], "", ""
         for r in (j.get("response") or {}).get("data") or []:
-            try:
-                v = float(r.get("value"))
-            except (TypeError, ValueError):
+            v = C.num(r.get("value"))
+            if v is None:
                 continue
             pts.append([C._period_date(r.get("period")), v])
             title = title or r.get("series-description") or r.get("seriesDescription") or ""
@@ -224,7 +219,7 @@ def _fred_csv(sid, start):
         except fred_public.FredPublicError as e:
             raise C.CompositeError(f"FRED has no series '{sid}'." if e.missing else str(e),
                                    kind="not_covered" if e.missing else e.kind, retry_after=e.retry_after) from None
-        return [[d, v] for d, v in rows if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+        return [[d, x] for d, v in rows if (x := C.num(v)) is not None]
     pts = C.cached_disk("fredcsv_" + re.sub(r"[^A-Za-z0-9]+", "_", sid) + "_" + start[:4], 3 * 3600, run)
     return [p for p in pts if p[0] >= start[:10]]
 

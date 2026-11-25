@@ -19,7 +19,6 @@ band of that window and today's percentile.
 
 import bisect
 import datetime as dt
-import math
 
 import composite as C
 
@@ -567,6 +566,14 @@ def _annual(pts):
     return {e: v for e, v, _ in pts}
 
 
+def _round4(v):
+    """Floats rounded to 4 places, NaN/Inf floats as None; anything that is not a float is left as it is."""
+    if not isinstance(v, float):
+        return v
+    x = C.finite(v)
+    return None if x is None else round(x, 4)
+
+
 def dupont_rows(f, bank=False, years=YEARS):
     """{name: {fiscal-year end: value}} annual figures -> rows newest first (ratios in percent / times)."""
     ends = sorted(f["net_income"])[-years:]
@@ -593,7 +600,7 @@ def dupont_rows(f, bank=False, years=YEARS):
                 ic = d_val + eq - cash
                 r["invested_capital"] = ic
                 r["roic"] = r["nopat"] / ic * 100 if ic > 0 else None
-        rows.append({k: (round(v, 4) if isinstance(v, float) and math.isfinite(v) else (None if isinstance(v, float) else v)) for k, v in r.items()})
+        rows.append({k: _round4(v) for k, v in r.items()})
     return rows
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 
 import composite as C
 
@@ -71,8 +70,8 @@ def _facts(symbols, fact):
                     continue
                 if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
                     continue
-                val = r.get("value")
-                if not (isinstance(val, (int, float)) and not isinstance(val, bool) and math.isfinite(val)):
+                val = C.num(r.get("value"))
+                if val is None:
                     continue
                 d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
                 d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(val)))

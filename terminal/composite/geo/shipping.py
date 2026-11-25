@@ -18,9 +18,9 @@ def _chokepoints():
         for r in rows or []:
             name, d = r.get("chokepoint"), str(r.get("date"))[:10]
             for f in PORTWATCH_FIELDS:
-                v = r.get(f)
+                v = C.num(r.get(f))
                 if name and v is not None:
-                    out.setdefault(f"{name}:{f}", []).append([d, float(v)])
+                    out.setdefault(f"{name}:{f}", []).append([d, v])
         for k in out:
             out[k].sort()
         if not out:

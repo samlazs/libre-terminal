@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import composite as C
 
 def _gpr():
@@ -24,8 +22,8 @@ def _gpr():
                 continue
             d = f"{day[:4]}-{day[4:6]}-{day[6:]}"
             for c in cols:
-                v = row[idx[c]]
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                v = C.num(row[idx[c]])
+                if v is not None:
                     out["D_" + c].append([d, round(v, 3)])
         for c in ("GPRD_ACT", "GPRD_THREAT"):
             if out.get("D_" + c):
@@ -44,8 +42,8 @@ def _gpr():
             if d.year < 1985:
                 continue
             for i in keep:
-                v = row[i]
-                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                v = C.num(row[i])
+                if v is not None:
                     out["M_" + hdr[i]].append([d.replace(day=1).isoformat(), round(v, 4)])
         if not out.get("D_GPRD"):
             raise C.CompositeError("The geopolitical risk index file could not be read.")

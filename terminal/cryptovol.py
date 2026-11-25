@@ -23,7 +23,7 @@ SOURCES = [C.src("Deribit", "DVOL: 30-day implied volatility index from Deribit 
 
 
 def _fin(v):
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    return C.num(v)
 
 
 def realised(closes, window=WINDOW):

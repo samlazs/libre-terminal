@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import bisect
 import datetime as dt
-import math
 import re
 
 import composite as C
@@ -172,15 +171,15 @@ def chart(symbol="^GSPC", compare=None, view="price", period="1Y", studies="cand
             j = bisect.bisect_right(o_dates, r[0]) - 1
             if j < 0 or (dt.date.fromisoformat(r[0]) - dt.date.fromisoformat(o_dates[j])).days > 10:
                 continue
-            o = o_vals[j]
-            if not (isinstance(r[4], (int, float)) and isinstance(o, (int, float)) and math.isfinite(r[4]) and math.isfinite(o)):
+            o, c4 = C.num(o_vals[j]), C.num(r[4])
+            if c4 is None or o is None:
                 continue
             if view == "ratio":
                 if not o:
                     continue
-                v = r[4] / o
+                v = c4 / o
             else:
-                v = r[4] - o
+                v = c4 - o
             dates_all.append(r[0])
             vals_all.append(v)
         if not dates_all:

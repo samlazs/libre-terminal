@@ -7,7 +7,6 @@ import contextvars
 import datetime as dt
 import hashlib
 import json
-import math
 import os
 import re
 import threading
@@ -16,6 +15,8 @@ import time
 import local_paths
 
 import composite as C
+
+from .num import _BLANK_NOTES, finite, note_blank
 
 CACHE_DIR = local_paths.CACHE_DIR
 
@@ -38,25 +39,27 @@ class Partial:
     missing    parts that failed, named for the reader ("FRED DGS10", "Germany")
     fallbacks  substitutions made ("FRED public download used instead: the FRED key is not set")
     stale      wall times of saved copies it was built from (shown as "showing the copy saved ...")
+    blanked    implausible figures left blank (core/num.py banded): noted on the answer, status unchanged
     An answer with missing parts or stale copies is held short and never written to disk; one with only substitutions
-    keeps its normal life (the substitute's data is complete). With none of the three it only holds short, unreported
+    or blanked figures keeps its normal life (its data is complete) and is saved with those notes. With none of the three it only holds short, unreported
     (a background refresh is already on its way)."""
 
-    __slots__ = ("value", "missing", "fallbacks", "stale")
+    __slots__ = ("value", "missing", "fallbacks", "stale", "blanked")
 
-    def __init__(self, value, missing=(), fallbacks=(), stale=()):
+    def __init__(self, value, missing=(), fallbacks=(), stale=(), blanked=()):
         self.value = value
         self.missing = list(dict.fromkeys(str(m) for m in (missing or ()) if m))
         self.fallbacks = list(dict.fromkeys(str(m) for m in (fallbacks or ()) if m))
         self.stale = sorted({float(t) for t in (stale or ()) if t})
+        self.blanked = list(dict.fromkeys(str(m) for m in (blanked or ()) if m))
 
     @property
     def short(self):
         """Held PARTIAL_HOLD seconds and never written to disk."""
-        return bool(self.missing or self.stale) or not self.fallbacks
+        return bool(self.missing or self.stale) or not (self.fallbacks or self.blanked)
 
     def __repr__(self):
-        return f"Partial(missing={self.missing!r}, fallbacks={self.fallbacks!r}, stale={len(self.stale)})"
+        return f"Partial(missing={self.missing!r}, fallbacks={self.fallbacks!r}, stale={len(self.stale)}, blanked={len(self.blanked)})"
 
 
 _PARTIAL_NOTES = contextvars.ContextVar("partial_notes", default=None)
@@ -96,11 +99,12 @@ def partial_text(missing):
 def _collect(fn):
     """Run fn and return its answer as a Partial when fn, or any cache it used, reported a missing part, a substitution
     or a stale copy: what an answer is built from travels with it into every cache that holds it."""
-    inner, subs, ages = [], [], []
-    tokens = (C._PARTIAL_NOTES.set(inner), C._FALLBACK_NOTES.set(subs), C._STALE_NOTES.set(ages))
+    inner, subs, ages, blanks = [], [], [], []
+    tokens = (C._PARTIAL_NOTES.set(inner), C._FALLBACK_NOTES.set(subs), C._STALE_NOTES.set(ages), _BLANK_NOTES.set(blanks))
     try:
         val = fn()
     finally:
+        _BLANK_NOTES.reset(tokens[3])
         C._STALE_NOTES.reset(tokens[2])
         C._FALLBACK_NOTES.reset(tokens[1])
         C._PARTIAL_NOTES.reset(tokens[0])
@@ -108,8 +112,16 @@ def _collect(fn):
         val.missing = list(dict.fromkeys(val.missing + inner))
         val.fallbacks = list(dict.fromkeys(val.fallbacks + subs))
         val.stale = sorted(set(val.stale) | {float(t) for t in ages if t})
+        val.blanked = list(dict.fromkeys(val.blanked + blanks))
         return val
-    return Partial(val, inner, subs, ages) if (inner or subs or ages) else val
+    return Partial(val, inner, subs, ages, blanks) if (inner or subs or ages or blanks) else val
+
+
+def _from_saved(saved):
+    """A disk record as a cached value: with its substitution and blank notes, when it has any."""
+    if saved.get("fb") or saved.get("bn"):
+        return Partial(saved["v"], fallbacks=saved.get("fb") or (), blanked=saved.get("bn") or ())
+    return saved["v"]
 
 
 def _serve(val):
@@ -122,6 +134,8 @@ def _serve(val):
                 fb.append(f)
         for t in val.stale:
             C._note_stale_ts(t)
+        for b in val.blanked:
+            note_blank(b)
         return val.value
     return val
 
@@ -359,7 +373,7 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
             if now - saved["t"] < good:
                 with C._guard:
                     C._STALE_SINCE.pop(name, None)
-                v = Partial(saved["v"], fallbacks=saved["fb"]) if saved.get("fb") else saved["v"]     # a substitute's answer says so
+                v = _from_saved(saved)        # a substitute's answer (or one with blanked figures) says so
                 return v, min(mem_ttl, max(1.0, good - (now - saved["t"])))
         except (OSError, ValueError, KeyError, TypeError):
             saved = None
@@ -370,7 +384,7 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
             if saved is not None:
                 with C._guard:
                     C._STALE_SINCE[name] = saved["t"]
-                return saved["v"], min(mem_ttl, max(0.0, blocked[0] - mnow))
+                return _from_saved(saved), min(mem_ttl, max(0.0, blocked[0] - mnow))
             raise C.CompositeError(blocked[1], kind=blocked[2] if len(blocked) > 2 else None)
         try:
             val = _collect(fn)
@@ -397,7 +411,7 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
                 if saved is not None:
                     C._STALE_SINCE[name] = saved["t"]
             if saved is not None:
-                return saved["v"], min(mem_ttl, float(wait))
+                return _from_saved(saved), min(mem_ttl, float(wait))
             raise
         with C._guard:
             C._backoff.pop(name, None)
@@ -405,8 +419,8 @@ def cached_disk(name, ttl, fn, partial_ttl=None):
         if isinstance(val, Partial) and val.short:   # never saved as complete; asked again after partial_ttl
             hold = C.PARTIAL_HOLD if partial_ttl is None else partial_ttl
             return val, min(mem_ttl, max(1.0, float(hold)))
-        if isinstance(val, Partial):                  # a substitute's complete answer: saved, with what it substituted
-            C._write_json(path, {"t": time.time(), "v": val.value, "fb": val.fallbacks})
+        if isinstance(val, Partial):                  # a complete answer with notes: saved with what it substituted or blanked
+            C._write_json(path, {"t": time.time(), "v": val.value, "fb": val.fallbacks, "bn": val.blanked})
             return val, min(mem_ttl, float(ttl_of(val.value)))
         C._write_json(path, {"t": time.time(), "v": val})
         return val, min(mem_ttl, float(ttl_of(val)))
@@ -471,7 +485,7 @@ def reset_runtime_caches() -> dict:
 def _clean_json(v):
     """Recursively replace non-finite floats with None so cache files are always valid RFC 8259 JSON."""
     if isinstance(v, float):
-        return v if math.isfinite(v) else None
+        return finite(v)
     if isinstance(v, dict):
         return {k: _clean_json(val) for k, val in v.items()}
     if isinstance(v, (list, tuple)):
