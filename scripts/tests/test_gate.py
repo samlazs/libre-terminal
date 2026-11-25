@@ -48,6 +48,13 @@ check(any("tol_abs or tol_pct" in p for p in G.g1_validate(notol)), "a figure wi
 body = {"results": [{"label": "Price", "value": 101.0}, {"label": "Market cap", "value": 3.1e12}], "as_of": "2026-01-06"}
 check(G.extract(body, {"rows": "results", "match": {"label": "Market cap"}, "field": "value"}) == 3.1e12, "rows/match/field")
 check(G.extract(body, {"pointer": "/results/0/value"}) == 101.0, "pointer into a list")
+chart = {"data": [{"name": "United States 4.10%", "x": ["2026-09-01", "2026-10-01"], "y": [4.2, 4.1]},
+                  {"name": "Germany 2.65%", "x": ["2026-09-01", "2026-10-01T00:00:00"], "y": [2.7, 2.65]}]}
+check(G.extract(chart, {"trace": "germany", "x": "2026-10-01"}) == 2.65, "a chart point pinned by trace name and date")
+check(G.extract(chart, {"trace": 0, "x": "2026-09"}) == 4.2, "a chart point pinned by trace index and month")
+check(G.extract({"data": [{"type": "candlestick", "x": ["2026-11-24"], "close": [1.0968]}]}, {"x": "2026-11-24", "y": "close"}) == 1.0968, "a candlestick close by date")
+check(G.extract(chart, {"trace": "japan", "x": "2026-10-01"}) is None and G.extract(chart, {"trace": 0, "x": "2025-01-01"}) is None, "no such trace or date: nothing")
+check(G.g1_validate({"figures": [dict(f, select={"trace": 0, "x": "2026-10-01"}) for f in good["figures"]]}) == [], "select.x is a valid selector")
 check(G.extract(body, {"pointer": "/results/5/value"}) is None and G.extract(body, {"pointer": "/as_of/x"}) is None, "missing pointer -> None")
 check(G.extract(body, {"rows": "results", "match": {"label": "EPS"}, "field": "value"}) is None, "unmatched row -> None")
 

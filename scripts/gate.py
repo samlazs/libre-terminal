@@ -98,8 +98,8 @@ def g1_validate(record) -> list[str]:
             continue
         if not f.get("view") or not isinstance(f.get("expected"), (int, float)):
             out.append(f"{fid}: needs view and a numeric expected value")
-        if not isinstance(f.get("select"), dict) or not (f["select"].get("pointer") or f["select"].get("field")):
-            out.append(f"{fid}: needs select.pointer or select.field")
+        if not isinstance(f.get("select"), dict) or not (f["select"].get("pointer") or f["select"].get("field") or f["select"].get("x")):
+            out.append(f"{fid}: needs select.pointer, select.field or select.x")
         if not any(isinstance(f.get(k), (int, float)) for k in ("tol_abs", "tol_pct")):
             out.append(f"{fid}: needs tol_abs or tol_pct")
         src = f.get("independent_source")
@@ -109,7 +109,22 @@ def g1_validate(record) -> list[str]:
 
 
 def extract(body, select: dict):
-    """The selected value from a view's answer: select.pointer ('/results/0/price') or rows/match/field."""
+    """The selected value from a view's answer: select.pointer ('/results/0/price'), rows/match/field, or a chart point
+    pinned by date: {"trace": index or a text in the trace name, "x": "2026-10-01", "y": "close" (default "y")}: the value of
+    the first x starting so."""
+    if select.get("x"):
+        traces = body.get("data") if isinstance(body, dict) else None
+        if not isinstance(traces, list):
+            return None
+        want = select.get("trace", 0)
+        if isinstance(want, int):
+            t = traces[want] if -len(traces) <= want < len(traces) else None
+        else:
+            t = next((tr for tr in traces if isinstance(tr, dict) and str(want).lower() in str(tr.get("name") or "").lower()), None)
+        if not isinstance(t, dict):
+            return None
+        sx = str(select["x"])                  # "y" names the value array: "close" for a candlestick trace
+        return next((y for x, y in zip(t.get("x") or [], t.get(select.get("y") or "y") or []) if str(x).startswith(sx)), None)
     if select.get("pointer"):
         cur = body
         for part in str(select["pointer"]).strip("/").split("/"):
