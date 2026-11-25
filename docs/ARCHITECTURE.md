@@ -24,8 +24,8 @@ The browser calls the backends directly for their own widgets and calls the UI s
 ## File map
 
 ```
-scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / check / snapshot / diff / run
-scripts/install.ps1          Windows installer behind Install.cmd: makes sure uv is present, then runs launcher.py install
+scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / gate / check / snapshot / diff / run
+scripts/install.ps1          Windows installer behind Install.cmd: refuses a folder path over 83 chars (MAX_PATH), makes sure uv is present, then runs launcher.py install
 scripts/run_backend.py       starts a backend with the runtime patches below and the freeze watchdog
 scripts/build_dashboards.py  compact dashboard generator engine -> local/dashboards.json
 scripts/dashboards/          pure dashboard data & spec DSL (overrides.py, layouts.py)
@@ -36,10 +36,12 @@ scripts/smoke_test.py        live data checks against the running backends
 scripts/health_check.py      paced live card health runner -> local/notes/health-YYYY-MM-DD.csv & candidates JSON
 scripts/gate.py              release gate G1-G5 (launcher.py gate) -> local/notes/gates-YYYY-MM-DD.json
 scripts/probe.py             stdlib live probe of a running terminal: status counts, p50/p95 latency, envelope checks per view
-scripts/tests/               offline checks (run_all.py is the parallel entry point) + frontend_checks.js
+scripts/tests/               offline checks (run_all.py is the parallel entry point), frontend_checks.js / viewing_checks.js (browser),
+                             _browser.py (headless runner), _fixtures.py + fixtures/ (fault injection and canned answers)
 terminal/server.py           UI server: static page, dashboards, saved state, service status and restart, /x/* views (see UI server)
 terminal/version.py          release version constant (VERSION) shared by server.py, /api/config and project_check.py
-terminal/composite/          the terminal's own views, split by topic (core/, markets/, rates/, macro/, geo/, equity/); warm.py is the two-phase cache warmer
+terminal/composite/          the terminal's own views, split by topic (core/, markets/, rates/, macro/, geo/, equity/); core/contract.py is the response envelope, error kinds,
+                             route budgets and COVERAGE; core/num.py the numeric boundary (num/finite/banded, BANDS); warm.py the two-phase cache warmer
 terminal/news.py             the /x/news view: curated official, wire and regional feeds, subject matching, ranking, duplicate folding
 terminal/banks.py            FDIC BankFind + FFIEC holding-company / RSSD sync views (/x/bank_failures, /x/bank_quality, /x/bank_rssd)
 terminal/bonds.py            FINRA TRACE corporate bond lookup and yield-by-maturity curve (/x/bond_lookup, /x/bond_curve), bond pricer and debt maturity wall (/x/bond_pricer, /x/debt_maturity_wall)
@@ -128,6 +130,11 @@ The whole envelope is defined and checked in `terminal/composite/core/contract.p
   backend answers. `test_errors.py` holds the fault-kind to error-kind table.
 - **Parameters** are checked against the view's signature (a lazy wrapper's `_target`) before the call: an unknown
   or missing parameter is 400 `input`, an unknown view 404; a TypeError inside a view is a defect (500 with a ref).
+- **Numbers:** every `/x/*` number column declares a unit (`columns.X_UNITS` or its format); an amount in a
+  currency must name it (`ccy_unnamed`: blanked with a note in production, a violation in strict mode).
+  `core/num.py` turns every source value into a finite float or None, and `banded()` blanks a figure outside its
+  plausible range (`BANDS`) with a note. `contract.COVERAGE` declares each symbol route `global`, `us_only` or a
+  closed set; a U.S.-only route answers `not_covered` for another listing before any outbound call.
 - `scripts/tests/test_contract.py` runs every route under success, CompositeError and a defect through the real
   handler, and every `/api/*` write route under malformed, oversize and cross-origin requests.
 
@@ -183,7 +190,8 @@ so two open tabs cannot overwrite each other. A daily backup sits next to it.
 | `ui`, `last` | sidebar and similar preferences, last tab | no |
 
 Only adding, removing, moving or resizing cards, changing their settings or titles, renaming tabs, or user tabs mark a
-built-in tab as edited (orange dot); flips, chart/table switches and the settings bar are view preferences (`cardview`).
+built-in tab as edited (orange dot); a pick that does not fit the current ticker is masked in `widgets.js` `eff()`, never
+deleted, so viewing another ticker leaves the saved layout unchanged; flips, chart/table switches and the settings bar are view preferences (`cardview`).
 A state.json that cannot be parsed is never overwritten: the server moves it aside as `state.corrupt-<time>.json` and
 restores the newest valid daily copy (the page says so), or answers 503 and the page shows the defaults without saving.
 Writes go through a temporary file and an atomic replace. In-page cleanups must change `T.S.state` and then save;
@@ -223,8 +231,8 @@ Applied in memory at start; no installed file is modified.
   Time to live: 3 h for FiscalData, CFTC, the Federal Reserve and FRED; 6 h for EIA, BLS and ECB; 12 h for USDA, IMF,
   JODI and OECD; 24 h for Fama-French. OECD gets one attempt because its hourly quota is strict. A failed refresh
   serves the last good answer for up to 14 days and marks it stale on the card. A first request waits at most 45 to 55 s
-  (without a limit for BLS, IMF and OECD); after that the card says the data is still loading, and the fill continues in
-  the background. Empty results are not stored. `X-Terminal-Refresh: 1` bypasses the cache.
+  (55 s for EIA, BLS, IMF and OECD), never longer than the 65 s slowest route budget; after that the card says the data is
+  still loading, and the fill continues in the background. Empty results are not stored. `X-Terminal-Refresh: 1` bypasses the cache.
 - OECD fails fast on HTTP 429 with a readable message.
 - EIA returns the latest 5,000 rows unless a limit is set; at most 4 EIA calls are in flight, with up to 3 attempts per request.
 - SEC company facts: standalone quarters of year-to-date items (cash flows) are derived per fiscal year, chained by
@@ -261,14 +269,15 @@ Applied in memory at start; no installed file is modified.
 - Each fix that does not apply logs one `[fixes] WARNING` line; `local/run/patches-<name>.json` feeds the
   "Backend fixes" table in Data Explorers > Data status.
 - Watchdog: if the backend stops answering for 45 s it writes every thread's stack to
-  `local/logs/<name>-freeze-*.txt` and exits with code 75; the supervisor restarts it.
+  `local/logs/<name>-freeze-*.txt` and exits with code 75; the supervisor restarts it. During startup it allows
+  `STARTUP_GRACE` (240 s) for the first answer, then does the same, so a backend that hangs while starting is restarted too.
 
 ## Tests
 
 Examples use `python` for the environment's interpreter: `.venv-v5\Scripts\python.exe` on Windows, `.venv-v5/bin/python` elsewhere.
 
 ```
-python scripts/launcher.py test [pattern...] [--fast]  # parallel offline checks (~11 s; --fast skips the headless browser)
+python scripts/launcher.py test [pattern...] [--fast]  # parallel offline checks over 70 files (~30 s; --fast skips the 3 browser suites)
 python scripts/launcher.py check                       # BOM/LF/CRLF, AST/JSON, ruff, hygiene/secrets, offline sources, state, notes
 python scripts/launcher.py snapshot [--label NAME]     # zip publishable tree to local/snapshots/ (skips if unchanged)
 python scripts/launcher.py diff [--stat]               # diff working tree against the latest snapshot
@@ -300,8 +309,9 @@ call. `launcher.py gate` G2 ends with a 30-minute probe soak that must grow the 
 Completeness: `cache(key, ttl, fn, disk=False, partial_ttl=None)` is the one caching primitive (memory, or memory ->
 `local/cache/<name>.json` -> fetch with the saved copy served when the fetch fails). A fn that lost one of its sources
 returns `Partial(value, missing=[...])`, or calls `partial_from(e, "what")` where it carries on without that part (a
-source with nothing for the input, `not_covered`/`input`, is a complete answer). A Partial is never written to disk, is
-held 60 s, and the view answers `status: "partial"` with a note naming what is missing; a cache whose fn used a partial
+source with nothing for the input, `not_covered`/`input`, is a complete answer). A Partial with missing or stale parts is never
+written to disk and is held 60 s (one carrying only fallback or blanked-value notes keeps its normal TTL and is saved
+with those notes), and the view answers `status: "partial"` with a note naming what is missing; a cache whose fn used a partial
 answer is partial itself. `_safe` catches `CompositeError` only. `test_cache_lint` fails on any new
 `except CompositeError` that turns a failure into `[]`/`{}`/`None` silently.
 Substitutions say so the same way: `note_fallback(source, reason)` where a substitute is used (FRED's public download
@@ -322,8 +332,8 @@ for canned answers; `fixture(provider, name)` for the sanitized JSON in `scripts
 single outbound seam `composite._transport` (used by `http_json` and `_download`), so a test needs no knowledge of a
 module's internals. `http_json` turns NaN/Infinity into None and a non-JSON body into a transient `CompositeError`.
 
-A full `test` run reports **4,729 checks across 43 test files**, all passing. `test_frontend.py` contributes 315 browser checks.
-The browser checks are skipped with a notice when no headless Edge or Chrome is installed.
+A full `test` run reports **6,655 checks across 70 test files**, all passing. The browser suites are `test_frontend.py`
+(366 checks in `frontend_checks.js`), `test_viewing.py` and `test_legend_change.py`. The browser checks are skipped with a notice when no headless Edge or Chrome is installed.
 Each `test_*.py` runs in its own process with a temporary `local/` folder cleaned up at exit:
 
 | File | Covers |
@@ -348,7 +358,15 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_gate.py` | Release gate: G1 record and tolerance math, log scan, live G4 probes against an in-process server, exit rule, evidence file |
 | `test_harness.py` | Every fault kind through the outbound seam, fixtures, probe CLI and envelope rules |
 | `test_health.py`, `test_workflow.py` | Health runner and redaction, publishable manifest, snapshots, EOL/BOM/hygiene checks |
-| `test_frontend.py` | Runs `frontend_checks.js` (315 browser checks) headless against a temporary UI server |
+| `test_frontend.py` | Runs `frontend_checks.js` (366 browser checks) headless against a temporary UI server |
+| `test_viewing.py` | Every tab of every built-in dashboard in headless Edge: ticker, source, column and range picks leave the saved layout and edited flags unchanged |
+| `test_asof.py`, `test_asof_equity.py`, `test_asof_markets.py`, `test_asof_other.py`, `test_asof_rates.py` | Every `/x` route dates its answer by the newest data point it used (hand-built US and non-US inputs) or declares why it is undated |
+| `test_num.py` | Numeric boundary: finite or None, plausibility bands blank with a note, notes survive caches, strict mode rejects NaN/Inf |
+| `test_cache_complete.py`, `test_cache_lint.py`, `test_degraded.py` | Partial answers and failures never cached as complete; no silent `except CompositeError`; every substitution, stale copy and missing part flagged |
+| `test_budget.py` | One route budget table for server and browser, request deadlines cut outbound calls, no unbounded backend wait |
+| `test_coverage.py`, `test_country_monitor.py` | Declared route coverage (global / U.S. only / closed set) with offline cases; Country Monitor periods and partial answers |
+| `test_day_change.py`, `test_legend_change.py` | Day change from the previous close in quotes and the chart legend (Xetra and NYSE, hand-worked values; the legend in a headless browser) |
+| `test_install_guard.py`, `test_logs.py`, `test_lifecycle.py` | Install path guard (MAX_PATH), log rotation while running, live lifecycle faults on an isolated instance (`--live`) |
 
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,
@@ -358,7 +376,7 @@ open Libre Terminal page.
 ## Conventions
 
 - **Dependencies:** Server and launcher code (`terminal/server.py`, `scripts/launcher.py`, `scripts/health_check.py`,
-  `scripts/project_check.py`) stay standard-library only. Overall, no dependency beyond what `.venv-v5` already installs
+  `scripts/project_check.py`, `scripts/gate.py`, `scripts/probe.py`) stay standard-library only. Overall, no dependency beyond what `.venv-v5` already installs
   (such as Plotly's JS bundle, `xlrd`, and `ruff` for checks) and no front-end build step.
 - **Frozen OpenBB policy:** `config/requirements-*.lock.txt` stay pinned; OpenBB packages are treated as a frozen
   catalogue. Critical-path views get thin, tested fetchers under `terminal/`, while broken long-tail OpenBB endpoints

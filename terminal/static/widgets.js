@@ -145,7 +145,10 @@
       if (/keeps loading in the background/i.test(String(msg))) return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
       return { cls: "upstream", kind: "info", text: src + " did not answer in time.", hint: atSource };
     }
-    if (kind === "unavailable") return { cls: "upstream", kind: "info", text: "The terminal is busy or restarting.", hint: "Press ↻ in a moment." };
+    if (kind === "unavailable") {   // the server's own words (data services starting or restarting) when it marks them for the user
+      var said = info && info.userMessage === true && clean;
+      return { cls: "upstream", kind: "info", text: said || "The terminal is busy or restarting.", hint: said ? null : "Press ↻ in a moment." };
+    }
     if (kind === "upstream") {
       var own = ctx.userMessage && clean && !/not reachable|did not answer|answered with|^HTTP \d{3}\b|not answering/i.test(clean);
       return { cls: own ? "message" : "upstream", kind: "info", text: own ? clean : src + " is not answering properly right now.", hint: own ? null : atSource };

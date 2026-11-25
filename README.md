@@ -2,7 +2,7 @@
 
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
 
-It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/openbq-org/OpenBB).
+It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
 
 Most of the terminal works immediately with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add deeper U.S. economic, energy, labor, and legislative series.
 
@@ -20,7 +20,7 @@ No coding tools, Python setup, or accounts needed. You only need an internet con
 2. **Extract the ZIP.** Right-click the downloaded file, choose **Extract All...**, and click **Extract**. Do not open files directly from inside the ZIP window.
 3. **Install once.** Open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (this takes 2 to 5 minutes).
    - If Windows shows *"Windows protected your PC"*, click **More info** and then **Run anyway**. You only need to do this once.
-4. **Launch.** Double-click **`Start.cmd`**. On the first launch, wait 15 to 60 seconds while initial market data and charts load. Your browser will open automatically to `http://127.0.0.1:6950`.
+4. **Launch.** Double-click **`Start.cmd`**. On the first launch, allow up to about a minute while the data services start; your browser opens automatically to `http://127.0.0.1:6950`, and cards say the data services are starting until their data arrives.
    - Use **`Stop.cmd`** to close the terminal cleanly, and **`Setup-Keys.cmd`** later if you want to add optional free API keys.
 
 Everything runs locally on your machine. Nothing leaves your computer except the requests to the data providers themselves.
@@ -187,6 +187,7 @@ To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, 
 
 ## What to know about the data
 
+- **A number is right or blank with a note.** Every terminal card names its source and the date of the newest data point it used (Country Monitor shows the period of each cell). Number columns declare their unit and every amount names its currency. Key derived figures (such as valuation multiples and yields) outside a plausible range are left blank with a note rather than shown, and a fallback source, a saved copy served during an outage, or a partial answer is flagged on the card.
 - **Delayed quotes, no trading.** Market prices come from Yahoo Finance. Quotes can be delayed, and there is no live tick streaming, order entry, or price alerting.
 - **Earnings timing.** Consensus and reported EPS come from Yahoo Finance on a single consistent basis. Reported figures appear once Yahoo posts them (usually hours to a day after the release), while the SEC Form 8-K Exhibit 99.1 press release loads directly from EDGAR in the meantime. Because Yahoo removes a quarter's revenue consensus right after reporting, past revenue surprises appear only for quarters the terminal saw before the release. Earnings call transcripts are not included.
 - **Total return vs. price return.** Quote boards containing only stocks and funds show total return (distributions reinvested on the ex-date). Boards that include an index, future, currency, or cryptocurrency show price return. The footer line beneath each board states which one is shown.
@@ -211,7 +212,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 | Install fails inside OneDrive or a long path | Move the extracted folder to a short local path such as `C:\Libre-Terminal` and double-click `Install.cmd` again. Windows limits file paths to 260 characters, so `Install.cmd` stops before downloading anything when the folder path is longer than 83 characters (unless Windows long paths are turned on). |
 | Install stops partway through | Usually a corporate proxy, firewall, or antivirus block. Allow access and run `Install.cmd` again; it picks up where it stopped. |
 | Port already in use | Open Command Prompt inside `Libre-Terminal` and run `Start.cmd --ui-port 7950 --v5-port 7900` (saved for future launches). |
-| Slow first start or blank cards | The first launch takes 15 to 60 seconds while initial data and charts load. If a background service stops or freezes, the terminal restarts it automatically, or you can click **Restart** next to **Refresh** in the top bar to restart stalled data services and clear cached errors from the browser; logs are in `local/logs/`. |
+| Slow first start or blank cards | The first launch takes up to about a minute (90 seconds on a slow machine) while the data services start. If a background service stops or freezes, the terminal restarts it automatically, or you can click **Restart** next to **Refresh** in the top bar to restart stalled data services and clear cached errors from the browser; logs are in `local/logs/`. |
 | A card asks for an API key | Add the free key with **`Setup-Keys.cmd`**, then stop and start the terminal. |
 | Want the default layout back | Click **⋯** on the dashboard and choose **Reset to default layout**. |
 | Uninstall | Run **`Stop.cmd`** and delete the `Libre-Terminal` folder. |
@@ -255,7 +256,7 @@ Architecture, the source contract, the saved-state schema, runtime patches, and 
 .venv-v5/bin/python scripts/launcher.py check
 ```
 
-`test` runs every offline test file in parallel (about 11 seconds, including the headless browser check when Edge or Chrome is installed). `check` covers encoding, lint, hygiene, and source checks.
+`test` runs all offline test files in parallel (about 30 seconds, including three headless browser suites when Edge or Chrome is installed; `--fast` skips them). `check` covers encoding, lint, hygiene, and source checks. `gate` runs the release gates G1–G5 against a running terminal and records the evidence.
 
 </details>
 

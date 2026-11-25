@@ -501,6 +501,9 @@ window.__fcPromise = (async function (T) {
     var tE = new Error("x"); tE.timedOut = true;
     ok(T.classifyFailure(tE, { source: "SEC" }).text === "SEC did not answer in time.", "a client-side timeout reads as timeout");
     ok(T.classifyFailure(new TypeError("Failed to fetch"), {}).text === "The terminal is busy or restarting.", "a dropped connection reads as unavailable");
+    var starting = { errorKind: "unavailable", userMessage: true, message: "The data services are starting; this card retries shortly." };
+    ok(T.classifyFailure(starting, {}).text === "The data services are starting; this card retries shortly.", "a starting data service says so on the card");
+    ok(T.classifyFailure(Object.assign({}, starting, { userMessage: false }), {}).text === "The terminal is busy or restarting.", "an unmarked 503 keeps the generic text");
 
     // footer: data as-of from the envelope, generic notes and status
     ok(T.asOfText({ as_of: "2026-01-05" }, "10:00").text === "data as of 2026-01-05", "as_of date in the footer");
