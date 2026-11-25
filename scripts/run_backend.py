@@ -3255,6 +3255,71 @@ def install_yfinance_futures_curve_fix(applied: list):
     applied.append("Yahoo futures curves: traded months only, mid or previous close (labelled), no 0.00 or half prices")
 
 
+def yahoo_quote_record(info: dict, fields) -> dict:
+    """One Yahoo quote for openbb_yfinance's quote model: its own fields, plus a last price and a day change.
+
+    The fetcher read the last price from `currentPrice`, which Yahoo leaves out for funds: every ETF had no price and
+    so no change (EUNL.DE, SPY: Snapshot showed "Last — EUR"), and `change` / `change_percent` were never filled for
+    anything. The last price falls back to `regularMarketPrice` (the same number where both exist: SAP.DE 189.82), the
+    previous close to `regularMarketPreviousClose`, and both changes count from that one previous close, so the amount
+    and the percent always agree (EUNL.DE 2026-11-25: 122.24 - 124.565 = -2.325, -1.8665%; Yahoo -2.325, -1.8665%).
+    change_percent is a fraction, as the standard model declares it."""
+    rec = {f: info.get(f) for f in fields if f in info}
+
+    def price(*keys):
+        for k in keys:
+            v = _safe_finite_float(info.get(k))
+            if v is not None and v > 0:
+                return v
+        return None
+
+    last = price("currentPrice", "regularMarketPrice")
+    prev = price("previousClose", "regularMarketPreviousClose")
+    if last is not None:
+        rec["currentPrice"] = last
+    if prev is not None:
+        rec["previousClose"] = prev
+    if last is not None and prev is not None:
+        rec["change"] = last - prev
+        rec["change_percent"] = (last - prev) / prev
+    return rec
+
+
+def install_yfinance_quote_regular_market(applied: list):
+    """Yahoo quotes: a last price for funds and a day change for every symbol (yahoo_quote_record)."""
+    from openbb_yfinance.models import equity_quote as yq
+
+    fetcher = yq.YFinanceEquityQuoteFetcher
+    fields = ["symbol", "longName", "exchange", "quoteType", "bid", "bidSize", "ask", "askSize", "currentPrice", "open",
+              "dayHigh", "dayLow", "previousClose", "volume", "averageVolume", "averageDailyVolume10Day",
+              "fiftyTwoWeekHigh", "fiftyTwoWeekLow", "fiftyDayAverage", "twoHundredDayAverage", "currency"]
+
+    async def aextract_data(query, credentials, **kwargs):
+        import asyncio
+        from warnings import warn
+
+        from yfinance import Ticker
+
+        symbols = [s.strip() for s in query.symbol.split(",") if s.strip()]
+        results: list = []
+
+        async def get_one(symbol):
+            try:
+                info = await asyncio.to_thread(lambda: Ticker(symbol).get_info())
+            except Exception as e:  # noqa: BLE001  (one bad symbol leaves the others, as the fetcher did)
+                warn(f"Error getting data for {symbol}: {e}")
+                return
+            rec = yahoo_quote_record(info or {}, fields)
+            if rec:
+                results.append(rec)
+
+        await asyncio.gather(*(get_one(s) for s in symbols))
+        return results
+
+    # Fetcher.__init_subclass__ copied aextract_data onto extract_data, which is what fetch_data calls: replace both
+    fetcher.aextract_data = fetcher.extract_data = staticmethod(aextract_data)
+    applied.append("Yahoo quotes: funds get their last price, every symbol its day change from the previous close")
+
 
 def sec_standalone_quarters(records: list, frames) -> list:
     """Standalone quarters from SEC year-to-date chains, grouped by the period start (one fiscal year per chain).
@@ -5765,6 +5830,7 @@ PATCHES = [
     Patch("sec_growth_fix", "SEC growth units, adjacent quarters and TTM growth", install_sec_growth_fix, targets=_targets("openbb-sec")),
     Patch("yfinance_price_target_fix", "Yahoo analyst actions order and empty price targets", install_yfinance_price_target_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_futures_curve_fix", "Yahoo futures curve prices (one-sided quotes, untraded months)", install_yfinance_futures_curve_fix, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_quote_regular_market", "Yahoo quote last price for funds and day change", install_yfinance_quote_regular_market, targets=_targets("openbb-yfinance")),
     Patch("yfinance_fund_multiples_fix", "Yahoo fund multiples", install_yfinance_fund_multiples_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_recommendations_months", "Yahoo recommendations readable months", install_yfinance_recommendations_months, targets=_targets("openbb-yfinance")),
     Patch("tmx_holdings_currency_fix", "TMX ETF holdings currency", install_tmx_holdings_currency_fix, targets=_targets("openbb-tmx")),

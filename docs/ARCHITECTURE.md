@@ -213,6 +213,11 @@ Applied in memory at start; no installed file is modified.
   New York from hourly bars (last 2 years), older days on the next bar's open, days before 2010-08-04 on Yahoo's own
   close, which was real then (`fx_daily_bars`, `test_fx.py`). The TradingView datafeed is routed through the same
   bars, and its header counts from the previous of those closes (`install_fx_chart_fix`).
+- A day's change counts from the previous close wherever it is shown. The TradingView legend printed close - open of
+  the bar; its three sites now count from the previous bar's close (`install_tv_legend_change`, `test_day_change.py`,
+  browser half `test_legend_change.py`). Yahoo quotes give funds a last price (Yahoo has no `currentPrice` for an
+  ETF, so Snapshot showed none) and every symbol a change and a change percent from one previous close
+  (`install_yfinance_quote_regular_market`).
 - Output streams are guarded (no "I/O operation on closed file" crash), and log records are redacted.
 - **Disk cache for slow providers** (`CACHE_POLICY`, the only persistent cache policy; files in `local/cache/backend/`).
   Time to live: 3 h for FiscalData, CFTC, the Federal Reserve and FRED; 6 h for EIA, BLS and ECB; 12 h for USDA, IMF,
