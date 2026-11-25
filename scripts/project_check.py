@@ -29,7 +29,7 @@ import local_paths  # noqa: E402
 import redact  # noqa: E402
 from version import VERSION  # noqa: E402
 
-PUBLISHABLE_DIRS = ("terminal", "scripts", "config", "docs")
+PUBLISHABLE_DIRS = ("terminal", "scripts", "config", "docs", ".github")
 PUBLISHABLE_ROOT_FILES = (
     "README.md",
     "LICENSE",
@@ -77,7 +77,7 @@ WINDOWS_RELEASE_EXCLUDE_FILES = {
     "ruff.toml",
     "README.md",
 }
-WINDOWS_RELEASE_EXCLUDE_PREFIXES = ("docs/", "scripts/tests/")
+WINDOWS_RELEASE_EXCLUDE_PREFIXES = ("docs/", "scripts/tests/", ".github/")
 WINDOWS_README_TEXT = f"""\
 Libre Terminal v{VERSION} - Windows Quick Guide
 ===========================================
