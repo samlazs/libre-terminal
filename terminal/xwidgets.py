@@ -1,6 +1,7 @@
 """Widget definitions for the Terminal's own composite views (same schema the OpenBB backends use)."""
 
 import cds
+import columns
 import cryptovol
 import multpl
 import news
@@ -455,7 +456,7 @@ def widgets():
            "markdown", "/x/data_status", [], "Reference", ["Terminal"], w=40, h=20, refetch=3600000),
     ]
     out.extend(_stage3())
-    return {w["widgetId"]: w for w in out}
+    return columns.stamp_x_units({w["widgetId"]: w for w in out})      # every number column declares its unit
 
 
 SYM = [_p("symbol", "Symbol", "AAPL", "Ticker (Yahoo Finance spelling; U.S. filers use SEC figures).")]

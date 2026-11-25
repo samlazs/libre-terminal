@@ -138,14 +138,7 @@ def classify(col: dict) -> dict:
     if not num:
         return out
     if not fn:
-        if re.search(r"normali[sz]ed (percent|percentage|decimal)|as a (normali[sz]ed )?decimal|percent ?/ ?100|\(percent ?/ ?100\)", tip):
-            out["formatterFn"] = "normalizedPercent"
-        elif re.search(r"percentage points|\bin pp\b", tip):
-            out.update(suffix=" pp", decimalPlaces=2)
-        elif re.search(r"\b(in|as a|as) percent(age)?\b|\bpercent of\b|, in percent", tip) and "per cent" not in tip:
-            out["formatterFn"] = "percent"
-        elif re.search(r"\bin basis points\b", tip):
-            out.update(suffix=" bp", decimalPlaces=0)
+        out.update(tip_format(tip))                  # raw backend cards only: the count is frozen (test_columns)
     if out.get("formatterFn") in ("percent", "normalizedPercent") and str(col.get("suffix") or "").strip() == "%":
         out["suffix"] = ""                           # the formatter writes the %: USAspending share read "70.47%%" (review A6)
     change = is_change(field, tip)
@@ -289,8 +282,13 @@ def unit_format(widget_id: str | None, col: dict) -> dict:
 
 
 def undeclared(widget: dict) -> list[str]:
-    """Number columns named like a percent or a yield whose unit nobody declares (source format, classify(), UNITS)."""
+    """Number columns whose unit nobody declares. The Terminal's own tables (x_*): every number column must carry a
+    declared "unit" (X_UNITS or its format). Backend tables: columns named like a percent or a yield (source format,
+    classify(), UNITS)."""
     wid = (widget or {}).get("widgetId") or ""
+    if wid.startswith("x_"):
+        return [str(c.get("field") or "") for c in (((widget or {}).get("data") or {}).get("table") or {}).get("columnsDefs") or []
+                if c.get("cellDataType") == "number" and not x_unit_ok(c.get("unit"))]
     out = []
     for c in (((widget or {}).get("data") or {}).get("table") or {}).get("columnsDefs") or []:
         f = str(c.get("field") or "")
@@ -304,6 +302,102 @@ def undeclared(widget: dict) -> list[str]:
         out.append(f)
     return out
 
+
+
+# ---------------------------------------------------------------- the Terminal's own views (/x/*): declared units
+# Every number column of an /x/* table carries "unit" (stamped by stamp_x_units when xwidgets builds the catalog).
+# A column whose format already says its unit (normalizedPercent = a fraction, "%" = percent, " bp", " pp", "x") gets it
+# from the format; every other number column is declared here, by hand, from the code that produces it. Nothing is
+# inferred from a tooltip, a column name or the values.
+X_UNIT_KINDS = {
+    "fraction": "share or change as a fraction (0.05 = 5%)",
+    "percent": "percent (5 = 5%)",
+    "bp": "basis points",
+    "pp": "percentage points",
+    "x": "a multiple (times)",
+    "ratio": "a dimensionless ratio or statistic (beta, Sharpe)",
+    "number": "a dimensionless number (convexity)",
+    "count": "a count (analysts, trades, periods)",
+    "years": "years",
+    "index": "an index level",
+    "score": "a position on a 0-100 scale",
+    "per100": "price or price change per 100 of par",
+    "ships/day": "ships per day",
+    "ccy": "an amount in the currency the answer names (EPS, revenue)",
+    "ccy mn": "millions of the currency the answer or the row names",
+    "row": "set per row: the row's own quote unit, its unit column or its row format (_fmt)",
+}
+_CCY_UNIT = re.compile(r"^[A-Z]{3}( (bn|mn|k))?$")          # an amount in a named currency: "USD", "USD bn"
+_FORMAT_UNITS = {"normalizedPercent": "fraction", "percent": "percent"}
+_SUFFIX_UNITS = {"%": "percent", "bp": "bp", "pp": "pp", "x": "x"}
+_BOARD = {"price": "row", "chg": "row", "range52": "score", "pair_last": "row", "low52": "row", "high52": "row"}
+_RISK = {"sharpe": "ratio", "beta": "ratio", "periods": "count"}
+X_UNITS = {
+    "x_watchlist": _BOARD,                  # quotes in the instrument's own unit; yield rows in percent with changes in bp
+    "x_board": _BOARD,
+    "x_comps": {"mcap_usd": "USD bn", "ev_usd": "USD bn", "beta": "ratio"},       # converted at the latest rate (comps.py)
+    "x_earnings_history": {"eps_est": "ccy", "eps_actual": "ccy"},                # per share, in the answer's currency
+    "x_consensus": {"eps": "ccy", "eps_low": "ccy", "eps_high": "ccy", "rev": "ccy", "rev_low": "ccy", "rev_high": "ccy",
+                    "eps_n": "count", "rev_n": "count", "up_30d": "count", "down_30d": "count", "up_7d": "count", "down_7d": "count"},
+    "x_yield_curve_table": {"maturity_years": "years"},
+    "x_policy_path_table": {"trades": "count"},
+    "x_cds_indices": {"level": "row", "chg_1d": "row", "chg_1w": "row", "chg_1m": "row", "low": "row", "high": "row",   # bp or price: unit column
+                      "trades": "count", "notional_mn": "ccy mn", "dropped": "count"},
+    "x_bond_lookup": {"price": "per100", "price_chg": "per100", "dv01": "per100", "g_spread": "bp", "mod_duration": "years",
+                      "convexity": "number"},
+    "x_chokepoints": {"total": "ships/day", "tanker": "ships/day", "container": "ships/day", "dry_bulk": "ships/day"},
+    "x_gpr_table": {"latest": "index", "avg_3m": "index"},                        # Caldara-Iacoviello GPR index
+    "x_fx_matrix": {c: c for c in ("USD", "EUR", "JPY", "GBP", "CHF", "CAD", "AUD", "NZD", "CNY")},   # price in that currency
+    "x_risk_stats": _RISK,
+    "x_peer_risk": _RISK,
+    "x_roic_dupont": {"nopat": "ccy mn", "invested_capital": "ccy mn"},          # reporting currency, named under the table
+    "x_bank_failures": {"assets_mn": "USD mn", "deposits_mn": "USD mn", "est_loss_mn": "USD mn"},
+}
+
+
+def x_unit_ok(unit) -> bool:
+    return isinstance(unit, str) and (unit in X_UNIT_KINDS or bool(_CCY_UNIT.match(unit)))
+
+
+def format_unit(col: dict) -> str | None:
+    """The unit a column's own format declares (None: the format says nothing about the unit)."""
+    u = _FORMAT_UNITS.get(col.get("formatterFn") or "")
+    return u or _SUFFIX_UNITS.get(str(col.get("suffix") or "").strip())
+
+
+def stamp_x_units(widgets: dict) -> dict:
+    """Set "unit" on every number column of the Terminal's own tables: declared here (X_UNITS) or by the column's format."""
+    for wid, w in widgets.items():
+        for c in (((w or {}).get("data") or {}).get("table") or {}).get("columnsDefs") or []:
+            if c.get("cellDataType") == "number" and "unit" not in c:
+                u = X_UNITS.get(wid, {}).get(str(c.get("field") or "")) or format_unit(c)
+                if u:
+                    c["unit"] = u
+    return widgets
+
+
+def tip_format(tip: str) -> dict:
+    """A format read from a backend column's tooltip text (raw /api/v1 cards only; the count is frozen by test_columns)."""
+    tip = (tip or "").lower()
+    if re.search(r"normali[sz]ed (percent|percentage|decimal)|as a (normali[sz]ed )?decimal|percent ?/ ?100|\(percent ?/ ?100\)", tip):
+        return {"formatterFn": "normalizedPercent"}
+    if re.search(r"percentage points|\bin pp\b", tip):
+        return {"suffix": " pp", "decimalPlaces": 2}
+    if re.search(r"\b(in|as a|as) percent(age)?\b|\bpercent of\b|, in percent", tip) and "per cent" not in tip:
+        return {"formatterFn": "percent"}
+    if re.search(r"\bin basis points\b", tip):
+        return {"suffix": " bp", "decimalPlaces": 0}
+    return {}
+
+
+def inferred(widget: dict) -> list[str]:
+    """Number columns of a backend widget whose unit or format is read from tooltip text (not declared by the source)."""
+    out = []
+    for c in (((widget or {}).get("data") or {}).get("table") or {}).get("columnsDefs") or []:
+        tip = str(c.get("headerTooltip") or "")
+        if c.get("cellDataType") == "number" and ((not c.get("formatterFn") and tip_format(tip)) or unit_from_tip(tip)):
+            out.append(str(c.get("field") or ""))
+    return out
 
 # ---------------------------------------------------------------- curated default columns, by endpoint
 # The columns a professional reads first; everything else is one click away under "Columns". Fields missing from an

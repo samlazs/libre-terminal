@@ -176,4 +176,15 @@ if status != 200:
     ok_error(status, body, "unavailable", "dashboards not built")
 srv.shutdown()
 
+# ---- P3-02: every number column of every /x/* table declares its unit (columns.X_UNITS or its own format)
+import columns  # noqa: E402
+import xwidgets  # noqa: E402
+
+xw = xwidgets.widgets()
+missing_units = {wid: columns.undeclared(w) for wid, w in xw.items() if columns.undeclared(w)}
+check(missing_units == {}, f"undeclared() over every /x/* table is empty: {missing_units}")
+n_num = sum(1 for w in xw.values() for c in (((w.get("data") or {}).get("table") or {}).get("columnsDefs") or [])
+            if c.get("cellDataType") == "number")
+check(n_num >= 190, f"the gate saw the /x/* number columns ({n_num})")
+
 done("test_contract")
