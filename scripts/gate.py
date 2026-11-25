@@ -2,8 +2,9 @@
 
   .venv-v5\\Scripts\\python.exe scripts\\gate.py [--only G1,G4] [--offline] [--health-limit N]
 
-Writes local/notes/gates-YYYY-MM-DD.json: commit, version, and per gate {status: pass|fail|manual, evidence, started,
-finished} (gates from an earlier run the same day are kept unless re-run). Exit code 0 only when no gate failed and
+Writes local/notes/gates-YYYY-MM-DD.json: the last run's commit and version, and per gate {status: pass|fail|manual,
+evidence, started, finished, commit, version, offline, uncommitted} (gates from an earlier run the same day are kept unless
+re-run, each with the commit it ran on). Exit code 0 only when no gate failed and
 local/state/state.json is byte-for-byte unchanged. --offline runs only the parts that need no running terminal and
 marks the live parts manual. G6 (owner decisions) is never automated.
 
@@ -14,14 +15,16 @@ G1  local/notes/g1-spotcheck.json: at least 10 figures, at least 4 non-US; each 
        "expected": 34176.0, "tol_pct": 1.0 (or "tol_abs": 0.05), "unit": "EUR m", "as_of": "2025-12-31",
        "independent_source": {"name": "SAP annual report 2025", "url": "https://..."}}
 G2  no critical backend fix failed; paced health run (no our-bug, no key in an error, backend survives); cold start of an
-    isolated keyless instance to the first screen in under 30 s; probe --all-routes --defaults --concurrent 8 with no 500
+    isolated keyless instance to a complete, error-free first screen (layout, then a full 200 from the first data card)
+    within 90 s, the measured time recorded (owner decision OD-2, 2026-11-25); probe --all-routes --defaults --concurrent 8 with no 500
     and no envelope violation; a 30-minute probe soak grows the UI process by less than 50 MB (--soak-minutes).
 G3  check_sources (live, or --offline) and probe --all-routes --defaults --require-as-of (every 200 carries sources and
     as_of or as_of_na).
 G4  hygiene scan of publishable files; logs free of key material; live: foreign Host -> 403, Sec-Fetch-Site:
     cross-site -> 403 on /x/board and /api/state, CSP header on /.
 G5  Windows: unpack local/releases/Libre-Terminal-Windows.zip into a short temp path, run Install.cmd and Start.cmd
-    keyless on spare ports, /api/services must report the UI and V5 up; manual elsewhere.
+    keyless on spare ports, /api/services must report the UI and V5 up; manual elsewhere. The zip's BUILD-INFO.json must
+    name this version and commit with no packed file differing from it (the zip tested is the release).
 """
 
 from __future__ import annotations
@@ -49,7 +52,11 @@ sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "terminal")]
 import probe  # noqa: E402
 
 GATES = ("G1", "G2", "G3", "G4", "G5")
-COLD_START_LIMIT_S = 30.0
+# owner decision OD-2 (2026-11-25): startup stays as it is (reliability over a faster first screen). The backend boot
+# is CPU-bound, warm or cold; measured 40.7 / 44.1 / 45.0 / 53.5 s, 58.3 s under load. 90 s leaves headroom without
+# hiding a regression.
+COLD_START_LIMIT_S = 90.0
+FIRST_VIEW_TIMEOUT_S = 60.0
 G1_MIN_FIGURES, G1_MIN_NON_US = 10, 4
 _NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -217,6 +224,20 @@ def wait_http(url: str, host: str, deadline: float, ok=lambda s, b: s == 200) ->
     return False
 
 
+def first_view_verdict(status, body) -> tuple[bool, str]:
+    """Is the first answer of the first data card complete? Only a 200 whose envelope says status ok counts: a partial
+    or substitute answer, an error, or no answer at all fails the cold start."""
+    if status != 200:
+        return False, f"first /x/board answer was {status}, not 200"
+    if not isinstance(body, dict):
+        return False, "first /x/board answer was not a JSON object"
+    st = body.get("status")
+    if st != "ok":
+        notes = "; ".join(str(n) for n in (body.get("notes") or [])[:2])
+        return False, f"first /x/board answer was 200 but {st or 'without a status'}" + (f" ({notes})" if notes else "")
+    return True, "first /x/board answer complete (200, status ok)"
+
+
 def cold_start(ctx) -> tuple[bool, str]:
     scratch = Path(tempfile.mkdtemp(prefix="lt-cold-"))
     env = isolated_env(scratch, scratch / "local")
@@ -230,11 +251,12 @@ def cold_start(ctx) -> tuple[bool, str]:
         first = wait_http(f"http://{host}/api/dashboards", host, t0 + 180,
                           ok=lambda s, b: s == 200 and isinstance(b, dict) and bool(b.get("dashboards")))
         elapsed = time.monotonic() - t0
+        view_ok, view_why = False, "no layout, so the first card was not asked"
         if first:
-            # the first screen is usable when its first card answers too
-            first_view = wait_http(f"http://{host}/x/board", host, time.monotonic() + 60)
+            # the first screen is complete when its first card answers in full: its first answer is the one judged
+            status, body, _ = probe.fetch(f"http://{host}/x/board", host, FIRST_VIEW_TIMEOUT_S)
             elapsed = time.monotonic() - t0
-            first &= first_view
+            view_ok, view_why = first_view_verdict(status, body)
     finally:
         try:
             proc.wait(timeout=240)
@@ -244,7 +266,8 @@ def cold_start(ctx) -> tuple[bool, str]:
         remove_tree(scratch)
     if not first:
         return False, f"isolated keyless instance showed no first screen within {elapsed:.0f} s"
-    return elapsed < COLD_START_LIMIT_S, f"cold start to first screen {elapsed:.1f} s (limit {COLD_START_LIMIT_S:.0f} s)"
+    return (view_ok and elapsed < COLD_START_LIMIT_S,
+            f"cold start to first screen {elapsed:.1f} s (limit {COLD_START_LIMIT_S:.0f} s); {view_why}")
 
 
 def probe_all(ctx, *extra) -> tuple[int, list[str]]:
@@ -466,16 +489,80 @@ def gate_g4(ctx) -> tuple[str, list[str]]:
 
 
 # ---------------------------------------------------------------- G5
-def remove_tree(path: Path, tries: int = 10) -> bool:
-    """Delete a scratch folder. Processes of a stopped instance may hold their loaded modules for a few seconds on
-    Windows, so a failed delete is retried before it is given up (and reported)."""
-    for _ in range(tries):
-        shutil.rmtree(path, ignore_errors=True)
+def scratch_processes(path: Path) -> list[tuple[int, str]]:
+    """(pid, name) of processes running from a scratch folder (executable or command line inside it): the gate's own
+    throwaway instance, which `launcher.py stop` may leave behind (a grandchild, or a process outside its tree)."""
+    if os.name != "nt":
+        return []
+    # The folder goes in through the environment, never in the command text: the query's own command line cannot match
+    # it, and no quote character in the path (PowerShell also ends a string at ‘ ’ ‚ ‛) can break the command. A trailing
+    # separator keeps C:\ltg5-ab from matching C:\ltg5-abc. Every process comes back with its parent and a match flag, so
+    # this process and the chain that started it are left out here (the gate never stops itself).
+    cmd = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; $d = $env:LT_SCRATCH; "
+           "@(Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ p = $_.ProcessId; pp = $_.ParentProcessId; "
+           "n = $_.Name; hit = [bool](($_.ExecutablePath -and $_.ExecutablePath.StartsWith($d, [StringComparison]::OrdinalIgnoreCase)) "
+           "-or ($_.CommandLine -and $_.CommandLine.IndexOf($d, [StringComparison]::OrdinalIgnoreCase) -ge 0)) } }) "
+           "| ConvertTo-Json -Compress")
+    env = dict(os.environ, LT_SCRATCH=str(path).rstrip("\\/") + os.sep)
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd], capture_output=True, timeout=60,
+                           stdin=subprocess.DEVNULL, env=env)
+        data = json.loads(r.stdout.decode("utf-8", "replace") or "[]")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for d in data if isinstance(data, list) else [data]:
+        try:
+            rows.append((int(d["p"]), int(d["pp"] or 0), str(d.get("n") or ""), bool(d.get("hit"))))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return scratch_hits(rows, os.getpid())
+
+
+def scratch_hits(rows: list, me: int) -> list[tuple[int, str]]:
+    """(pid, name) of the matching rows (pid, parent pid, name, matched), leaving out `me` and the processes that started it."""
+    parent = {p: pp for p, pp, _, _ in rows}
+    mine, p = set(), me
+    while p and p not in mine:
+        mine.add(p)
+        p = parent.get(p, 0)
+    return [(p, n) for p, _, n, hit in rows if hit and p not in mine]
+
+
+def kill_tree(pid: int) -> None:
+    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+
+
+def _clear_readonly(func, p, _exc):
+    try:
+        os.chmod(p, 0o700)
+        func(p)
+    except OSError:
+        pass
+
+
+def remove_tree(path: Path, tries: int = 15) -> str:
+    """Delete a scratch folder; '' when it is gone, else why not (for the evidence). Processes still running from it
+    are stopped first (they are the gate's own throwaway instance); a loaded module stays locked a few seconds after its
+    process ends on Windows, so a failed delete is retried before it is given up."""
+    killed = []
+    for i in range(tries):
+        for pid, name in scratch_processes(path) if i % 5 == 0 else []:
+            kill_tree(pid)
+            killed.append(f"{name} {pid}")
+        if path.exists():
+            shutil.rmtree(path, **({"onexc": _clear_readonly} if sys.version_info >= (3, 12) else {"onerror": _clear_readonly}))
         if not path.exists():
-            return True
+            return ""
         time.sleep(2)
-    print(f"[gate] could not remove {path}; delete it by hand", file=sys.stderr)
-    return False
+    left = sum(1 for q in path.rglob("*") if q.is_file())
+    holders = scratch_processes(path)
+    why = (f"could not remove {path} ({left} files left"
+           + (f"; still running from it: {', '.join(f'{n} {p}' for p, n in holders)}" if holders else
+              "; no process runs from it (a handle held elsewhere, or antivirus)")
+           + (f"; stopped first: {', '.join(killed)}" if killed else "") + "); delete it by hand")
+    print(f"[gate] {why}", file=sys.stderr)
+    return why
 
 
 def short_temp() -> Path:
@@ -534,8 +621,9 @@ def gate_g5(ctx) -> tuple[str, list[str]]:
     zpath = local_dir() / "releases" / "Libre-Terminal-Windows.zip"
     if not zpath.exists():
         return "fail", ["local/releases/Libre-Terminal-Windows.zip is missing (project_check.py release-zip builds it)"]
+    built_ok, built_why = zip_build_verdict(zip_build_info(zpath), version(), git_sha())
     scratch = short_temp()
-    ev, ok = [f"unpacked into {len(str(scratch))}-character path"], False
+    ev, ok = [built_why, f"unpacked into {len(str(scratch))}-character path"], False
     refused_ok = False
     ui, v5 = free_port(7950), free_port(7900)
     try:
@@ -569,8 +657,38 @@ def gate_g5(ctx) -> tuple[str, list[str]]:
             refused_ok, why = g5_refuses_long_path(zpath, scratch)
             ev.append(why)
         finally:
-            remove_tree(scratch)
-    return ("pass" if ok and refused_ok else "fail"), ev
+            left = remove_tree(scratch)
+            if left:
+                ev.append(left)
+    return ("pass" if ok and refused_ok and built_ok else "fail"), ev
+
+
+def zip_build_info(zpath: Path) -> dict | None:
+    """The zip's BUILD-INFO.json (project_check.py build_info), or None when the zip has none."""
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            name = next((n for n in z.namelist() if n.endswith("/BUILD-INFO.json") and n.count("/") == 1), None)
+            return json.loads(z.read(name)) if name else None
+    except (OSError, ValueError, zipfile.BadZipFile, KeyError):
+        return None
+
+
+def zip_build_verdict(info: dict | None, want_version: str, want_commit: str) -> tuple[bool, str]:
+    """Is the zip under test the release: this version, this commit, and no packed file differing from that commit?"""
+    if not isinstance(info, dict):
+        return False, "zip has no BUILD-INFO.json: what it was built from is unknown (rebuild it with project_check.py release-zip)"
+    v, c, dirty = info.get("version"), str(info.get("commit") or "unknown"), info.get("uncommitted_files")
+    what = f"zip built from version {v}, commit {c[:12]}" + (f" at {info['built']}" if info.get("built") else "")
+    problems = []
+    if v != want_version:
+        problems.append(f"not this version ({want_version})")
+    if c != want_commit:
+        problems.append(f"not this commit ({want_commit[:12]})")
+    if dirty is None:
+        problems.append("whether its files match the commit is unknown")
+    elif dirty:
+        problems.append(f"{len(dirty)} packed file(s) differ from the commit ({', '.join(dirty[:3])})")
+    return not problems, what + ("; " + "; ".join(problems) if problems else "; matches this version and commit")
 
 
 GATE_FUNCS = {"G1": gate_g1, "G2": gate_g2, "G3": gate_g3, "G4": gate_g4, "G5": gate_g5}
@@ -606,6 +724,17 @@ def git_sha() -> str:
     return lines[-1].strip() if rc == 0 and lines else "unknown"
 
 
+def uncommitted(cwd: Path = ROOT) -> int | None:
+    """How many tracked files differ from the commit (a gate run on them did not test the commit alone); None: unknown.
+    git's whole answer is counted (`run` keeps only the last lines); -z: one NUL-ended entry per file, a rename included."""
+    try:
+        r = subprocess.run(["git", "status", "--porcelain", "-z", "--untracked-files=no", "--no-renames"], cwd=cwd,
+                           capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return sum(1 for e in r.stdout.split(b"\0") if e.strip()) if r.returncode == 0 else None
+
+
 def version() -> str:
     m = re.search(r'VERSION\s*=\s*"([^"]+)"', (ROOT / "terminal" / "version.py").read_text(encoding="utf-8"))
     return m.group(1) if m else "unknown"
@@ -638,14 +767,15 @@ def main(argv=None) -> int:
             raise ValueError
     except (OSError, ValueError, AttributeError):
         record = {"gates": {}}
-    record.update(date=date, commit=git_sha(), version=version(), offline=a.offline)
+    stamp = dict(commit=git_sha(), version=version(), offline=a.offline, uncommitted=uncommitted())
+    record.update(date=date, **stamp)                     # the last run; each gate below carries the run it came from
     for g in gates:
         started = now()
         try:
             status, evidence = GATE_FUNCS[g](ctx)
         except Exception as e:  # noqa: BLE001  - a gate that crashes is a failed gate, never a passed one
             status, evidence = "fail", [f"gate crashed: {type(e).__name__}: {str(e)[:200]}"]
-        record["gates"][g] = {"status": status, "evidence": evidence, "started": started, "finished": now()}
+        record["gates"][g] = {"status": status, "evidence": evidence, "started": started, "finished": now(), **stamp}
         print(f"{g}: {status.upper()}  " + (evidence[0] if evidence else ""), flush=True)
         for line in evidence[1:6]:
             print("    " + line)

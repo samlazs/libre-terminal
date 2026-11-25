@@ -187,6 +187,83 @@ n_num = sum(1 for w in xw.values() for c in (((w.get("data") or {}).get("table")
             if c.get("cellDataType") == "number")
 check(n_num >= 190, f"the gate saw the /x/* number columns ({n_num})")
 
+# ---- gatekeeper P1-b: a table whose amounts are 'ccy' / 'ccy mn' (columns.X_UNITS) names their currency, or they are blank
+ccy_views = sorted(w[2:] for w, u in columns.X_UNITS.items() if {"ccy", "ccy mn"} & set(u.values()))
+check(ccy_views == ["cds_indices", "consensus", "earnings_history", "roic_dupont"], f"the tables with amounts in a named currency ({ccy_views})")
+hist_rows = [{"date": "2026-11-04", "eps_est": 56.38, "eps_actual": 65.28, "surprise": 0.1579, "move_2d": None}]
+check(K.violations({"results": hist_rows, "sources": src, "as_of": "2026-11-04"}, "earnings_history")
+      == ["amounts in eps_est, eps_actual but the answer names no currency"], "EPS with no currency named is a violation")
+check(K.violations({"results": hist_rows, "sources": src, "as_of": "2026-11-04", "currency": "JPY"}, "earnings_history") == [], "EPS in JPY: no violation")
+check(K.violations({"results": [dict(hist_rows[0], eps_est=None, eps_actual=None)], "sources": src, "as_of": "2026-11-04"}, "earnings_history") == [],
+      "no amount shown: nothing to name")
+check(K.violations({"results": [{"notional_mn": 1250, "currency": "EUR"}], "sources": src, "as_of": "2026-11-20"}, "cds_indices") == [],
+      "'ccy mn': the row may name its own currency")
+check(K.violations({"results": [{"notional_mn": 1250}], "sources": src, "as_of": "2026-11-20"}, "cds_indices") != [], "'ccy mn' with no currency anywhere")
+check(K.violations({"results": [{"notional_mn": 1250}], "sources": src, "as_of": "2026-11-20", "currency": "yen"}, "cds_indices") != [],
+      "a currency is a code (JPY), not a word")
+os.environ["TERMINAL_STRICT_CONTRACT"] = "0"                 # production: the amounts are blanked with a note, never shown unlabelled
+try:
+    blanked = K.finish({"results": hist_rows, "sources": src, "as_of": "2026-11-04"}, "earnings_history")
+finally:
+    os.environ["TERMINAL_STRICT_CONTRACT"] = "1"
+check(blanked["results"][0]["eps_est"] is None and blanked["results"][0]["eps_actual"] is None and blanked["results"][0]["surprise"] == 0.1579
+      and blanked["notes"] == [K.CCY_BLANK_NOTE] and hist_rows[0]["eps_est"] == 56.38,
+      "production: amounts blank, the unit-free surprise kept, a note said, the view's own rows untouched")
+
+# through dispatch (strict): earnings_history and consensus for Toyota (JPY), Apple (USD) and an ADR-like split (EPS in USD,
+# revenue in TWD -> revenue blank with a note). Figures are Yahoo's 2026-11-04 Toyota report: est 56.38, actual 65.28 (yen).
+def _model(sym, ccy):
+    return {"symbol": sym, "currency": ccy, "latest": {}, "history": [
+        {"date": "2026-11-04", "est": 56.38 if sym == "7203.T" else 1.77, "actual": 65.28 if sym == "7203.T" else 1.85,
+         "surprise": 0.1579 if sym == "7203.T" else 0.0452, "move_2d": None, "move_end": None}]}
+
+
+def _est(eps_ccy, rev_ccy):
+    return {"eps": [{"period": "0q", "mean": 79.66, "low": 75.01, "high": 84.3, "number_of_analysts": 2, "currency": eps_ccy}],
+            "rev": [{"period": "0q", "mean": 13.83e12, "low": 13.13e12, "high": 14.41e12, "number_of_analysts": 8, "currency": rev_ccy}],
+            "trend": [], "revs": [], "_failed": []}
+
+
+saved_em, saved_er = C._earn_model, C._est_raw
+try:
+    for sym, ccy in (("7203.T", "JPY"), ("AAPL", "USD")):
+        C._cache.clear()
+        C._earn_model = lambda s, **_kw: _model(s, ccy)
+        out = C.dispatch("earnings_history", {"symbol": sym})
+        r0 = out["results"][0]
+        check(out["currency"] == ccy and out["convention"] == f"EPS in {ccy} per share" and r0["eps_est"] == _model(sym, ccy)["history"][0]["est"],
+              f"earnings_history {sym}: amounts as given, in {ccy}, said on the card")
+        C._est_raw = lambda s, **_kw: _est(ccy, ccy)
+        out = C.dispatch("consensus", {"symbol": sym})
+        r0 = out["results"][0]
+        check(out["currency"] == ccy and out["convention"] == f"EPS per share and revenue in {ccy}" and r0["eps"] == 79.66 and r0["rev"] == 13.83e12,
+              f"consensus {sym}: EPS and revenue in {ccy}")
+    C._cache.clear()
+    C._est_raw = lambda s, **_kw: _est("USD", "TWD")
+    out = C.dispatch("consensus", {"symbol": "TSM"})
+    r0 = out["results"][0]
+    check(out["currency"] == "USD" and r0["eps"] == 79.66 and r0["rev"] is None and r0["rev_low"] is None and r0["rev_high"] is None
+          and r0["rev_n"] == 8 and any("in TWD, not USD" in n for n in out["notes"]), "consensus: revenue in another currency is blank with a note")
+    C._cache.clear()
+    C._est_raw = lambda s, **_kw: _est(None, None)
+    try:
+        C.dispatch("consensus", {"symbol": "XYZ"})
+        named = "answered"
+    except K.ContractViolation as e:
+        named = str(e)
+    check("names no currency" in named, f"consensus with no currency named fails the contract (strict) ({named[:80]})")
+    C._cache.clear()
+    C._earn_model = lambda s, **_kw: _model(s, None)
+    try:
+        C.dispatch("earnings_history", {"symbol": "7203.T"})
+        named = "answered"
+    except K.ContractViolation as e:
+        named = str(e)
+    check("names no currency" in named, "earnings_history with no currency named fails the contract (strict)")
+finally:
+    C._earn_model, C._est_raw = saved_em, saved_er
+    C._cache.clear()
+
 # ---- P3-05: every route taking a symbol, company or currency declares its coverage, and the tests hold it to it
 import inspect  # noqa: E402
 import re  # noqa: E402

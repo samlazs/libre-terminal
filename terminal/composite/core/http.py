@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -43,6 +44,9 @@ _NO_RETRY_RE = re.compile(r"(?:[?&]provider=(?:oecd|nasdaq)(?:&|$)|/(?:oecd|nasd
 DEFAULT_UA = "Mozilla/5.0 (compatible; terminal-ui)"
 COOLDOWN_CAP = 600.0                # seconds: a Retry-After longer than this is not believed
 _NET = "net"                        # in retry_on: connection errors and timeouts
+# an answer the source cut off or garbled while it was read (RemoteDisconnected is a BadStatusLine): network failures.
+# Other HTTPExceptions (InvalidURL, CannotSendRequest) are the client's own errors, never a provider outage.
+_READ_FAILURES = (http.client.IncompleteRead, http.client.BadStatusLine, http.client.LineTooLong)
 
 # One outbound policy per provider. timeout: seconds per attempt (a tuple: per attempt); attempts: tries in all;
 # retry_on: HTTP statuses (and "net") worth another attempt; max_concurrency: requests in flight at once (None: no
@@ -212,8 +216,11 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
     attempts = max(1, min(pol["attempts"], len(per)))
     if pname == "backend" and _no_retry(url):
         attempts = 1
-    budget = float(timeout) if timeout else float(sum(per[:attempts]))
+    # the fetch's own budget: every attempt's full timeout plus the pauses between them, so it never cuts its own last attempt
+    pauses = sum(_RETRY_DELAYS[min(i, len(_RETRY_DELAYS) - 1)] for i in range(attempts - 1)) if _RETRY_DELAYS else 0.0
+    budget = float(timeout) if timeout else float(sum(per[:attempts])) + pauses
     deadline = time.monotonic() + max(1.0, budget)
+    outer = deadline if timeout else None                 # a limit set from outside (caller's timeout, view deadline)
     is_local = url.startswith((C.V5, C.V4))
     label = C._which(url)
     ckey = _cool_key(url, pname)
@@ -221,7 +228,9 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
     if left is not None:
         if left <= 0.5:
             raise _fail(f"{label} could not be asked in time (this view's time budget ran out).", kind="timeout")
-        deadline = min(deadline, time.monotonic() + left)
+        view_end = time.monotonic() + left
+        deadline = min(deadline, view_end)
+        outer = view_end if outer is None else min(outer, view_end)
 
     now = time.monotonic()
     with _state_lock:
@@ -242,15 +251,21 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
     sem = _sem(pname, pol["max_concurrency"]) if pol["max_concurrency"] else None
     retry_on = set(pol["retry_on"])
     last: CompositeError | None = None
+    outage_err: CompositeError | None = None   # the latest error that showed the provider failing (marks it down). A
+                            # timeout counts only when the attempt had the provider's full per-attempt timeout: one cut short
+                            # by a view's deadline (or a caller's shorter budget) says nothing about the provider
     for attempt in range(attempts):
         if attempt:
             delay = _RETRY_DELAYS[min(attempt - 1, len(_RETRY_DELAYS) - 1)] if _RETRY_DELAYS else 0.0
             if delay > 0:
                 time.sleep(min(delay, max(0.0, deadline - time.monotonic())))
-        rem = deadline - time.monotonic()
+        now = time.monotonic()
+        rem = deadline - now
         if rem <= 0 and attempt:
             break
-        this_timeout = max(1.0, min(per[min(attempt, len(per) - 1)], rem) if not timeout else rem)
+        full = per[min(attempt, len(per) - 1)]
+        this_timeout = max(1.0, min(full, rem) if not timeout else rem)
+        limited = outer is not None and outer - now < full - 1e-6     # an outside limit left this attempt less than its own
         if sem is not None and not sem.acquire(timeout=max(0.1, rem)):
             raise _fail(f"{label} did not answer in time (too many requests waiting).", kind="timeout")
         try:
@@ -287,19 +302,26 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
             else:
                 msg = f"{urllib.parse.urlsplit(url).hostname} is not reachable ({e})."
             kind = _status_kind(e.code)
-            last = _fail(msg, kind=kind, http_status=e.code, retry_after=_retry_after(e.headers) if e.code == 429 else None)
+            last = outage_err = _fail(msg, kind=kind, http_status=e.code, retry_after=_retry_after(e.headers) if e.code == 429 else None)
             if e.code in retry_on and attempt + 1 < attempts and time.monotonic() < deadline:
                 continue
             break
-        except (urllib.error.URLError, TimeoutError, OSError) as e:      # read timeouts are not URLErrors
+        except (urllib.error.URLError, TimeoutError, OSError, *_READ_FAILURES) as e:
+            # read timeouts are not URLErrors; a body the source cut off (IncompleteRead) is an HTTPException. Any other
+            # HTTPException (InvalidURL: a URL the client refuses to send) is our own error: 'internal' below
             kind = _net_kind(e)
             reason = getattr(e, "reason", e)
-            if parse == "json":
-                msg = f"{label} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({reason}).")
+            cut_short = kind == "timeout" and limited
+            who = label if parse == "json" else urllib.parse.urlsplit(url).hostname
+            if kind == "timeout":
+                msg = f"{who} did not answer in time" + (" (this request's time budget ran out)." if cut_short else ".")
+            elif isinstance(e, http.client.HTTPException):
+                msg = f"{who} cut its answer short ({type(e).__name__})."
             else:
-                host = urllib.parse.urlsplit(url).hostname
-                msg = f"{host} " + ("did not answer in time." if kind == "timeout" else f"is not reachable ({e}).")
+                msg = f"{who} is not reachable ({reason if parse == 'json' else e})."
             last = _fail(msg, kind=kind)
+            if not cut_short:
+                outage_err = last
             if _NET in retry_on and attempt + 1 < attempts and time.monotonic() < deadline:
                 continue
             break
@@ -315,9 +337,10 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
             if sem is not None:
                 sem.release()
     assert last is not None
-    if pol["down_for"] and last.kind in ("upstream", "timeout") and getattr(last, "http_status", None) not in (400, 404, 429):
+    o = outage_err      # its own text is what other views see for down_for seconds, never this view's budget message
+    if pol["down_for"] and o is not None and o.kind in ("upstream", "timeout") and getattr(o, "http_status", None) not in (400, 404, 429):
         with _state_lock:
-            _down[pname] = (time.monotonic() + pol["down_for"], str(last))
+            _down[pname] = (time.monotonic() + pol["down_for"], str(o))
     raise last
 
 

@@ -4,12 +4,16 @@ an in-process UI server, exit-code rule, evidence file."""
 import datetime as dt
 import http.server
 import json
+import os
 import socket
 import subprocess
 import sys
 import threading
+import time
+import zipfile
+from pathlib import Path
 
-from _common import ROOT, TMP_LOCAL, check, done
+from _common import ROOT, TMP_LOCAL, check, done, make_tmp_dir
 
 sys.path.insert(0, str(ROOT / "scripts"))
 import gate as G  # noqa: E402
@@ -163,12 +167,102 @@ code = G.main(["--offline", "--only", "G1,G5"])
 out = json.loads((notes / f"gates-{dt.date.today().isoformat()}.json").read_text(encoding="utf-8"))
 check(out["offline"] is True and bool(out["version"]) and (len(out["commit"]) == 40 or out["commit"] == "unknown"), "record has commit and version")
 check(set(out["gates"]) == {"G1", "G5"} and out["gates"]["G1"]["status"] == "manual", "only the selected gates are recorded")
-check(all(set(g) == {"status", "evidence", "started", "finished"} for g in out["gates"].values()), "each gate has status/evidence/started/finished")
+STAMP = {"commit", "version", "offline", "uncommitted"}
+check(all(set(g) == {"status", "evidence", "started", "finished"} | STAMP for g in out["gates"].values()),
+      "each gate has status/evidence/started/finished and the commit, version, mode and uncommitted count it ran on")
+check(all(g["commit"] == out["commit"] and g["offline"] is True for g in out["gates"].values()), "this run's gates carry this run's commit")
 check(out["gates"]["G5"]["status"] == "manual" and out["state_json_unchanged"] is True and code == 0, "offline G5 is manual; exit 0 without a fail")
 rec_path.unlink()
+day_file = notes / f"gates-{dt.date.today().isoformat()}.json"
+earlier = json.loads(day_file.read_text(encoding="utf-8"))
+earlier["gates"]["G5"].update(commit="a" * 40, version="0.8.0", offline=False)     # as if G5 ran earlier on another commit
+day_file.write_text(json.dumps(earlier), encoding="utf-8")
 code = G.main(["--offline", "--only", "G1"])
-out = json.loads((notes / f"gates-{dt.date.today().isoformat()}.json").read_text(encoding="utf-8"))
+out = json.loads(day_file.read_text(encoding="utf-8"))
 check(code == 1 and out["gates"]["G1"]["status"] == "fail" and out["gates"]["G5"]["status"] == "manual", "a failed gate -> exit 1; earlier gates kept")
+check(out["gates"]["G5"]["commit"] == "a" * 40 and out["gates"]["G5"]["version"] == "0.8.0" and out["gates"]["G5"]["offline"] is False
+      and out["gates"]["G1"]["commit"] == out["commit"], "a gate kept from an earlier run keeps its own commit and version, never restamped")
+
+# ---- G2 cold start (owner decision OD-2): 90 s, and the first card's first answer must be a full 200
+check(G.COLD_START_LIMIT_S == 90.0, "cold-start limit is 90 s (OD-2)")
+check(G.first_view_verdict(200, {"status": "ok", "results": [1]}) == (True, "first /x/board answer complete (200, status ok)"), "200 + status ok: complete")
+for st_, body_, why_ in ((200, {"status": "partial", "notes": ["Partial answer: no data from Yahoo"]}, "200 but partial (Partial answer: no data from Yahoo)"),
+                         (200, {"status": "fallback"}, "200 but fallback"), (200, {"results": []}, "200 but without a status"),
+                         (503, {"error": {"kind": "unavailable"}}, "was 503, not 200"), ("TimeoutError", None, "was TimeoutError, not 200"),
+                         (200, "<html>", "not a JSON object")):
+    ok_v, why_v = G.first_view_verdict(st_, body_)
+    check(not ok_v and why_ in why_v, f"first answer {st_} {str(body_)[:30]}: fails ({why_v})")
+
+# ---- G5: the zip tested must be this version and commit, built from a clean tree
+SHA = "b" * 40
+good = {"version": "1.0.0", "commit": SHA, "uncommitted_files": [], "built": "2026-11-25T18:00:00+01:00"}
+ok_z, why_z = G.zip_build_verdict(good, "1.0.0", SHA)
+check(ok_z and why_z == "zip built from version 1.0.0, commit bbbbbbbbbbbb at 2026-11-25T18:00:00+01:00; matches this version and commit", f"matching zip ({why_z})")
+for info_, want_ in ((dict(good, version="0.8.0"), "not this version (1.0.0)"), (dict(good, commit="c" * 40), "not this commit (bbbbbbbbbbbb)"),
+                     (dict(good, uncommitted_files=["terminal/server.py"]), "1 packed file(s) differ from the commit (terminal/server.py)"),
+                     (dict(good, uncommitted_files=None), "is unknown"), (None, "no BUILD-INFO.json")):
+    ok_z, why_z = G.zip_build_verdict(info_, "1.0.0", SHA)
+    check(not ok_z and want_ in why_z, f"zip refused: {want_}")
+zdir = make_tmp_dir("gate-zip-")
+with zipfile.ZipFile(zdir / "z.zip", "w") as zf:
+    zf.writestr("Libre-Terminal/BUILD-INFO.json", json.dumps(good))
+    zf.writestr("Libre-Terminal/scripts/BUILD-INFO.json", "{}")
+check(G.zip_build_info(zdir / "z.zip") == good, "BUILD-INFO.json read from the zip's top folder")
+
+# ---- scratch cleanup: a read-only file does not stop it; '' when the folder is gone
+rt = make_tmp_dir("gate-rm-") / "scratch"
+(rt / "sub").mkdir(parents=True)
+(rt / "sub" / "ro.pyd").write_bytes(b"x")
+os.chmod(rt / "sub" / "ro.pyd", 0o400)
+# the process lookup and the kill are stubbed: the test never runs taskkill (review R1)
+saved_sp, saved_kill = G.scratch_processes, G.kill_tree
+killed_ = []
+try:
+    G.kill_tree = killed_.append
+    G.scratch_processes = lambda p: []
+    check(G.remove_tree(rt, tries=2) == "" and not rt.exists() and killed_ == [], "remove_tree clears read-only files and reports nothing left")
+    rt.mkdir()
+    G.scratch_processes = lambda p: [(4242, "python.exe")]
+    check(G.remove_tree(rt, tries=1) == "" and killed_ == [4242], "remove_tree stops a process running from the folder first")
+finally:
+    G.scratch_processes, G.kill_tree = saved_sp, saved_kill
+
+# ---- review R1/R8: scratch_processes finds the processes running from the folder, never its own query; a folder name with a
+# typographic apostrophe (a PowerShell quote) and a non-ASCII letter is matched, not dropped
+if os.name == "nt":
+    sd = make_tmp_dir("gate-sp-") / "Zoë’s scratch"
+    sd.mkdir()
+    check(G.scratch_processes(sd) == [], f"an empty scratch folder: no process runs from it ({G.scratch_processes(sd)})")
+    exe = sd / "pinger.exe"
+    exe.write_bytes((Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "PING.EXE").read_bytes())
+    base_py = getattr(sys, "_base_executable", None) or sys.executable
+    p_exe = subprocess.Popen([str(exe), "-n", "30", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p_arg = subprocess.Popen([base_py, "-c", "import time; time.sleep(30)", str(sd / "marker.txt")])
+    try:
+        time.sleep(0.5)
+        got_sp = G.scratch_processes(sd)
+        check(sorted(p for p, _ in got_sp) == sorted([p_exe.pid, p_arg.pid]),
+              f"exactly the two processes run from it: by executable and by command line ({got_sp}; {p_exe.pid}, {p_arg.pid})")
+        sib = sd.parent / (sd.name + "x")              # a sibling whose name only starts with the folder's name
+        check(G.scratch_processes(sib) == [], "a folder named like the start of another is not matched")
+    finally:
+        for p_ in (p_exe, p_arg):
+            p_.kill()
+            p_.wait(10)
+
+# ---- review R2: uncommitted() counts every changed tracked file, not the last 8 lines of git's output
+repo = make_tmp_dir("gate-git-")
+GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.autocrlf=false"]
+subprocess.run(GIT + ["init", "-q"], cwd=repo, check=True)
+for i in range(20):
+    (repo / f"f{i:02d}.txt").write_text("a\n", encoding="utf-8")
+(repo / "new.txt").write_text("untracked\n", encoding="utf-8")
+subprocess.run(GIT + ["add", "--", *[f"f{i:02d}.txt" for i in range(20)]], cwd=repo, check=True)
+subprocess.run(GIT + ["commit", "-q", "-m", "base"], cwd=repo, check=True)
+for i in range(17):
+    (repo / f"f{i:02d}.txt").write_text("b\n", encoding="utf-8")
+check(G.uncommitted(cwd=repo) == 17, f"17 changed tracked files -> 17 (the untracked file is not counted) ({G.uncommitted(cwd=repo)})")
+check(G.uncommitted(cwd=make_tmp_dir("gate-nogit-")) is None, "not a git folder -> None (unknown), never 0")
 
 # ---- G2 soak: memory read from tasklist, skipped with --soak-minutes 0
 check(abs(G.parse_tasklist_kb('"python.exe","1234","Console","1","123,456 K"') - 120.5625) < 1e-6, "tasklist '123,456 K' -> 120.56 MB")

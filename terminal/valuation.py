@@ -389,6 +389,15 @@ def _yahoo_pack(sym, px_ccy, prof=None, last_px=None):
     return yfigs, "Yahoo annual statements (each year from 90 days after its end)" + conv, [YAHOO_FIN_SRC, YAHOO_SRC]
 
 
+def _sec_failed(e):
+    """An SEC failure for a U.S. company whose answer goes on from Yahoo's statements: said as a substitute source,
+    unless SEC simply has nothing for this input (not_covered / input), where Yahoo is the usual basis. The note names
+    the kind of failure only: the error's own text (backend URLs, a provider's detail) never reaches a card's notes."""
+    kind = C.kind_of(e)
+    if kind not in ("not_covered", "input"):
+        C.note_fallback("Yahoo annual statements", f"SEC EDGAR did not answer just now ({kind.replace('_', ' ')})")
+
+
 def _figures(sym, px_ccy, prof=None, items=None, last_px=None):
     """(figures, basis text, sources, is_sec): SEC for U.S. filers, else Yahoo (converted to trading currency and share class)."""
     if "." not in sym and not sym.startswith("^"):
@@ -397,8 +406,8 @@ def _figures(sym, px_ccy, prof=None, items=None, last_px=None):
             return figs, "SEC filings (each figure from its filing date or deadline)", [SEC_SRC, YAHOO_SRC], True
         except SplitsUnavailable:
             raise                                     # blank with the note, never a silent switch of basis
-        except C.CompositeError:
-            pass
+        except C.CompositeError as e:
+            _sec_failed(e)                            # a switch of basis is said (status fallback), never silent
     yfigs, basis, sources = _yahoo_pack(sym, px_ccy, prof=prof, last_px=last_px)
     return yfigs, basis, sources, False
 
@@ -614,23 +623,23 @@ def roic_dupont(symbol="AAPL", **_):
             f = {k: {r["end"]: r["value"] for r in got[k] if r["span"] == ("instant" if k in INSTANT else "annual")} for k in names}
             # balances at the fiscal year end only (a 10-K instant matches an annual flow's end)
             if f["net_income"] and (dt.date.today() - _d(max(f["net_income"]))).days <= MAX_AGE:
-                return _dupont_out(sym, dupont_rows(f, bank), bank, "SEC 10-K figures (USD)", [SEC_SRC])
-        except C.CompositeError:
-            pass
+                return _dupont_out(sym, dupont_rows(f, bank), bank, "SEC 10-K figures (USD)", [SEC_SRC], "USD")
+        except C.CompositeError as e:
+            _sec_failed(e)
     y = yahoo_figures(sym)
     f = {k: _annual(v) for k, v in y.items()}
-    ccy = (C._first("equity/fundamental/metrics", sym, provider="yfinance") or {}).get("currency") or "reporting currency"
-    return _dupont_out(sym, dupont_rows(f, bank), bank, f"Yahoo annual statements ({ccy})", [YAHOO_FIN_SRC])
+    ccy = (C._first("equity/fundamental/metrics", sym, provider="yfinance") or {}).get("currency")
+    return _dupont_out(sym, dupont_rows(f, bank), bank, f"Yahoo annual statements ({ccy or 'currency not named'})", [YAHOO_FIN_SRC], ccy)
 
 
-def _dupont_out(sym, rows, bank, basis, sources):
+def _dupont_out(sym, rows, bank, basis, sources, ccy=None):
     if not rows:
         raise C.CompositeError(f"No annual net income figures for {sym}.")
     rows = [dict(r, **{k: None if r[k] is None else round(r[k] / 1e6, 1) for k in ("nopat", "invested_capital")}) for r in rows]   # millions
     note = (f"{sym} · {basis} · ROE = net margin x asset turnover x equity multiplier (year-end balances)"
             + (" · bank: ROIC not computed (deposits are not invested capital)" if bank else
                " · ROIC = operating income x (1 - tax rate) / (debt + equity - cash); tax rate clipped to 0-35%"))
-    return {"results": rows, "sources": sources, "note": note, "convention": note,
+    return {"results": rows, "sources": sources, "note": note, "convention": note, **({"currency": ccy} if ccy else {}),
             "as_of": C.newest_date(r["fiscal_year_end"] for r in rows)}      # the latest fiscal year shown
 
 

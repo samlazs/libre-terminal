@@ -222,6 +222,24 @@ def backends_restarting() -> bool:
     return bool(st.get("restarting")) or (time.time() - float(st.get("finished_at") or 0.0) < RESTART_SETTLE_S)
 
 
+V5_START_WINDOW_S = 300.0        # launcher.START_TIMEOUT: past it, a closed V5 port is a failure, not a start
+V5_LABEL = "OpenBB V5 backend"   # how composite names the backend in its errors (core/http.py _which)
+
+
+def v5_starting(err: str) -> bool:
+    """True when `err` names the V5 backend, its supervisor (re)started it less than V5_START_WINDOW_S ago (the pid file
+    is written at every start) and its port does not answer yet. A card failing then says "starting" instead of the
+    connection error. Cheap on purpose: one file stat and one local connect, only for a V5 error; a crash loop or a hung
+    start shows its real cause once the window is over."""
+    if V5_LABEL not in err:
+        return False
+    try:
+        age = time.time() - (local_paths.RUN_DIR / "v5.json").stat().st_mtime
+    except OSError:
+        return False
+    return age < V5_START_WINDOW_S and not _port_open(int(V5_PORT))
+
+
 def _dash_build(raw: bytes):
     json.loads(raw.decode("utf-8"))                         # refuse a damaged file instead of serving it
     return raw, '"' + hashlib.sha1(raw).hexdigest()[:20] + '"'
@@ -524,10 +542,14 @@ class Handler(BaseHTTPRequestHandler):
             # written for the user (or carrying a source's own error). Classified once here (contract.kind_of); the
             # status follows the kind (400 input, 404 not covered, 429, 502 upstream, 504 timeout). The page renders by kind.
             kind = contract.kind_of(e)
-            if kind in ("upstream", "timeout") and backends_restarting():
-                # the data service is being restarted on purpose: say so, and let the card retry, instead of a source error
+            restarting = kind in ("upstream", "timeout") and backends_restarting()
+            if restarting or (kind in ("upstream", "timeout") and v5_starting(str(e))):
+                # the data service is being restarted on purpose, or is still starting: say so, and let the card retry,
+                # instead of a source or connection error
+                msg = ("The data service is restarting; this card retries shortly." if restarting
+                       else "The data services are starting; this card retries shortly.")
                 return self._json(503, contract.error_body(
-                    "unavailable", "The data service is restarting; this card retries shortly.", retry_after=X_RETRY_AFTER,
+                    "unavailable", msg, retry_after=X_RETRY_AFTER,
                     sources=_safe_sources(name, params), user_message=True), headers={"Retry-After": str(X_RETRY_AFTER)})
             code = e.status or contract.STATUS_BY_KIND[kind]
             return self._json(code, contract.error_body(kind, redact(str(e)), retry_after=e.retry_after,

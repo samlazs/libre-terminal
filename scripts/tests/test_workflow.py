@@ -156,6 +156,7 @@ check([p.name for p in run_all.select_tests(sample_paths, [], fast=True)] == ["t
 check([p.name for p in run_all.select_tests(sample_paths, ["BETA"])] == ["test_beta.py"], "select_tests filters case-insensitively")
 
 # ---- 9. create_release_zip packages clean Windows folder layout
+import json  # noqa: E402
 import zipfile as _zf  # noqa: E402
 
 rel_zip_dst = make_tmp_dir("rel-zip-") / pc.RELEASE_ZIP_NAME
@@ -173,6 +174,30 @@ check(
     "release zip includes Windows launchers, READ-ME-FIRST, license, runtime code, and v5 lockfile",
 )
 check(b"\r\n" in readme_raw and b"\n" not in readme_raw.replace(b"\r\n", b""), "READ-ME-FIRST.txt uses Windows CRLF")
+with _zf.ZipFile(rel_zip_dst, "r") as zf:
+    build_rec = json.loads(zf.read("Libre-Terminal/" + pc.RELEASE_BUILD_FILE))
+check(build_rec["version"] == pc.VERSION and (len(build_rec["commit"]) == 40 or build_rec["commit"] == "unknown")
+      and (build_rec["uncommitted_files"] is None or isinstance(build_rec["uncommitted_files"], list)) and build_rec == rel_res["build"],
+      "the release zip records the version and commit it was built from, and any packed file that differs from the commit")
+# review R4: every packed file that is not the commit's is named. In a scratch repo: a.py and é.py committed, then é.py edited;
+# b.env ignored by .gitignore (but packed: publishable_files walks the folder); d.py new. Expected dirty: b.env, d.py, é.py.
+_repo = make_tmp_dir("bi-git-")
+_git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.autocrlf=false"]
+subprocess.run(_git + ["init", "-q"], cwd=_repo, check=True)
+(_repo / "terminal").mkdir()
+(_repo / ".gitignore").write_text("*.env\n", encoding="utf-8")
+for _n in ("a.py", "é.py"):
+    (_repo / "terminal" / _n).write_text("x = 1\n", encoding="utf-8")
+subprocess.run(_git + ["add", "-A"], cwd=_repo, check=True)
+subprocess.run(_git + ["commit", "-q", "-m", "base"], cwd=_repo, check=True)
+(_repo / "terminal" / "é.py").write_text("x = 2\n", encoding="utf-8")
+(_repo / "terminal" / "b.env").write_text("K=1\n", encoding="utf-8")
+(_repo / "terminal" / "d.py").write_text("y = 1\n", encoding="utf-8")
+_rels = [Path("terminal") / n for n in ("a.py", "b.env", "d.py", "é.py")]
+_bi = pc.build_info(_repo, _rels)
+check(_bi["uncommitted_files"] == ["terminal/b.env", "terminal/d.py", "terminal/é.py"] and len(_bi["commit"]) == 40,
+      f"build_info names an ignored packed file, a new one and an edited non-ASCII one, not the clean one ({_bi['uncommitted_files']})")
+check(pc.build_info(make_tmp_dir("bi-nogit-"), _rels)["uncommitted_files"] is None, "no git repository: uncommitted_files unknown (None)")
 check(
     not any(
         n.endswith(".sh")

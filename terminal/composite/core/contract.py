@@ -125,10 +125,40 @@ def derive_as_of(out: dict) -> str | None:
     return _newest(c for c in cands if not (is_iso(c) and c.strip()[:10] > limit))
 
 
+_CCY_CODE = re.compile(r"^(?:[A-Z]{3}|GBp)$")       # what an answer or a row names as its currency
+CCY_BLANK_NOTE = "Amounts left blank: the source did not name their currency."
+
+
+def ccy_unnamed(out, name: str | None) -> list[str]:
+    """The amount columns of a view's table (columns.X_UNITS 'ccy' / 'ccy mn') that hold a number whose currency the
+    answer does not name: 'ccy' needs the answer's own `currency`, 'ccy mn' the answer's or the row's."""
+    if not name or not isinstance(out, dict) or not isinstance(out.get("results"), list):
+        return []
+    import columns                                  # terminal/columns.py (imported late: it is not part of composite)
+    units = columns.X_UNITS.get("x_" + name) or {}
+    cols = [c for c, u in units.items() if u in ("ccy", "ccy mn")]
+    if not cols or _CCY_CODE.match(str(out.get("currency") or "")):
+        return []
+    bad = set()
+    for r in out["results"]:
+        if isinstance(r, dict):
+            for c in cols:
+                if r.get(c) is not None and not (units[c] == "ccy mn" and _CCY_CODE.match(str(r.get("currency") or ""))):
+                    bad.add(c)
+    return [c for c in cols if c in bad]
+
+
 def finish(out: dict, name: str | None = None) -> dict:
     """A copy of a successful answer with as_of (or as_of_na) and status filled in. Never changes the cached object.
     as_of comes from the data; as_of_na from the view itself or, for a view listed in UNDATED, its declared reason."""
     add = {}
+    unnamed = ccy_unnamed(out, name)
+    if unnamed and not strict():                  # an amount in no named currency is blank with a note (strict: a violation)
+        if name + ":ccy" not in _logged:
+            _logged.add(name + ":ccy")
+            _log.warning("view %s: amounts with no named currency left blank (%s)", name, ", ".join(unnamed))
+        add["results"] = [dict(r, **{c: None for c in unnamed}) if isinstance(r, dict) else r for r in out["results"]]
+        add["notes"] = list(out.get("notes") or []) + [CCY_BLANK_NOTE]
     if not is_iso(out.get("as_of")) and not out.get("as_of_na"):
         derived = derive_as_of(out)
         if derived:
@@ -137,7 +167,7 @@ def finish(out: dict, name: str | None = None) -> dict:
             add["as_of_na"] = UNDATED.get(name or "", NO_DATE)
     if "status" not in out:
         add["status"] = "stale" if out.get("stale") else "ok"
-    have = out.get("notes")
+    have = add.get("notes") or out.get("notes")
     notes = [str(out[k]) for k in ("stale", "cached", "delayed") if out.get(k)]
     if not have:
         if notes:
@@ -147,8 +177,9 @@ def finish(out: dict, name: str | None = None) -> dict:
     return dict(out, **add) if add else out
 
 
-def violations(out) -> list[str]:
-    """Why an answer is outside the success envelope (empty when it is inside)."""
+def violations(out, name: str | None = None) -> list[str]:
+    """Why an answer is outside the success envelope (empty when it is inside). With the view's name, also an amount
+    column ('ccy' / 'ccy mn' in columns.X_UNITS) holding numbers whose currency the answer does not name."""
     if not isinstance(out, dict):
         return [f"answer is a {type(out).__name__}, not an object"]
     v = []
@@ -167,12 +198,15 @@ def violations(out) -> list[str]:
         v.append(f"status {out['status']!r} is not one of {', '.join(STATUSES)}")
     if "notes" in out and not (isinstance(out["notes"], list) and all(isinstance(n, str) for n in out["notes"])):
         v.append("notes is not a list of text")
+    unnamed = ccy_unnamed(out, name)
+    if unnamed:
+        v.append(f"amounts in {', '.join(unnamed)} but the answer names no currency")
     return v
 
 
 def enforce(name: str, out) -> None:
     """Raise (strict mode) or log once per view when an answer is outside the envelope."""
-    v = violations(out)
+    v = violations(out, name)
     if not v:
         return
     if strict():

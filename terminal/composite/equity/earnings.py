@@ -660,7 +660,17 @@ def earnings_history(symbol="AAPL", **_):
     rows = [{"date": r["date"], "eps_est": r["est"], "eps_actual": r["actual"], "surprise": r["surprise"], "move_2d": r["move_2d"]} for r in m["history"]]
     # the newest data point the table uses: a report date or the close a 2-day move ends on
     as_of = C.newest_date([r["date"] for r in m["history"]] + [r.get("move_end") for r in m["history"]])
-    return {"results": rows, "sources": C._earn_sources(m)[:1], **({"as_of": as_of} if as_of else {"as_of_na": "No report for this company yet."})}
+    # the currency Yahoo names for this company's EPS (its estimates; the history is on the same basis). None named: the
+    # contract envelope blanks the amounts with a note (core/contract.py ccy_unnamed)
+    ccy = {"currency": m["currency"], "convention": f"EPS in {m['currency']} per share"} if m.get("currency") else {}
+    return {"results": rows, "sources": C._earn_sources(m)[:1], **ccy,
+            **({"as_of": as_of} if as_of else {"as_of_na": "No report for this company yet."})}
+
+
+def _named_ccy(rows):
+    """The one currency Yahoo names on a list of estimate rows ('' when none or more than one)."""
+    named = {str(r.get("currency")) for r in rows if r.get("currency")}
+    return named.pop() if len(named) == 1 else ""
 
 
 def consensus(symbol="AAPL", **_):
@@ -687,4 +697,16 @@ def consensus(symbol="AAPL", **_):
         if {"eps", "rev"} & set(raw.get("_failed", [])):
             raise C.CompositeError("Yahoo Finance did not answer for its estimates just now (it may be throttling). Press reload in a minute.")
         raise C.CompositeError(f"Yahoo Finance has no consensus estimates for '{sym}'.")
-    return {"results": rows, "sources": [C.src("Yahoo Finance", "consensus estimates, EPS trend and revisions", C.YAHOO_URL + "quote/" + urllib.parse.quote(sym) + "/analysis")]}
+    # amounts in the currency Yahoo names: EPS from its EPS estimates, revenue from its revenue estimates. When the two
+    # differ (or one names none), the side not in the answer's currency is left blank with a note, never shown unlabelled
+    e_ccy, r_ccy = _named_ccy(raw["eps"]), _named_ccy(raw["rev"])
+    ccy = e_ccy or r_ccy
+    extra = {}
+    for side, own, cols in (("EPS", e_ccy, ("eps", "eps_low", "eps_high")), ("Revenue", r_ccy, ("rev", "rev_low", "rev_high"))):
+        if ccy and own != ccy and any(r[c] is not None for r in rows for c in cols):
+            rows = [dict(r, **{c: None for c in cols}) for r in rows]
+            extra.setdefault("notes", []).append(f"{side} estimates left blank: Yahoo Finance names "
+                                                 + (f"them in {own}, not {ccy}." if own else "no currency for them."))
+    if ccy:
+        extra.update(currency=ccy, convention=f"EPS per share and revenue in {ccy}")
+    return {"results": rows, **extra, "sources": [C.src("Yahoo Finance", "consensus estimates, EPS trend and revisions", C.YAHOO_URL + "quote/" + urllib.parse.quote(sym) + "/analysis")]}

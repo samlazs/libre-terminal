@@ -19,9 +19,7 @@ ALLOWED = {
     "composite/macro/sources.py::_fred_points": "falls back to FRED's public CSV on the next line; that failure raises",
     "composite/markets/prices.py::_fetch_history": "retried symbol by symbol below; history() reports symbols still missing",
     "composite/markets/prices.py::_ohlc.run": "retried once; an empty result raises below",
-    "valuation.py::_figures": "SEC figures fall back to Yahoo; the basis used is named in the answer",
     "valuation.py::bands": "SEC figures fall back to Yahoo; the basis used is named in the answer",
-    "valuation.py::roic_dupont": "SEC figures fall back to Yahoo; the basis used is named in the answer",
 }
 # the sites the 1.0 audit found (P2-01 problem_evidence): they must stay migrated, never allow-listed
 MIGRATED = ("bonds.py::maturity_wall.run", "valuation.py::_splits.run", "composite/macro/sources.py::_fred_any.one",

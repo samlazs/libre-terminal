@@ -53,14 +53,18 @@ try:
         row = out["results"][0]
         check(row["symbol"] == sym and row["currency"] == MET[sym]["currency"] and row["pe"] == MET[sym]["pe_ratio"], f"comps {sym}: its own row, currency and P/E ({row})")
         check(out.get("as_of_na") == K.UNDATED["comps"], "comps: Yahoo's undated figures, said so")
-    est = {"AAPL": {"eps": [{"period": "0q", "mean": 1.85, "low": 1.7, "high": 2.0, "number_of_analysts": 30}], "rev": [{"period": "0q", "mean": 1.38e11}], "trend": [], "revs": []},
-           "SAP.DE": {"eps": [{"period": "0q", "mean": 1.62, "low": 1.5, "high": 1.75, "number_of_analysts": 20}], "rev": [{"period": "0q", "mean": 9.6e9}], "trend": [], "revs": []}}
+    est = {"AAPL": {"eps": [{"period": "0q", "mean": 1.85, "low": 1.7, "high": 2.0, "number_of_analysts": 30, "currency": "USD"}],
+                    "rev": [{"period": "0q", "mean": 1.38e11, "currency": "USD"}], "trend": [], "revs": []},
+           "SAP.DE": {"eps": [{"period": "0q", "mean": 1.62, "low": 1.5, "high": 1.75, "number_of_analysts": 20, "currency": "EUR"}],
+                      "rev": [{"period": "0q", "mean": 9.6e9, "currency": "EUR"}], "trend": [], "revs": []}}
     C._est_raw = lambda sym: est[sym]
     for sym, mkt in (("AAPL", "us"), ("SAP.DE", "eur")):
         C._cache.clear()
         out = C.dispatch("consensus", {"symbol": sym})
         covered("consensus", "us", out) if mkt == "us" else covered("consensus", "eur", out)      # literal markets: test_contract reads them
         check(out["results"][0]["eps"] == est[sym]["eps"][0]["mean"] and out["results"][0]["rev"] == est[sym]["rev"][0]["mean"], f"consensus {sym}: EPS and revenue as given")
+        want = {"AAPL": "USD", "SAP.DE": "EUR"}[sym]
+        check(out.get("currency") == want and want in out.get("convention", ""), f"consensus {sym}: the answer names {want} and the card's footer says it")
 finally:
     for k, v in saved.items():
         setattr(C, k, v)

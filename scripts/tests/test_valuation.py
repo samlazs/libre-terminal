@@ -76,6 +76,88 @@ try:
 finally:
     v.sec_figures, v._profile, c.history = saved
 
+# gatekeeper P2: SEC failing for a U.S. company switches to Yahoo's statements as a said substitute (status fallback),
+# unless SEC simply has nothing for it (not_covered): then Yahoo is the usual basis and the answer is ok.
+# Same figures either way (shares 1, net income 1; closes 1..10): P/E today 10.0.
+saved = v.sec_figures, v._profile, c.history, v._yahoo_pack
+try:
+    v._profile = lambda sym: {"industry": "Consumer Electronics", "currency": "USD"}
+    c.history = lambda syms, start: {syms[0]: [(f"2026-01-{i:02d}", float(i)) for i in range(1, 11)]}
+    one = {"shares": [("2025-09-30", 1.0, D(2025, 11, 1))], "net_income": [("2025-09-30", 1.0, D(2025, 11, 1))]}
+    v._yahoo_pack = lambda sym, px_ccy, prof=None, last_px=None: (one, "Yahoo annual statements", [v.YAHOO_FIN_SRC, v.YAHOO_SRC])
+    for kind, want_status in (("timeout", "fallback"), ("upstream", "fallback"), ("not_covered", "ok")):
+        def sec_fails(sym, items=None, _k=kind):
+            raise c.CompositeError(f"HTTP 500 from http://127.0.0.1:6900/api/v1/equity/compare/company_facts ({_k})", kind=_k)
+        v.sec_figures = sec_fails
+        c._cache.clear()
+        out = c.dispatch("valuation_bands", {"symbol": "TSTB", "measure": "pe"})
+        said = any("Yahoo annual statements used instead: SEC EDGAR did not answer just now" in n for n in out.get("notes") or [])
+        check(out["status"] == want_status and said == (want_status == "fallback") and out["summary"]["current"] == 10.0,
+              f"SEC {kind}: status {want_status}, substitute {'said' if want_status == 'fallback' else 'not claimed'} ({out['status']}, {out.get('notes')})")
+        # review R7: the note says the kind of failure, never the source's own text (URLs, backend detail)
+        check(not any("http" in n or "6900" in n for n in out.get("notes") or []), f"SEC {kind}: no URL in the notes ({out.get('notes')})")
+finally:
+    v.sec_figures, v._profile, c.history, v._yahoo_pack = saved
+    c._cache.clear()
+
+# review R10: roic_dupont through dispatch. Figures (in units, shown in millions) as in the DuPont check above x 1e6:
+# ROE 20/100 = 20%; tax 10/25 = 40% clipped to 35%; NOPAT 30 x 0.65 = 19.5 mn; invested capital 50 + 100 - 30 = 120 mn;
+# ROIC 19.5 / 120 = 16.25%.
+from composite.core import contract as K  # noqa: E402
+import os  # noqa: E402
+
+_FY = "2025-12-31"
+_yf = {k: [] for k in ("net_income", "operating_income", "da", "ebitda", "equity", "debt", "cash", "shares", "assets", "revenue", "pretax", "tax")}
+for _k, _val in (("net_income", 20), ("revenue", 200), ("assets", 400), ("equity", 100), ("operating_income", 30), ("pretax", 25),
+                 ("tax", 10), ("debt", 50), ("cash", 30)):
+    _yf[_k] = [(_FY, _val * 1e6, D(2026, 3, 31))]
+saved = v._profile, v._sec_rows, v.yahoo_figures, v.C._first
+_metrics = {"currency": "USD"}
+sec_calls = []
+try:
+    v._profile = lambda sym: {"industry": "Consumer Electronics", "currency": "USD"}
+    v.yahoo_figures = lambda sym, rate=1.0: _yf
+    v.C._first = lambda path, sym, **kw: dict(_metrics)
+
+    def sec_rows_timeout(sym, tags, instant=False, cache_key=None):
+        sec_calls.append(sym)
+        raise c.CompositeError("OpenBB V5 backend did not answer in time (http://127.0.0.1:6900/api/v1/equity/compare/company_facts).", kind="timeout")
+    v._sec_rows = sec_rows_timeout
+    c._cache.clear()
+    out = c.dispatch("roic_dupont", {"symbol": "TSTD"})
+    r0 = out["results"][0]
+    check(out["status"] == "fallback" and out["currency"] == "USD" and (r0["roe"], r0["nopat"], r0["invested_capital"], r0["roic"]) == (20.0, 19.5, 120.0, 16.25)
+          and any(n.startswith("Yahoo annual statements used instead: SEC EDGAR did not answer just now") for n in out["notes"])
+          and not any("http" in n for n in out["notes"]),
+          f"roic_dupont, SEC timeout: Yahoo said as a substitute, in USD, figures by hand ({out['status']}, {out.get('currency')}, {r0}, {out.get('notes')})")
+    _metrics = {"currency": "EUR"}
+    sec_calls.clear()
+    c._cache.clear()
+    out = c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+    check(out["status"] == "ok" and out["currency"] == "EUR" and out["results"][0]["nopat"] == 19.5 and sec_calls == [],
+          f"roic_dupont, non-U.S.: Yahoo is the usual basis (ok), in the metrics' currency EUR, SEC not asked ({out['status']}, {out.get('currency')})")
+    _metrics = {}
+    c._cache.clear()
+    try:
+        c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+        named = "answered"
+    except K.ContractViolation as e:
+        named = str(e)
+    check("names no currency" in named, f"roic_dupont, no currency named: a contract violation in strict mode ({named[:80]})")
+    os.environ["TERMINAL_STRICT_CONTRACT"] = "0"
+    try:
+        c._cache.clear()
+        out = c.dispatch("roic_dupont", {"symbol": "SAP.DE"})
+    finally:
+        os.environ["TERMINAL_STRICT_CONTRACT"] = "1"
+    r0 = out["results"][0]
+    check("currency" not in out and r0["nopat"] is None and r0["invested_capital"] is None and r0["roe"] == 20.0 and r0["roic"] == 16.25
+          and K.CCY_BLANK_NOTE in out["notes"] and "currency not named" in out["note"],
+          f"roic_dupont, no currency named (production): amounts blank with the note, ratios kept ({r0}, {out.get('notes')})")
+finally:
+    v._profile, v._sec_rows, v.yahoo_figures, v.C._first = saved
+    c._cache.clear()
+
 check("valuation_bands" in c.ROUTES and "roic_dupont" in c.ROUTES and c.static_sources("valuation_bands", {"symbol": "AAPL"})[0]["name"] == "SEC"
       and c.static_sources("roic_dupont", {"symbol": "SAP.DE"})[0]["name"] == "Yahoo Finance", "routes and sources by market")
 
