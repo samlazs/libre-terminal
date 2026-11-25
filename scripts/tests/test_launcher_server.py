@@ -771,6 +771,58 @@ finally:
     launcher.rebuild_dashboards = _orig_rebuild
     launcher.venv_python = _orig_venv_py
 
+# ---- pid files are replaced while others read them (P1-06): on Windows os.replace fails while a reader has the old
+# file open, which once killed a supervisor mid crash loop; the write waits a moment, and a failure never stops it
+pf_dir = make_tmp_dir("pidfile-")
+target = pf_dir / "v5.json"
+target.write_text('{"child": 1}', encoding="utf-8")
+holder = open(target, encoding="utf-8")                  # noqa: SIM115  (a reader holding the file, like /api/services)
+threading.Timer(0.3, holder.close).start()
+t0 = time.monotonic()
+launcher._write_atomic(target, '{"child": 2}')
+took = time.monotonic() - t0
+check(target.read_text(encoding="utf-8") == '{"child": 2}', "a pid file held open by a reader is still replaced")
+if os.name == "nt":
+    check(took >= 0.25, f"the replace waited for the reader to let go ({took:.2f} s)")
+    held = open(target, encoding="utf-8")                # noqa: SIM115  (a reader that never lets go)
+    try:
+        t0 = time.monotonic()
+        try:
+            launcher._write_atomic(target, '{"child": 3}')
+            raised = None
+        except PermissionError as e:
+            raised = e
+        took = time.monotonic() - t0
+    finally:
+        held.close()
+    check(raised is not None and took < 4, f"a file held for good fails in bounded time ({took:.2f} s)")
+    check(target.read_text(encoding="utf-8") == '{"child": 2}' and not list(pf_dir.glob("*.tmp")),
+          "the old pid file is intact and no temporary file is left")
+
+sup_dir = make_tmp_dir("supervisor-")
+saved_l = {k: getattr(launcher, k) for k in ("LOGS", "RUN", "child_cmd", "venv_python", "resolve_ports", "_write_atomic")}
+out_, err_ = sys.stdout, sys.stderr
+
+
+def _deny_pidfile(path, text):
+    raise PermissionError(5, "Access is denied", str(path))
+
+
+try:
+    launcher.LOGS, launcher.RUN = sup_dir / "logs", sup_dir / "run"
+    launcher.child_cmd = lambda _n, _p: [sys.executable, "-c", "print('service ran')"]
+    launcher.venv_python = lambda _s: launcher.Path(sys.executable)
+    launcher.resolve_ports = lambda _a: {"ui": 1, "v5": 2, "v4": 3}
+    launcher._write_atomic = _deny_pidfile
+    rc_sup = launcher.cmd_run(types.SimpleNamespace(service="v5", log=True))
+finally:
+    sys.stdout, sys.stderr = out_, err_
+    for k, v in saved_l.items():
+        setattr(launcher, k, v)
+sup_log = (sup_dir / "logs" / "v5.log").read_text(encoding="utf-8")
+check(rc_sup == 0 and "service ran" in sup_log and "could not record the new process in v5.json" in sup_log,
+      "a pid file that cannot be written leaves the supervisor running its service, and says so in the log")
+
 httpd.shutdown()
 
 done("test_launcher_server")

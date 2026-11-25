@@ -107,7 +107,14 @@ def _write_atomic(path: Path, text: str) -> None:
     with open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
         f.flush()
-    os.replace(tmp, path)
+    try:
+        local_paths.replace_file(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def resolve_ports(a) -> dict:
@@ -407,7 +414,10 @@ def cmd_run(a):
         pump = threading.Thread(target=pump_output, args=(proc.stdout, log), daemon=True, name=f"{name}-log") if log else None
         if pump:
             pump.start()
-        _write_atomic(pidfile(name), json.dumps({"supervisor": os.getpid(), "child": proc.pid, "port": p[name], "root": str(ROOT)}))
+        try:
+            _write_atomic(pidfile(name), json.dumps({"supervisor": os.getpid(), "child": proc.pid, "port": p[name], "root": str(ROOT)}))
+        except OSError as e:            # the service runs on; `stop` still finds this supervisor in the previous pid file
+            say(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] could not record the new process in {pidfile(name).name}: {e}")
         try:
             code = proc.wait()
         except KeyboardInterrupt:

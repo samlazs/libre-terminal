@@ -718,7 +718,7 @@ def build(report=False):
         json.dump(result, f)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, OUT)                    # the UI server may be reading the previous file right now
+    local_paths.replace_file(tmp, OUT)      # the UI server may be reading the previous file right now
 
     n_items = sum(len(t["items"]) for d in out for t in d["tabs"])
     missing = [ep for ep in ix.functions if ep not in covered]

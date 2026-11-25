@@ -71,6 +71,20 @@ _OLD_LAYOUT = [
 ]
 
 
+def replace_file(tmp: Path | str, path: Path | str, tries: int = 10) -> None:
+    """os.replace(tmp, path), retried for a moment: on Windows the replace fails (PermissionError, WinError 5) while any
+    process has the old file open for reading, and pid files, ports.json and dashboards.json are read all the time
+    (the UI's service status, `launcher.py status`, a page load). Raises the last error after about 2.75 s."""
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def backend_dir(name: str) -> Path:
     return BACKENDS_DIR / name
 

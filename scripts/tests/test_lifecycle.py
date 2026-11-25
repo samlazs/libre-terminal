@@ -78,10 +78,43 @@ def call(method, path, body=None, timeout=60):
             return r.status, json.loads(raw) if raw else None
         except ValueError:
             return r.status, None
-    except OSError as e:
-        return type(e).__name__, None
+    except OSError as e:        # the error number tells a refused/reset connection from a client out of local ports
+        return f"{type(e).__name__}[{getattr(e, 'winerror', None) or e.errno}]", None
     finally:
         c.close()
+
+
+class Client:
+    """One keep-alive connection per simulated page, as a browser keeps one. Opening and closing a new connection for
+    every request (20 clients, ~100 connections a second) made a handful of connects fail in the client with a bare
+    OSError (no refused or reset connection, no bad status: P1-06), which tested the machine's local ports rather than
+    the server. Nothing is retried: any failure is reported with its error number. The connection is reopened only
+    after the server said it would close it."""
+
+    def __init__(self):
+        self.conn = None
+
+    def get(self, path, timeout=90):
+        if self.conn is None:
+            self.conn = http.client.HTTPConnection("127.0.0.1", UI, timeout=timeout)
+        try:
+            self.conn.request("GET", path, headers={"Host": f"127.0.0.1:{UI}"})
+            r = self.conn.getresponse()
+            raw = r.read()
+            if r.will_close:
+                self.close()
+            try:
+                return r.status, json.loads(raw) if raw else None
+            except ValueError:
+                return r.status, None
+        except OSError as e:
+            self.close()
+            return f"{type(e).__name__}[{getattr(e, 'winerror', None) or e.errno}]", None
+
+    def close(self):
+        if self.conn is not None:
+            self.conn.close()
+            self.conn = None
 
 
 def services():
@@ -164,13 +197,17 @@ try:
     syms = ["AAPL", "MSFT", "SAP.DE", "7203.T", "SHEL.L", "NVDA", "RY.TO", "BHP.AX", "ASML.AS", "NESN.SW"]
 
     def load(i):
-        while not stop_load.is_set():
-            path = (f"/x/snapshot?symbol={syms[i % len(syms)]}", f"/x/chart?symbol={syms[(i + 3) % len(syms)]}", "/x/board?preset=us_equity")[i % 3]
-            st, body = call("GET", path, timeout=90)
-            statuses.append(st)
-            if isinstance(st, int) and st >= 500 and not (st == 503 and (body or {}).get("error", {}).get("kind") == "unavailable"):
-                bad.append((st, path, ((body or {}).get("error") or {}).get("kind"), str((body or {}).get("detail"))[:120]))
-            time.sleep(0.2)
+        client = Client()
+        try:
+            while not stop_load.is_set():
+                path = (f"/x/snapshot?symbol={syms[i % len(syms)]}", f"/x/chart?symbol={syms[(i + 3) % len(syms)]}", "/x/board?preset=us_equity")[i % 3]
+                st, body = client.get(path)
+                statuses.append(st)
+                if isinstance(st, int) and st >= 500 and not (st == 503 and (body or {}).get("error", {}).get("kind") == "unavailable"):
+                    bad.append((st, path, ((body or {}).get("error") or {}).get("kind"), str((body or {}).get("detail"))[:120]))
+                time.sleep(0.2)
+        finally:
+            client.close()
 
     ts = [threading.Thread(target=load, args=(i,), daemon=True) for i in range(20)]
     for t in ts:
