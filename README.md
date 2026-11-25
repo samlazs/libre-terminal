@@ -2,9 +2,9 @@
 
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
 
-It brings equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy inventories, shipping flows, macro data, SEC filings, and market news together across **28 dashboards**. All data comes directly from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
+It puts equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy, shipping, macro data, SEC filings, and news in one place, across **28 dashboards**. The data comes from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
 
-Most of the terminal works immediately with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add deeper U.S. economic, energy, labor, and legislative series.
+Most of it works straight away, with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add more U.S. economic, energy, labor, and legislative data.
 
 ![Cross-asset Markets Summary in Libre Terminal](docs/markets-summary.jpg)
 
@@ -14,16 +14,16 @@ Most of the terminal works immediately with no account, login, or API key. Optio
 
 > **[Download Libre Terminal for Windows (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)** &nbsp;·&nbsp; [Latest release notes](https://github.com/samlazs/libre-terminal/releases/latest)
 
-No coding tools, Python setup, or accounts needed. You only need an internet connection and about 1 GB of free space:
+No coding tools, Python, or accounts needed, just an internet connection and about 1 GB of free space:
 
 1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip).
 2. **Extract the ZIP.** Right-click the downloaded file, choose **Extract All...**, and click **Extract**. Do not open files directly from inside the ZIP window.
 3. **Install once.** Open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (this takes 2 to 5 minutes).
    - If Windows shows *"Windows protected your PC"*, click **More info** and then **Run anyway**. You only need to do this once.
-4. **Launch.** Double-click **`Start.cmd`**. On the first launch, allow up to about a minute while the data services start; your browser opens automatically to `http://127.0.0.1:6950`, and cards say the data services are starting until their data arrives.
+4. **Launch.** Double-click **`Start.cmd`**. Your browser opens at `http://127.0.0.1:6950`. The first launch takes about a minute while the data services start.
    - Use **`Stop.cmd`** to close the terminal cleanly, and **`Setup-Keys.cmd`** later if you want to add optional free API keys.
 
-Everything runs locally on your machine. Nothing leaves your computer except the requests to the data providers themselves.
+Everything runs on your own machine. The only traffic that leaves it is the requests to the data providers.
 
 > Unofficial project, not affiliated with OpenBB or any data provider. Built for research only: market data can be delayed, incomplete, or revised, and nothing here is investment advice. See [License and disclaimer](#license-and-disclaimer).
 
@@ -31,7 +31,9 @@ Everything runs locally on your machine. Nothing leaves your computer except the
 
 ### Equities, comps, and SEC filings
 
-Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to get price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview, an editable comparable-companies table converts market cap and enterprise value to USD and shows multiples, margins, growth, leverage, and peer medians. Statements switch between reported values, common size (percent of revenue or of total assets), and year-over-year change. Growth & Ratios plots 3, 5, or 10 years of P/E, EV/EBITDA, EV/Sales, P/S, or P/B against each multiple's own median and 10th-90th percentile band. It uses figures as they were known on each day (SEC filings for U.S. companies, Yahoo Finance with automatic currency and ADR/share-class scaling elsewhere), and sits beside ROIC and a DuPont breakdown of ROE. For U.S. banks, the snapshot adds FDIC asset-quality figures and skips multiples that have no meaning for a bank. Other tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons.
+Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to get price history, a business snapshot, financial statements, Street price targets, and recent analyst rating changes. Below the overview, an editable comparable-companies table converts market cap and enterprise value to USD and shows multiples, margins, growth, leverage, and peer medians.
+
+Statements switch between reported values, common size (percent of revenue or of total assets), and year-over-year change. Growth & Ratios plots 3, 5, or 10 years of P/E, EV/EBITDA, EV/Sales, P/S, or P/B against each multiple's own median and 10th-90th percentile band, using figures as they were known on each day (SEC filings for U.S. companies, Yahoo Finance elsewhere, adjusted for currency and ADR or share-class ratios), next to ROIC and a DuPont breakdown of ROE. For U.S. banks, the snapshot adds FDIC asset-quality figures and skips multiples that have no meaning for a bank. Other tabs cover insider transactions, 13F institutional holders, FINRA short interest, extracted 10-K/10-Q Risk Factors and MD&A, and cross-company SEC comparisons.
 
 ![Company overview for Apple](docs/company-overview.jpg)
 
@@ -45,7 +47,7 @@ Type a ticker or company name once (`AAPL`, `RY.TO`, `7203.T`, `SHEL.L`) to get 
 
 On earnings day, the Estimates tab sets expected against reported EPS and revenue beside the company's SEC Form 8-K press release (Exhibit 99.1). It also shows the two-day share price move, options-implied versus past realized moves, 12 quarters of surprise history (click any past date to load that quarter's scorecard and press release), and 30- and 90-day analyst estimate revisions.
 
-The options views go beyond raw chains. They plot implied volatility term structure, out-of-the-money volatility smiles, 3D volatility surfaces, open interest by expiration, and strategy payoffs (straddles, strangles, and spreads). The Volatility tab adds dealer gamma exposure by strike with the Max Pain level, and a cone of realized volatility over 10 to 126 days with today's implied volatility on top. Ticker routing is automatic: U.S. stocks pull from Yahoo Finance, Nasdaq, or Cboe, Canadian names route to the Montreal Exchange (TMX), and crypto options route to Deribit.
+Beyond the chains themselves, the options views plot implied volatility term structure, out-of-the-money volatility smiles, 3D volatility surfaces, open interest by expiration, and strategy payoffs (straddles, strangles, and spreads). The Volatility tab adds dealer gamma exposure by strike with the Max Pain level, and a cone of realized volatility over 10 to 126 days with today's implied volatility on top. Each ticker goes to the right source automatically: U.S. stocks pull from Yahoo Finance, Nasdaq, or Cboe, Canadian names route to the Montreal Exchange (TMX), and crypto options route to Deribit.
 
 ![Earnings scorecard and SEC 8-K release](docs/company-earnings.jpg)
 
@@ -57,7 +59,7 @@ The options views go beyond raw chains. They plot implied volatility term struct
 
 ### Sovereign yield curves and central bank policy paths
 
-Government curves come directly from central banks and ministries of finance rather than scraped quotes. Pick a country to plot today's curve against 1 month, 3 months, 6 months, 1 year, 2 years, or 5 years ago, read basis-point changes across tenors, and review BIS policy-rate history alongside OECD long-term rates. A separate global screen shows a 45-country yields matrix and roughly 40 central bank policy rates.
+Government curves come straight from central banks and finance ministries. Pick a country to plot today's curve against 1 month, 3 months, 6 months, 1 year, 2 years, or 5 years ago, read basis-point changes across tenors, and review BIS policy-rate history alongside OECD long-term rates. A separate global screen shows a 45-country yields matrix and roughly 40 central bank policy rates.
 
 On Policy Expectations, meeting-dated overnight index swap (OIS) trade reports from the CFTC are turned into market-implied rate paths for six major central banks (Fed, ECB, BoE, BoJ, BoC, and RBA). Today's pricing is compared against one week and one month ago. A table lists each meeting period with the step priced at that meeting (in basis points and as a share of a 25 bp move) and how it has changed over the week and the month. FOMC statements, minutes, and economic projections open directly underneath, followed by San Francisco Fed term-premium estimates and Atlanta Fed rate probabilities.
 
@@ -111,7 +113,7 @@ With a free U.S. EIA API key, weekly and monthly physical balances fill in. Thes
 
 ### Maritime shipping, global macro, and situation-room news
 
-Physical trade flows often move before official economic releases. Using IMF PortWatch data, Trade & Shipping tracks daily vessel transits through the Strait of Hormuz, Bab el-Mandeb, Suez Canal, Cape of Good Hope, Bosporus, Panama Canal, Malacca Strait, and Taiwan Strait. Traffic is split into tankers, container ships, and dry bulk, and compared with a year earlier and the pre-crisis 2023 baseline. Further tabs add port disruption maps, trade-flow diagrams, and bilateral tariffs.
+Using IMF PortWatch data, Trade & Shipping tracks daily vessel transits through the Strait of Hormuz, Bab el-Mandeb, Suez Canal, Cape of Good Hope, Bosporus, Panama Canal, Malacca Strait, and Taiwan Strait. Traffic is split into tankers, container ships, and dry bulk, and compared with a year earlier and the pre-crisis 2023 baseline. Further tabs add port disruption maps, trade-flow diagrams, and bilateral tariffs.
 
 The Country Monitor puts GDP growth, inflation, unemployment, policy rates, and sovereign yields for 17 major economies in one table. Clicking a country updates the IMF inflation, BIS policy-rate, yield curve, and news panels beneath it. Other tabs track Caldara-Iacoviello geopolitical risk across 44 countries, U.S. bank credit quality, FDIC bank failures, and individual bank ratios against peer-group percentiles (FFIEC UBPR).
 
@@ -183,7 +185,7 @@ The opening tab of nearly every dashboard works without any keys. Cards that nee
 | **BLS** | U.S. Bureau of Labor Statistics CPI, PPI, Employment Situation, JOLTS, real earnings, and productivity tables | https://data.bls.gov/registrationEngine/ |
 | **Congress.gov** | U.S. House and Senate bills, votes, amendments, member profiles, and committee reports | https://api.congress.gov/sign-up/ |
 
-To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, paste the keys into the file that opens, save, and restart with **`Stop.cmd`** and **`Start.cmd`**. Keys are stored locally in `local/api_keys.env` (never logged, committed, or sent to any third party — only to each provider's own API when queried).
+To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, paste the keys into the file that opens, save, and restart with **`Stop.cmd`** and **`Start.cmd`**. Keys stay in `local/api_keys.env` on your machine. They are never logged or committed, and each key is only sent to its own provider.
 
 ## What to know about the data
 
@@ -193,10 +195,10 @@ To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, 
 - **Total return vs. price return.** Quote boards containing only stocks and funds show total return (distributions reinvested on the ex-date). Boards that include an index, future, currency, or cryptocurrency show price return. The footer line beneath each board states which one is shown.
 - **Credit and bond coverage.** CDS covers on-the-run 5-year index CDS from CFTC swap-repository trade reports; single-name CDS is not available. Corporate bond prices come from FINRA TRACE last-sale reports; security-level U.S. Treasury quotes are not included.
 - **Sovereign curve frequency.** Daily curves cover the eight markets listed above. Other countries rely on monthly 3-month and 10-year OECD series, so intra-euro spreads such as BTP-Bund and OAT-Bund are monthly.
-- **Source interruptions.** Public providers occasionally move or retire pages; roughly 30 feeds currently fail at the source and are listed in **Data Explorers > Data status**. When Cboe blocks automated requests to its options feed, options analytics fall back automatically to Yahoo Finance chains (computing Black-76 implied volatilities and Greeks locally), the VIX curve switches to Cboe settlement files, and U.S. index snapshots use Yahoo, with every substitute labelled on the card. Cboe intraday bars and historical option quotes have no substitute. OECD occasionally pauses requests when its rate limit is reached and recovers later.
+- **Source interruptions.** Public providers sometimes move or retire their feeds; **Data Explorers > Data status** lists any that are currently down. When Cboe blocks automated requests to its options feed, options analytics fall back automatically to Yahoo Finance chains (computing Black-76 implied volatilities and Greeks locally), the VIX curve switches to Cboe settlement files, and U.S. index snapshots use Yahoo, with every substitute labelled on the card. Cboe intraday bars and historical option quotes have no substitute. OECD occasionally pauses requests when its rate limit is reached and recovers later.
 - **Geographic scope.** Stock prices, financial statements, analyst estimates, holders, and peer comps work for listings worldwide. SEC filings, FINRA TRACE, FINRA short interest, FDIC/FFIEC bank data, and U.S. option analytics apply to U.S. issuers (Canadian and Nordic markets have their own dashboards).
 - **Actuals only for macro.** Macro dashboards show official releases and IMF forecasts, not economist survey consensus or PMI releases.
-- **Supported platform.** Windows 10 and 11 are the officially tested and supported systems.
+- **Supported platform.** Windows 10 and 11 are tested and supported.
 
 ## Updating and troubleshooting
 
