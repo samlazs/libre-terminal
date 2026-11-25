@@ -16,12 +16,17 @@ Most of it works straight away, with no account, login, or API key. Optional fre
 
 No coding tools, Python, or accounts needed, just an internet connection and about 1 GB of free space:
 
-1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip).
-2. **Extract the ZIP.** Right-click the downloaded file, choose **Extract All...**, and click **Extract**. Do not open files directly from inside the ZIP window.
-3. **Install once.** Open the extracted `Libre-Terminal` folder and double-click **`Install.cmd`** (this takes 2 to 5 minutes).
+1. **Download** [`Libre-Terminal-Windows.zip`](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip). On the release page, pick that file, not *Source code (zip)*.
+2. **Extract the ZIP.** Right-click the downloaded file, choose **Extract All...**, and click **Extract**. Files cannot run from inside the ZIP window.
+   - *You should see:* a `Libre-Terminal` folder with `Install.cmd`, `Start.cmd`, `Stop.cmd`, and `READ-ME-FIRST.txt`. A short location such as `C:\Libre-Terminal` works best; avoid OneDrive folders.
+3. **Install once.** Double-click **`Install.cmd`**. It takes 2 to 5 minutes.
    - If Windows shows *"Windows protected your PC"*, click **More info** and then **Run anyway**. You only need to do this once.
-4. **Launch.** Double-click **`Start.cmd`**. Your browser opens at `http://127.0.0.1:6950`. The first launch takes about a minute while the data services start.
-   - Use **`Stop.cmd`** to close the terminal cleanly, and **`Setup-Keys.cmd`** later if you want to add optional free API keys.
+   - *You should see:* a black window with download progress, ending with a line that tells you to double-click **Start.cmd**. Close the window.
+4. **Start.** Double-click **`Start.cmd`**. The first start takes about a minute.
+   - *You should see:* your browser open the terminal at `http://127.0.0.1:6950` (bookmark it). The black window can be closed; the terminal keeps running in the background.
+5. **Stop** with **`Stop.cmd`** when you are done. After restarting your computer, run **`Start.cmd`** again. **`Setup-Keys.cmd`** adds [optional free API keys](#optional-free-api-keys) any time.
+
+If something goes wrong, the window says what to do next; the [troubleshooting table](#updating-and-troubleshooting) covers the common cases.
 
 Everything runs on your own machine. The only traffic that leaves it is the requests to the data providers.
 
@@ -212,7 +217,9 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 | *"Windows protected your PC"* | Click **More info** and then **Run anyway**. Only needed once; `Install.cmd` unblocks the other `.cmd` files automatically. |
 | Files will not run / *"inside the ZIP"* | Right-click `Libre-Terminal-Windows.zip`, choose **Extract All...**, and open the extracted `Libre-Terminal` folder. |
 | Install fails inside OneDrive or a long path | Move the extracted folder to a short local path such as `C:\Libre-Terminal` and double-click `Install.cmd` again. Windows limits file paths to 260 characters, so `Install.cmd` stops before downloading anything when the folder path is longer than 83 characters (unless Windows long paths are turned on). |
-| Install stops partway through | Usually a corporate proxy, firewall, or antivirus block. Allow access and run `Install.cmd` again; it picks up where it stopped. |
+| Install stops partway through | Usually a company proxy, firewall, VPN, or antivirus block. Try another network (a home connection or phone hotspot) or ask IT to allow `astral.sh`, `github.com`, and `pypi.org`, then run `Install.cmd` again; it picks up where it stopped. |
+| Antivirus removes or blocks files | Restore them, allow the `Libre-Terminal` folder in the antivirus, and run `Install.cmd` again. |
+| The browser did not open | Open `http://127.0.0.1:6950` yourself. If the page does not load, run `Start.cmd` again and read the last lines in its window. |
 | Port already in use | Open Command Prompt inside `Libre-Terminal` and run `Start.cmd --ui-port 7950 --v5-port 7900` (saved for future launches). |
 | Slow first start or blank cards | The first launch takes up to about a minute (90 seconds on a slow machine) while the data services start. If a background service stops or freezes, the terminal restarts it automatically, or you can click **Restart** next to **Refresh** in the top bar to restart stalled data services and clear cached errors from the browser; logs are in `local/logs/`. |
 | A card asks for an API key | Add the free key with **`Setup-Keys.cmd`**, then stop and start the terminal. |
