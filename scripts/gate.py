@@ -226,7 +226,7 @@ def cold_start(ctx) -> tuple[bool, str]:
         except subprocess.TimeoutExpired:
             proc.kill()
         run([py_exe(), ROOT / "scripts" / "launcher.py", "stop", *ports], 120, env=env)
-        shutil.rmtree(scratch, ignore_errors=True)
+        remove_tree(scratch)
     if not first:
         return False, f"isolated keyless instance showed no first screen within {elapsed:.0f} s"
     return elapsed < COLD_START_LIMIT_S, f"cold start to first screen {elapsed:.1f} s (limit {COLD_START_LIMIT_S:.0f} s)"
@@ -395,6 +395,18 @@ def gate_g4(ctx) -> tuple[str, list[str]]:
 
 
 # ---------------------------------------------------------------- G5
+def remove_tree(path: Path, tries: int = 10) -> bool:
+    """Delete a scratch folder. Processes of a stopped instance may hold their loaded modules for a few seconds on
+    Windows, so a failed delete is retried before it is given up (and reported)."""
+    for _ in range(tries):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return True
+        time.sleep(2)
+    print(f"[gate] could not remove {path}; delete it by hand", file=sys.stderr)
+    return False
+
+
 def short_temp() -> Path:
     """A short scratch folder (MAX_PATH): <drive>\\ltg5-xxxx when writable, else the user temp folder."""
     drive = Path((os.environ.get("SystemDrive") or "C:") + "\\")
@@ -402,6 +414,45 @@ def short_temp() -> Path:
         return Path(tempfile.mkdtemp(prefix="ltg5-", dir=drive))
     except OSError:
         return Path(tempfile.mkdtemp(prefix="ltg5-"))
+
+
+def g5_profile_env(scratch: Path) -> dict:
+    """A fresh Windows profile whose folder name is not ASCII (as for many real user names): USERPROFILE, HOME, APPDATA,
+    LOCALAPPDATA and TEMP all point inside it. uv keeps its download cache and Python installs where they are, so the
+    run does not download everything again."""
+    env = isolated_env(scratch)
+    home = scratch / "Zo\u00eb M\u00fcller"
+    for k, sub in (("USERPROFILE", ""), ("HOME", ""), ("APPDATA", "AppData/Roaming"), ("LOCALAPPDATA", "AppData/Local"),
+                   ("TEMP", "AppData/Local/Temp"), ("TMP", "AppData/Local/Temp")):
+        (home / sub).mkdir(parents=True, exist_ok=True)
+        env[k] = str(home / sub) if sub else str(home)
+    env.setdefault("UV_CACHE_DIR", str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "uv" / "cache"))
+    env.setdefault("UV_PYTHON_INSTALL_DIR", str(Path(os.environ.get("APPDATA", str(Path.home()))) / "uv" / "python"))
+    return env
+
+
+def g5_refuses_long_path(zpath: Path, scratch: Path) -> tuple[bool, str]:
+    """Install.cmd from a folder whose path is too long stops at once with a plain message and creates nothing."""
+    base = scratch / "long" / ("y" * 100)
+    with zipfile.ZipFile(zpath) as z:
+        z.extractall(base)
+    top = [q for q in base.iterdir() if (q / "Install.cmd").exists()]
+    app = top[0] if top else base
+    t = time.monotonic()
+    rc, lines = run(["cmd", "/c", str(app / "Install.cmd")], 300, env=isolated_env(scratch), cwd=app)
+    took, text = time.monotonic() - t, "\n".join(lines)
+    try:
+        long_paths = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                     "(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\FileSystem').LongPathsEnabled"],
+                                    capture_output=True, text=True, timeout=60).stdout.strip() == "1"
+    except (OSError, subprocess.SubprocessError):
+        long_paths = False
+    if long_paths:
+        return True, f"long-path refusal not applicable: Windows long paths are enabled here (Install.cmd exit {rc})"
+    good = rc != 0 and "too long" in text and "Nothing was downloaded" in text and not (app / ".venv-v5").exists() and took < 120
+    return good, (f"Install.cmd from a {len(str(app))}-character folder: exit {rc} in {took:.0f} s, "
+                  f"{'refused with the plain message' if 'too long' in text else 'NOT refused'}, "
+                  f"{'no' if not (app / '.venv-v5').exists() else 'a'} .venv-v5 created")
 
 
 def gate_g5(ctx) -> tuple[str, list[str]]:
@@ -414,13 +465,15 @@ def gate_g5(ctx) -> tuple[str, list[str]]:
         return "fail", ["local/releases/Libre-Terminal-Windows.zip is missing (project_check.py release-zip builds it)"]
     scratch = short_temp()
     ev, ok = [f"unpacked into {len(str(scratch))}-character path"], False
+    refused_ok = False
     ui, v5 = free_port(7950), free_port(7900)
     try:
         with zipfile.ZipFile(zpath) as z:
             z.extractall(scratch)
         top = [p for p in scratch.iterdir() if (p / "Install.cmd").exists()]
         app = top[0] if top else scratch
-        env = isolated_env(scratch)
+        env = g5_profile_env(scratch)
+        ev.append(f"profile folder {env['USERPROFILE']!r} (non-ASCII; APPDATA, LOCALAPPDATA and TEMP inside it)")
         t = time.monotonic()
         rc, lines = run(["cmd", "/c", str(app / "Install.cmd")], 3600, env=env, cwd=app)
         ev.append(f"Install.cmd exit {rc} in {time.monotonic() - t:.0f} s")
@@ -440,9 +493,13 @@ def gate_g5(ctx) -> tuple[str, list[str]]:
         for cand in [*scratch.glob(".venv-v5/Scripts/python.exe"), *scratch.glob("*/.venv-v5/Scripts/python.exe")][:1]:
             app_dir = cand.parents[2]
             run([cand, app_dir / "scripts" / "launcher.py", "stop", "--ui-port", str(ui), "--v5-port", str(v5)],
-                120, env=isolated_env(scratch), cwd=app_dir)
-        shutil.rmtree(scratch, ignore_errors=True)
-    return ("pass" if ok else "fail"), ev
+                120, env=g5_profile_env(scratch), cwd=app_dir)
+        try:
+            refused_ok, why = g5_refuses_long_path(zpath, scratch)
+            ev.append(why)
+        finally:
+            remove_tree(scratch)
+    return ("pass" if ok and refused_ok else "fail"), ev
 
 
 GATE_FUNCS = {"G1": gate_g1, "G2": gate_g2, "G3": gate_g3, "G4": gate_g4, "G5": gate_g5}

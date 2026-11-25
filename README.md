@@ -208,7 +208,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 |---|---|
 | *"Windows protected your PC"* | Click **More info** and then **Run anyway**. Only needed once; `Install.cmd` unblocks the other `.cmd` files automatically. |
 | Files will not run / *"inside the ZIP"* | Right-click `Libre-Terminal-Windows.zip`, choose **Extract All...**, and open the extracted `Libre-Terminal` folder. |
-| Install fails inside OneDrive or a long path | Move the extracted folder to a short local path such as `C:\Libre-Terminal` and double-click `Install.cmd` again. |
+| Install fails inside OneDrive or a long path | Move the extracted folder to a short local path such as `C:\Libre-Terminal` and double-click `Install.cmd` again. Windows limits file paths to 260 characters, so `Install.cmd` stops before downloading anything when the folder path is longer than 83 characters (unless Windows long paths are turned on). |
 | Install stops partway through | Usually a corporate proxy, firewall, or antivirus block. Allow access and run `Install.cmd` again; it picks up where it stopped. |
 | Port already in use | Open Command Prompt inside `Libre-Terminal` and run `Start.cmd --ui-port 7950 --v5-port 7900` (saved for future launches). |
 | Slow first start or blank cards | The first launch takes 15 to 60 seconds while initial data and charts load. If a background service stops or freezes, the terminal restarts it automatically, or you can click **Restart** next to **Refresh** in the top bar to restart stalled data services and clear cached errors from the browser; logs are in `local/logs/`. |
