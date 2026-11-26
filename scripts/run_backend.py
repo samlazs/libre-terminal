@@ -38,6 +38,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT / "terminal"))        # appended, so no module there can shadow one OpenBB imports
+import extra_origins  # noqa: E402
 import local_paths  # noqa: E402
 from redact import redact  # noqa: E402
 
@@ -2136,6 +2137,175 @@ def install_sec_fact_any_tag(applied: list):
     applied.append("SEC company facts: any us-gaap tag (capex and older revenue tags for Compare)")
 
 
+SEC_PIT_FORMS = frozenset({"10-Q", "10-QT", "10-K", "10-KT", "20-F", "40-F", "DEF 14A"})
+
+
+def sec_pit_records(records: list, frames) -> list:
+    """Point-in-time SEC company-facts records preserving restatements and original as-reported filings."""
+    cleaned = []
+    for raw in records:
+        r = frames._enrich_entry(dict(raw))
+        base_form = str(r.get("form") or "").split("/")[0]
+        if base_form and base_form not in SEC_PIT_FORMS:
+            continue
+        cleaned.append(r)
+
+    by_filed = {}
+    for r in cleaned:
+        key = (r.get("symbol"), r.get("unit"), r.get("start"), r.get("end"), r.get("span"), r.get("filed", ""))
+        cur = by_filed.get(key)
+        if cur is None or str(r.get("accn", "")) > str(cur.get("accn", "")):
+            by_filed[key] = r
+
+    groups = {}
+    for r in by_filed.values():
+        key = (r.get("symbol"), r.get("unit"), r.get("start"), r.get("end"), r.get("span"))
+        groups.setdefault(key, []).append(r)
+
+    deduped = []
+    for vers in groups.values():
+        vers.sort(key=lambda x: (str(x.get("filed", "")), str(x.get("accn", ""))))
+        prev_set, prev_val = False, None
+        for r in vers:
+            val = r.get("val")
+            if not prev_set or val != prev_val:
+                deduped.append(r)
+                prev_set, prev_val = True, val
+
+    cum_rows = [r for r in deduped if r.get("span") in frames._CUMULATIVE_SPANS and r.get("start") and r.get("end") and r.get("val") is not None]
+    cum_by_date = {}
+    for r in cum_rows:
+        cum_by_date.setdefault(str(r.get("filed", "")), []).append(r)
+
+    cur_cum, raw_derived = {}, []
+    for t in sorted(cum_by_date):
+        for r in cum_by_date[t]:
+            cur_cum[(r.get("symbol"), r.get("unit"), r.get("start"), r.get("end"), r.get("span"))] = r
+        for d in sec_standalone_quarters(list(cur_cum.values()), frames):
+            if str(d.get("filed", "")) == t:
+                raw_derived.append(d)
+
+    der_groups = {}
+    for d in raw_derived:
+        der_groups.setdefault((d.get("symbol"), d.get("unit"), d.get("end")), []).append(d)
+    for vers in der_groups.values():
+        vers.sort(key=lambda x: (str(x.get("filed", "")), str(x.get("accn", ""))))
+        prev_set, prev_val = False, None
+        for d in vers:
+            val = d.get("val")
+            if not prev_set or val != prev_val:
+                deduped.append(d)
+                prev_set, prev_val = True, val
+    return deduped
+
+
+def install_sec_pit_facts(applied: list):
+    """Preserve as-reported and restated SEC filing versions when query.point_in_time=True."""
+    import asyncio
+    from warnings import warn
+
+    from openbb_core.app.model.abstract.singleton import SingletonMeta
+    from openbb_core.app.provider_interface import ProviderInterface
+    from openbb_core.app.route_iter import iter_api_routes
+    from openbb_core.app.router import RouterLoader, SignatureInspector
+    from openbb_core.provider.utils.errors import EmptyDataError
+    from openbb_sec.models.compare_company_facts import (
+        SecCompareCompanyFactsFetcher as F,
+        SecCompareCompanyFactsQueryParams as Q,
+    )
+    from openbb_sec.utils import frames
+    from pydantic.fields import FieldInfo
+
+    if "point_in_time" not in Q.model_fields:
+        Q.__annotations__["point_in_time"] = bool
+        Q.point_in_time = False
+        Q.model_fields["point_in_time"] = FieldInfo(
+            annotation=bool,
+            default=False,
+            description="Keep as-reported and restated filing versions by filing date instead of collapsing to the latest filing.",
+        )
+        Q.model_rebuild(force=True)
+    if ProviderInterface in SingletonMeta._instances:
+        SingletonMeta._instances.pop(ProviderInterface, None)
+        extra_dc = ProviderInterface().params["CompareCompanyFacts"]["extra"]
+        plugins = RouterLoader.from_extensions()
+        for eff in iter_api_routes(plugins.api_router):
+            if getattr(eff, "path", "").endswith("/compare/company_facts"):
+                leaf = getattr(eff, "original_route", eff)
+                leaf.endpoint = SignatureInspector.inject_dependency(leaf.endpoint, "extra_params", extra_dc)
+
+    orig = F.aextract_data
+
+    async def aextract_data(query, credentials, _orig=orig, **kwargs):
+        if query.symbol is None or not getattr(query, "point_in_time", False):
+            return await _orig(query, credentials, **kwargs)
+        if getattr(query, "instantaneous", False) is True:
+            warn("The 'instantaneous' parameter is ignored when a symbol is supplied.")
+
+        symbols = query.symbol.split(",")
+        results, messages, metadata = [], [], {}
+
+        async def get_one(ticker):
+            ticker = ticker.upper()
+            message = f"Symbol Error: No data was found for, {ticker} and {query.fact}"
+            cik = await frames.symbol_map(ticker)
+            if cik == "":
+                message = f"Symbol Error: No CIK was found for, {ticker}"
+                warn(message)
+                messages.append(message)
+                return
+            url = f"https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/{query.fact}.json"
+            response = {}
+            try:
+                response = await frames.fetch_data(url, query.use_cache, False)
+            except Exception:  # noqa: BLE001
+                warn(message)
+                messages.append(message)
+            if response:
+                units = response.get("units", {})
+                metadata[ticker] = {
+                    "cik": response.get("cik", ""),
+                    "taxonomy": response.get("taxonomy", ""),
+                    "tag": response.get("tag", ""),
+                    "label": response.get("label", ""),
+                    "description": response.get("description", ""),
+                    "name": response.get("entityName", ""),
+                    "units": list(units) if len(units) > 1 else (list(units)[0] if units else None),
+                }
+                for unit, values in units.items():
+                    for item in values:
+                        rec = dict(item)
+                        rec["unit"] = unit
+                        rec["symbol"] = ticker
+                        rec["cik"] = metadata[ticker]["cik"]
+                        rec["name"] = metadata[ticker]["name"]
+                        rec["fact"] = metadata[ticker]["label"]
+                        results.append(rec)
+
+        await asyncio.gather(*(get_one(ticker) for ticker in symbols))
+        if not results:
+            raise EmptyDataError(f"{messages}")
+        parsed = sec_pit_records(results, frames)
+        final = frames._select_periods(parsed, query.year, query.calendar_period)
+        if not final and (query.year is not None or query.calendar_period):
+            warn(
+                f"No results were found for {query.fact} in the requested calendar period."
+                " Returning all reported values instead."
+                " Concept and fact names may differ by company and year."
+            )
+            final = [r for r in parsed if r.get("span") in frames._PRIMARY_SPANS]
+        if not final:
+            raise EmptyDataError("The request was returned empty.")
+        return {
+            "metadata": metadata,
+            "data": sorted(final, key=lambda x: (x.get("filed", ""), x.get("end", "")), reverse=True),
+        }
+
+    F.aextract_data = F.extract_data = staticmethod(aextract_data)
+    F._terminal_cache_rev = "sec_pit2"
+    applied.append("SEC company facts: point_in_time=true preserves as-reported and restated filing versions")
+
+
 def funding_apr(funding_8h):
     """Simple annualised funding in percent from the 8-hour rate in percent (x 3 periods a day x 365), not compounded."""
     return None if funding_8h is None else round(funding_8h * 3 * 365, 4)
@@ -3319,6 +3489,24 @@ def install_yfinance_quote_regular_market(applied: list):
     # Fetcher.__init_subclass__ copied aextract_data onto extract_data, which is what fetch_data calls: replace both
     fetcher.aextract_data = fetcher.extract_data = staticmethod(aextract_data)
     applied.append("Yahoo quotes: funds get their last price, every symbol its day change from the previous close")
+
+
+def install_yfinance_historical_end_date(applied: list):
+    """Default omitted historical end_date to tomorrow so active sessions ahead of the local clock are not clipped."""
+    from datetime import datetime, timedelta
+
+    from openbb_yfinance.models.equity_historical import YFinanceEquityHistoricalFetcher as F
+
+    orig = F.transform_query
+
+    def transform_query(params, _orig=orig):
+        if isinstance(params, dict) and params.get("end_date") is None:
+            params = dict(params)
+            params["end_date"] = datetime.now().date() + timedelta(days=1)
+        return _orig(params)
+
+    F.transform_query = staticmethod(transform_query)
+    applied.append("Yahoo historical prices: omitted end_date includes tomorrow so exchange-ahead sessions are not clipped")
 
 
 def sec_standalone_quarters(records: list, frames) -> list:
@@ -5632,13 +5820,15 @@ def install_guard(port: str):
       * only Host 127.0.0.1 / localhost (this port) is answered (blocks DNS rebinding);
       * a request carrying an Origin other than the terminal UI or this backend itself is refused (other web pages
         can neither read data nor spend keyed quotas), and CORS answers name that origin instead of "*";
+      * origins the owner lists in TERMINAL_EXTRA_ORIGINS (a desktop client such as a Tauri app) are let in the same
+        way, whatever Sec-Fetch-Site says; empty by default (terminal/extra_origins.py);
       * error bodies are passed through redact(), so no key reaches the browser.
     """
     import uvicorn.config as uc
 
     port = str(port)
     hosts = {"127.0.0.1", "localhost", "[::1]"}
-    origins = origins_for(port)
+    origins = origins_for(port) | extra_origins.from_env(say)
 
     def host_ok(value: str) -> bool:
         value = value.strip().lower()
@@ -5831,6 +6021,7 @@ PATCHES = [
     Patch("yfinance_price_target_fix", "Yahoo analyst actions order and empty price targets", install_yfinance_price_target_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_futures_curve_fix", "Yahoo futures curve prices (one-sided quotes, untraded months)", install_yfinance_futures_curve_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_quote_regular_market", "Yahoo quote last price for funds and day change", install_yfinance_quote_regular_market, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_historical_end_date", "Yahoo historical default end date across time zones", install_yfinance_historical_end_date, targets=_targets("openbb-yfinance")),
     Patch("yfinance_fund_multiples_fix", "Yahoo fund multiples", install_yfinance_fund_multiples_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_recommendations_months", "Yahoo recommendations readable months", install_yfinance_recommendations_months, targets=_targets("openbb-yfinance")),
     Patch("tmx_holdings_currency_fix", "TMX ETF holdings currency", install_tmx_holdings_currency_fix, targets=_targets("openbb-tmx")),
@@ -5848,6 +6039,7 @@ PATCHES = [
     Patch("oecd_dataflow_list", "OECD dataflow list", install_oecd_dataflow_list, targets=_targets("openbb-oecd")),
     Patch("cot_search_aliases", "COT search aliases", install_cot_search_aliases, targets=_targets("openbb-cftc")),
     Patch("sec_fact_any_tag", "SEC company facts tags", install_sec_fact_any_tag, targets=_targets("openbb-sec")),
+    Patch("sec_pit_facts", "SEC company facts point-in-time filing versions", install_sec_pit_facts, targets=_targets("openbb-sec")),
     Patch("deribit_funding_apr", "Deribit funding APR", install_deribit_funding_apr, targets=_targets("openbb-deribit")),
     Patch("deribit_book_ladder", "Deribit order book ladder", install_deribit_book_ladder, targets=_targets("openbb-deribit")),
     Patch("eia_aeo_identified", "EIA AEO unnamed rows", install_eia_aeo_identified, targets=_targets("openbb-us-eia")),

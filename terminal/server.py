@@ -19,6 +19,7 @@ import importlib.util
 import json
 import mimetypes
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import composite  # noqa: E402
 from composite.core import contract  # noqa: E402
+import extra_origins  # noqa: E402
 import local_paths  # noqa: E402
 import xwidgets  # noqa: E402
 from redact import redact  # noqa: E402
@@ -412,10 +414,18 @@ def log(msg: str):
         pass
 
 
+# Origins the owner trusts besides this page (TERMINAL_EXTRA_ORIGINS, e.g. a Tauri desktop client). They may read
+# /widgets.json and run views (/x/*), with CORS headers naming them; they may not read or write the saved layout,
+# restart services or write the client log. Empty by default: nothing changes.
+EXTRA_ORIGINS = extra_origins.from_env(log)
+EXTRA_READ_METHODS = ("GET",)         # HEAD on /x/* answers 405, so it is not offered
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"TerminalUI/{VERSION}"
     protocol_version = "HTTP/1.1"
     timeout = 120                   # a half-sent request must not hold a thread forever
+    _cors_origin = None             # an extra origin this response names in its CORS headers (reset per request)
 
     def log_message(self, fmt, *args):  # quieter console
         if os.environ.get("TERMINAL_DEBUG"):
@@ -448,6 +458,9 @@ class Handler(BaseHTTPRequestHandler):
             compressible = any(ctype.startswith(p) for p in self._COMPRESS_TYPES)
             if compressible and "Vary" not in h:
                 h["Vary"] = "Accept-Encoding"
+            if self._cors_origin:
+                h["Access-Control-Allow-Origin"] = self._cors_origin
+                h["Vary"] = f"{h['Vary']}, Origin" if h.get("Vary") else "Origin"
             if code == 200 and self._wants_gzip(ctype, len(body)) and "Content-Encoding" not in h:
                 body = gzip.compress(body, compresslevel=5)
                 h["Content-Encoding"] = "gzip"
@@ -579,7 +592,21 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return origin.strip().lower() == f"http://{host.strip().lower()}"
 
+    def _extra_origin(self) -> str | None:
+        """The request's Origin when the owner listed it in TERMINAL_EXTRA_ORIGINS, else None."""
+        origin = self.headers.get("Origin")
+        return origin.strip() if extra_origins.allowed(origin, EXTRA_ORIGINS) else None
+
+    def _may_read(self) -> bool:
+        """Views: this page, or (read only) an extra origin the owner listed, whatever Sec-Fetch-Site says; the
+        answer then names that origin in its CORS headers."""
+        if self._same_origin():
+            return True
+        self._cors_origin = self._extra_origin()
+        return self._cors_origin is not None
+
     def _guard(self) -> bool:
+        self._cors_origin = None
         if not self._host_ok():
             self._json(403, {"detail": "Refused: the terminal only answers http://127.0.0.1 or http://localhost."})
             return False
@@ -587,6 +614,19 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- routes --------------------------------------------------------
     def do_OPTIONS(self):
+        """Only a preflight from an extra origin for a read (/widgets.json, /x/*) is answered; writes stay refused."""
+        self._cors_origin = None
+        path = self.path.split("?", 1)[0]
+        origin = self._extra_origin()
+        method = (self.headers.get("Access-Control-Request-Method") or "GET").strip().upper()
+        if origin and self._host_ok() and (path == "/widgets.json" or path.startswith("/x/")) and method in EXTRA_READ_METHODS:
+            self._cors_origin = origin
+            h = {"Access-Control-Allow-Methods": ", ".join(EXTRA_READ_METHODS), "Access-Control-Max-Age": "600"}
+            # rebuilt from checked tokens, never echoed raw (a folded or control-character request header stays out)
+            asked = [x.strip() for x in (self.headers.get("Access-Control-Request-Headers") or "").split(",") if x.strip()]
+            if asked and all(re.fullmatch(r"[A-Za-z0-9-]+", x) for x in asked):
+                h["Access-Control-Allow-Headers"] = ", ".join(asked)
+            return self._send(204, b"", "text/plain; charset=utf-8", headers=h)
         self._json(405, {"detail": "not allowed"})
 
     def do_GET(self):
@@ -602,6 +642,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/warm":
             return self._json(200, composite.warm_status())
         if path == "/widgets.json":
+            self._cors_origin = self._extra_origin()
             return self._json(200, xwidgets.widgets())
         if path == "/api/dashboards":
             try:
@@ -615,7 +656,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "to rebuild them (Start.cmd or start.sh).", "sections": [], "dashboards": []})
             return self._cached_json(raw, etag)
         if path.startswith("/x/"):
-            if not self._same_origin():
+            if not self._may_read():
                 return self._json(403, {"detail": "cross-origin request refused"})
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "", keep_blank_values=False)
             params = {k: v[-1] for k, v in query.items()}

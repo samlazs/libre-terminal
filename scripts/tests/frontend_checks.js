@@ -1190,6 +1190,55 @@ window.__fcPromise = (async function (T) {
         ok(document.activeElement === gotoEl, "/ shortcut focuses #goto search bar");
         gotoEl.blur();
       }
+      var keepGrpS = T.S.cur, keepTabS = T.S.tabId, grpBoxS = document.getElementById("groups");
+      var savedGrpChildrenS = grpBoxS ? [].slice.call(grpBoxS.childNodes) : [];
+      try {
+        var symGroup = { name: "Symbol", paramName: "symbol", value: "AAPL" };
+        T.S.cur = { id: "d:test-s", name: "Test S", groups: [symGroup], tabs: [{ id: "t1", name: "T1", items: [{ uid: "ts1", widgetId: "w1", backend: "x", params: {}, groups: ["Symbol"] }] }] };
+        T.S.tabId = "t1";
+        T.paintGroups();
+        var symIn = document.querySelector('#groups input[data-group-param="symbol"]');
+        if (symIn) {
+          var maxGuard = document.createElement("div");
+          maxGuard.className = "w max";
+          document.body.appendChild(maxGuard);
+          try {
+            symIn.blur();
+            document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true, cancelable: true }));
+            ok(document.activeElement === symIn && document.activeElement !== gotoEl, "s shortcut focuses #groups Symbol input without jumping to #goto");
+            symIn.value = "NVDA";
+            symIn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+            ok(symIn.value === "AAPL" && document.activeElement !== symIn && maxGuard.classList.contains("max"),
+              "Escape in Symbol input restores previous ticker, blurs, and keeps maximized card intact");
+            if (gotoEl) {
+              gotoEl.focus();
+              gotoEl.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true, cancelable: true }));
+              ok(document.activeElement === gotoEl, "s while typing inside an input does not steal focus");
+              gotoEl.blur();
+            }
+          } finally {
+            maxGuard.remove();
+            T.closePop();
+          }
+        } else {
+          ok(false, "Symbol input rendered for s shortcut check");
+        }
+        var ctryGroup = { name: "Country", paramName: "country", value: "US" };
+        T.S.cur = { id: "d:test-ns", name: "Test Non-Sym", groups: [ctryGroup], tabs: [{ id: "t1", name: "T1", items: [{ uid: "tns1", widgetId: "w1", backend: "x", params: {}, groups: ["Country"] }] }] };
+        T.S.tabId = "t1";
+        T.paintGroups();
+        var ctryIn = document.querySelector('#groups input[data-group-param="country"]');
+        if (ctryIn) {
+          ctryIn.blur();
+          document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", bubbles: true, cancelable: true }));
+          ok(document.activeElement !== ctryIn, "s does not focus a non-symbol #groups input (Country)");
+        } else {
+          ok(false, "Country input rendered for non-symbol s guard check");
+        }
+      } finally {
+        T.S.cur = keepGrpS; T.S.tabId = keepTabS;
+        if (grpBoxS) { grpBoxS.textContent = ""; savedGrpChildrenS.forEach(function (n) { grpBoxS.appendChild(n); }); }
+      }
 
       var chartDef = {
         widgetId: "x_test_chart_foot", name: "Test chart", endpoint: "/x/test_chart_foot",
@@ -1864,6 +1913,38 @@ window.__fcPromise = (async function (T) {
       ok(!document.querySelector("#pop-root .pop") && live.size === before, "a popover whose anchor is gone closes and its check stops");
       T.closePop();
       ok(live.size === before, "closing a popover leaves no interval");
+      var keepPopCur = T.S.cur, keepPopTab = T.S.tabId, keepSearchFn = T.sec.search;
+      var grpBoxPop = document.getElementById("groups"), keepGrpPop = grpBoxPop ? [].slice.call(grpBoxPop.childNodes) : [];
+      var maxGuardPop = document.createElement("div");
+      maxGuardPop.className = "w max";
+      document.body.appendChild(maxGuardPop);
+      try {
+        T.S.cur = { id: "d:test-pop-esc", name: "Test Pop Esc", groups: [{ name: "Symbol", paramName: "symbol", value: "AAPL" }], tabs: [{ id: "t", name: "T", items: [{ uid: "pop1", params: {}, groups: ["Symbol"] }] }] };
+        T.S.tabId = "t";
+        T.paintGroups();
+        var popSymIn = document.querySelector('#groups input[data-group-param="symbol"]');
+        ok(!!popSymIn, "paintGroups renders Symbol group input for suggest Escape check");
+        if (popSymIn) {
+          T.sec.search = function () { return Promise.resolve([{ symbol: "NVDA", name: "NVIDIA Corp", type: "equity", type_label: "Stock" }]); };
+          popSymIn.focus();
+          popSymIn.value = "NVD";
+          popSymIn.dispatchEvent(new Event("input", { bubbles: true }));
+          for (var pw = 0; pw < 10 && !document.querySelector("#pop-root .pop"); pw++) {
+            await new Promise(function (r) { setTimeout(r, 50); });
+          }
+          ok(!!document.querySelector("#pop-root .pop"), "suggest popover opened while typing in Symbol input");
+          popSymIn.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+          ok(!document.querySelector("#pop-root .pop") && popSymIn.value === "AAPL" && document.activeElement !== popSymIn && maxGuardPop.classList.contains("max"),
+            "Escape with open suggest popover closes popover, restores ticker, blurs, and keeps maximized card intact");
+        }
+      } finally {
+        T.sec.search = keepSearchFn;
+        T.S.cur = keepPopCur;
+        T.S.tabId = keepPopTab;
+        if (grpBoxPop) { grpBoxPop.textContent = ""; keepGrpPop.forEach(function (n) { grpBoxPop.appendChild(n); }); }
+        maxGuardPop.remove();
+        T.closePop();
+      }
 
       // a dashboard with four identical tabs of real cards: two tables (one with auto-refresh) and one failing source
       T.S.widgets.x = Object.assign({}, keepDefs, {

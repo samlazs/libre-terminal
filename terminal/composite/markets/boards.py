@@ -200,12 +200,13 @@ def board(preset="us_equity", symbols=None, **_):
     syms = [s for _, items in sections for _, s in items]
     hist = C.history(syms, dt.date.today() - dt.timedelta(days=410))
     basis, divs = C.returns_basis(syms), getattr(hist, "divs", {})
+    prev_closes = getattr(hist, "prev_close", {})
     rows = []
     for title, items in sections:
         if title:
             rows.append({"_section": title})
         for label, s in items:
-            row = C._quote_row(label, s, hist.get(s) or [], divs.get(s) if basis == "total" else None)
+            row = C._quote_row(label, s, hist.get(s) or [], divs.get(s) if basis == "total" else None, prev_closes.get(s))
             if preset == "fx" and not symbols and row.get("price") is not None:
                 _fx_columns(row, s, hist[s])
             rows.append(row)
@@ -301,7 +302,21 @@ def price_decimals(v) -> int:
     return 2 if a >= 50 else 4 if a >= 1 else 5 if a >= 0.01 else 6
 
 
-def _quote_row(label, s, ser, divs=None):
+def _day_prev(ser, prev_close=None):
+    """Previous close for 1D change: active futures settlement override when dated to ser[-1], else ser[-2]."""
+    if isinstance(prev_close, (list, tuple)) and len(prev_close) == 2:
+        if str(prev_close[0])[:10] == str(ser[-1][0])[:10]:
+            v = C.num(prev_close[1])
+            if v is not None and v > 0:
+                return v
+    elif prev_close is not None:
+        v = C.num(prev_close)
+        if v is not None and v > 0:
+            return v
+    return ser[-2][1]
+
+
+def _quote_row(label, s, ser, divs=None, prev_close=None):
     """One board line: last, change, returns over five horizons, 3-month sparkline, 52-week range (from closes).
 
     With `divs` (cash distributions by ex-date; the caller passes them only when the whole board is stocks and funds)
@@ -311,7 +326,7 @@ def _quote_row(label, s, ser, divs=None):
     "quote" (e.g. USD/JPY)."""
     if len(ser) < 2:
         return {"name": label, "symbol": s, "price": None, "note": "no data"}
-    last, prev = ser[-1][1], ser[-2][1]
+    last, prev = ser[-1][1], C._day_prev(ser, prev_close)
     pair = C.fx_pair_label(s)
     if C.is_yield(s):
         year = [c for _, c in ser[-253:]]
@@ -323,7 +338,7 @@ def _quote_row(label, s, ser, divs=None):
         return row
     inverted = C.currency_view(label, s)
     view = C._invert(ser) if inverted else ser
-    vl, vp = view[-1][1], view[-2][1]
+    vl, vp = (view[-1][1], view[-2][1]) if inverted else (last, prev)
     year = [c for _, c in ser[-253:]]
     lo, hi = min(year), max(year)
     vyear = [c for _, c in view[-253:]]          # the 52-week position is of what the row measures (the currency's own value)
@@ -389,11 +404,15 @@ def performance(symbols="^GSPC,^NDX,^DJI", period="YTD", preset=None, **_):
         # or before the horizon counted from the last bar. Drawn from that close, so the line starts at 0. (Counting from
         # today showed +0.0% for 1D on a weekend.)
         if period == "1D":
-            k = len(ser) - 2
+            pc = getattr(hist, "prev_close", {}).get(s)
+            if isinstance(pc, (list, tuple)) and len(pc) == 2 and str(pc[0])[:10] == str(ser[-1][0])[:10] and C.num(pc[1]) and float(pc[1]) > 0 and not C.is_yield(s) and not (labels.get(s) and C.currency_view(name, s)):
+                pts = [(ser[-2][0], float(pc[1])), ser[-1]]
+            else:
+                pts = ser[max(len(ser) - 2, 0):]
         else:
             ref = C.horizon_date(dt.date.fromisoformat(ser[-1][0][:10]), period).isoformat()
             k = bisect.bisect_right([p[0] for p in ser], ref) - 1
-        pts = ser[max(k, 0):]
+            pts = ser[max(k, 0):]
         base = pts[0][1]
         if not base:
             notes.append(s)
@@ -442,7 +461,12 @@ def perf_bars(preset="us_sectors", period="1D", symbols=None, **_):
         if bp:
             r = C._diff_bp(ser, period)
         else:   # a USD/XXX row ranks the foreign currency's own move (inverted quote); every return is in percent
-            r = C._ret(C._invert(ser) if C.currency_view(label, s) else C.total_return(ser, divs.get(s)) if basis == "total" else ser, period)
+            inv = C.currency_view(label, s)
+            pc = getattr(hist, "prev_close", {}).get(s) if period == "1D" and not inv else None
+            if isinstance(pc, (list, tuple)) and len(pc) == 2 and len(ser) >= 2 and str(pc[0])[:10] == str(ser[-1][0])[:10] and C.num(pc[1]) and float(pc[1]) > 0:
+                r = C.banded("daily_return", ser[-1][1] / float(pc[1]) - 1)
+            else:
+                r = C._ret(C._invert(ser) if inv else C.total_return(ser, divs.get(s)) if basis == "total" else ser, period)
             r = None if r is None else r * 100
         if r is not None:
             vals.append((label, r))
@@ -508,11 +532,12 @@ def watchlist(symbols=None, list=None, **_):  # noqa: A002
     hist = C.history(syms, dt.date.today() - dt.timedelta(days=410))
     meta = C._meta(syms)
     basis, divs = C.returns_basis(syms), getattr(hist, "divs", {})
+    prev_closes = getattr(hist, "prev_close", {})
     rows = []
     for s in syms:
         m = meta.get(s) or {}
         # an FX symbol is named as its pair (Yahoo's own name "USD/JPY", or derived): the row then shows the pair as quoted
-        row = C._quote_row(C.fx_pair_label(s) or m.get("name") or BOARD_LABELS.get(s) or s, s, hist.get(s) or [], divs.get(s) if basis == "total" else None)
+        row = C._quote_row(C.fx_pair_label(s) or m.get("name") or BOARD_LABELS.get(s) or s, s, hist.get(s) or [], divs.get(s) if basis == "total" else None, prev_closes.get(s))
         row["currency"] = m.get("currency")
         rows.append(row)
     return _dated(C._with_convention({"results": C._mark_stale(rows)}, syms, basis), [r.get("as_of") for r in rows], "No price history for these symbols right now.")

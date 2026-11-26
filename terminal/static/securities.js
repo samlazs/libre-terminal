@@ -76,7 +76,7 @@
         list.appendChild(row);
       });
       popBox = el("div", null, [list, el("div", { class: "pop-foot" }, "↑↓ move · Enter picks · type a ticker or a company name (toyota, rheinmetall, shell)")]);
-      T.popover(input, popBox, { width: opts.width || 560, onClose: function () { open = false; popBox = null; } });
+      T.popover(input, popBox, { width: opts.width || 560, onClose: function () { open = false; popBox = null; }, onEscape: opts.onCancel });
       open = true;
     }
     function pick(r) { close(); wantPick = false; opts.onPick(r); }

@@ -41,14 +41,14 @@ from .core.figures import (  # noqa: F401
     add_recession_shading, SHADE_OPTIONS,
 )
 from .markets.prices import (  # noqa: F401
-    PriceHistory, _fetch_history, HIST_TTL, HIST_STALE_TTL, PARTIAL_TTL, _HIST_REVALIDATING,
-    _sym_hist_path, _sym_hist_load, _sym_hist_save, _sym_hist_get, _bg_refresh_history, history,
+    PriceHistory, futures_prev_from_chart, _fetch_futures_prev, _fetch_history, HIST_TTL, HIST_STALE_TTL, PARTIAL_TTL, _HIST_REVALIDATING,
+    _HIST_LOCKS, _hist_lock, _sym_hist_path, _sym_hist_load, _sym_hist_pc, _sym_hist_save, _sym_hist_get, _bg_refresh_history, history,
     PRICE_ONLY, is_security, returns_basis, CONVENTION, CONVENTION_SHORT, YIELD_SYMBOLS, is_yield,
     fx_pair, fx_pair_label, _invert, _usd_rates, _ohlc,
 )
 from .markets.boards import (  # noqa: F401
     BOARDS, BOARD_OPTIONS, _resolve_board, board, null_warning, STALE_ROW_DAYS, _mark_stale,
-    _with_convention, BP_FMT, HORIZONS, currency_view, FUTURES_UNITS, FUTURES_DECIMALS, price_decimals, _quote_row,
+    _with_convention, BP_FMT, HORIZONS, currency_view, FUTURES_UNITS, FUTURES_DECIMALS, price_decimals, _day_prev, _quote_row,
     _labels, performance, perf_bars, STYLE_BOX, style_box, BOARD_LABELS, STARTER_WATCHLIST, watchlist,
     FX_MATRIX, FX_MATRIX_PAIRS, fx_matrix,
 )

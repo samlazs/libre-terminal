@@ -380,4 +380,318 @@ finally:
     c.api, v._splits, v._profile, c.history = saved
     c.reset_runtime_caches()
 
+# ---- Release 1.1: true point-in-time SEC filings, fiscal-year transitions (10-QT), contiguous quarters, chip tags
+import pathlib  # noqa: E402
+import sys  # noqa: E402
+
+from openbb_sec.utils import frames as sec_frames  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+import run_backend as rb  # noqa: E402
+
+# 1) Comparative & FY restatement (AMD FY17 ASC 606 pattern): +43M original filed 2018-02-27,
+# comparative Q1-Q3 2017 restated later in 2018, restated FY17 -33M filed 2019-02-08.
+# Neither historical dates in March 2018 nor intermediate dates before 2019-02-08 leak restated or mixed-GAAP numbers.
+amd_rows = [
+    {"span": "quarter", "begin": "2017-01-01", "end": "2017-03-31", "value": 10.0, "filed": "2017-05-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-04-01", "end": "2017-06-30", "value": 11.0, "filed": "2017-08-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-07-01", "end": "2017-09-30", "value": 12.0, "filed": "2017-11-01", "form": "10-Q"},
+    {"span": "annual", "begin": "2017-01-01", "end": "2017-12-30", "value": 43.0, "filed": "2018-02-27", "form": "10-K"},  # orig Q4 = 10 -> TTM 43
+    {"span": "quarter", "begin": "2017-01-01", "end": "2017-03-31", "value": -5.0, "filed": "2018-05-01", "form": "10-Q"},  # ASC 606 comparative
+    {"span": "quarter", "begin": "2017-04-01", "end": "2017-06-30", "value": -8.0, "filed": "2018-08-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-07-01", "end": "2017-09-30", "value": -10.0, "filed": "2018-11-01", "form": "10-Q"},
+    {"span": "annual", "begin": "2017-01-01", "end": "2017-12-30", "value": -33.0, "filed": "2019-02-08", "form": "10-K"},  # restated Q4 = -10 -> TTM -33
+]
+pit_amd = v.AsOf(v.ttm_pit(amd_rows))
+check(pit_amd.at(D(2018, 3, 15)) == ("2017-12-30", 43.0, D(2018, 2, 27)),
+      f"March 2018 sees original +43M (no lookahead to -33M): {pit_amd.at(D(2018, 3, 15))}")
+check(pit_amd.at(D(2018, 6, 1))[1] == 28.0,
+      f"May 2018 comparative Q1 restatement (-5 - 10 = -15 delta) preserves original Q4=10 without mixed-GAAP FY17 subtraction: {pit_amd.at(D(2018, 6, 1))}")
+check(pit_amd.at(D(2019, 2, 8)) == ("2017-12-30", -33.0, D(2019, 2, 8)),
+      f"FY17 restatement (-33M) applies only from its 2019-02-08 filing date: {pit_amd.at(D(2019, 2, 8))}")
+
+# 2) Mid-year 10-Q/A amendment (Q1-25 15 -> 5 filed 2025-06-15)
+am_rows = [
+    {"span": "quarter", "begin": "2024-01-01", "end": "2024-03-31", "value": 10.0, "filed": "2024-05-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2024-04-01", "end": "2024-06-30", "value": 10.0, "filed": "2024-08-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2024-07-01", "end": "2024-09-30", "value": 10.0, "filed": "2024-11-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2024-10-01", "end": "2024-12-31", "value": 10.0, "filed": "2025-02-20", "form": "10-K"},
+    {"span": "quarter", "begin": "2025-01-01", "end": "2025-03-31", "value": 15.0, "filed": "2025-05-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2025-01-01", "end": "2025-03-31", "value": 5.0, "filed": "2025-06-15", "form": "10-Q/A"},
+]
+pit_am = v.AsOf(v.ttm_pit(am_rows))
+check(pit_am.at(D(2025, 5, 20)) == ("2025-03-31", 45.0, D(2025, 5, 1))
+      and pit_am.at(D(2025, 6, 15)) == ("2025-03-31", 35.0, D(2025, 6, 15)),
+      "10-Q/A amendment updates TTM from 45 to 35 on its 2025-06-15 filing date")
+
+# 3) Instant restatement & _latest_end / _sec_needs_fallback ordering check
+inst_pts = v.instants_pit([
+    {"span": "instant", "end": "2024-12-31", "value": 100.0, "filed": "2025-02-20", "form": "10-K"},
+    {"span": "instant", "end": "2025-12-31", "value": 120.0, "filed": "2026-02-20", "form": "10-K"},
+    {"span": "instant", "end": "2024-12-31", "value": 95.0, "filed": "2026-05-01", "form": "10-K"},
+])
+check(v._latest_end(inst_pts) == "2025-12-31", f"_latest_end reads max period end (2025-12-31), not last list item ({inst_pts[-1]})")
+inst_ao = v.AsOf(inst_pts)
+check(inst_ao.at(D(2025, 6, 1))[1] == 100.0 and inst_ao.at(D(2026, 6, 1))[:2] == ("2025-12-31", 120.0),
+      "later comparative restatement of 2024-12-31 never overwrites newer 2025-12-31 balance")
+
+# 4) Fiscal-year transition (10-QT) & non-contiguous quarter stub guard
+fy_change_rows = [
+    {"span": "quarter", "begin": "2017-04-01", "end": "2017-06-30", "value": 25.0, "filed": "2017-08-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-07-01", "end": "2017-09-30", "value": 25.0, "filed": "2017-11-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-10-01", "end": "2017-12-31", "value": 25.0, "filed": "2018-02-15", "form": "10-K"},
+    {"span": "quarter", "begin": "2018-01-01", "end": "2018-03-31", "value": 25.0, "filed": "2018-05-01", "form": "10-QT"},
+]
+check(v.ttm(v.quarters(fy_change_rows)) == [("2018-03-31", 100.0, D(2018, 5, 1))]
+      and v.ttm_pit(fy_change_rows) == [("2018-03-31", 100.0, D(2018, 5, 1))],
+      "quarter-aligned 10-QT fiscal-year transition computes valid TTM")
+stub_rows = [
+    {"span": "quarter", "begin": "2017-04-01", "end": "2017-06-30", "value": 25.0, "filed": "2017-08-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-07-01", "end": "2017-09-30", "value": 25.0, "filed": "2017-11-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2017-10-01", "end": "2017-11-10", "value": 10.0, "filed": "2017-12-20", "form": "10-QT"},  # 41d gap
+    {"span": "quarter", "begin": "2017-11-11", "end": "2018-03-31", "value": 40.0, "filed": "2018-05-01", "form": "10-Q"},  # 141d gap
+]
+check(v.ttm(v.quarters(stub_rows)) == [] and v.ttm_pit(stub_rows) == [],
+      "overlapping/stretched transition stub (gap outside 60-120d) leaves TTM blank instead of summing mismatched spans")
+
+# 5) Non-mixing tag selection: AVGO switches wholesale to ProfitLoss; INTC keeps NetIncomeLoss; LRCX uses single consistent debt tag
+saved_api = c.api, v._splits
+try:
+    c.reset_runtime_caches()
+    calls = []
+    v._splits = lambda sym: []
+
+    def chip_api(base, path, **p):
+        calls.append(dict(p))
+        sym = p.get("symbol")
+        fact = p.get("fact")
+        if sym == "AVGO":
+            if fact == "NetIncomeLoss":
+                return [
+                    {"span": "quarter", "period_ending": f"2024-{m:02d}-04", "period_beginning": f"2024-{m - 2:02d}-01",
+                     "value": 1000.0, "reported_date": f"2024-{m:02d}-20", "form": "10-Q", "unit": "USD"}
+                    for m in (2, 5, 8)
+                ] + [{"span": "quarter", "period_ending": "2024-11-03", "period_beginning": "2024-08-05", "value": 4324.0, "reported_date": "2024-12-20", "form": "10-K", "unit": "USD"}]
+            if fact == "ProfitLoss":
+                return [
+                    {"span": "quarter", "period_ending": e, "period_beginning": b, "value": val, "reported_date": fd, "form": "10-Q", "unit": "USD"}
+                    for b, e, val, fd in (
+                        ("2024-11-04", "2025-02-02", 5500.0, "2025-03-12"),
+                        ("2025-02-03", "2025-05-04", 5600.0, "2025-06-10"),
+                        ("2025-05-05", "2025-08-03", 5700.0, "2025-09-10"),
+                        ("2025-08-04", "2025-11-02", 5800.0, "2025-12-18"),
+                        ("2024-11-04", "2025-02-02", 5550.0, "2026-03-11"),
+                    )
+                ]
+            if fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+                return [{"span": "quarter", "period_ending": "2025-11-02", "period_beginning": "2025-08-04", "value": 4800.0, "reported_date": "2025-12-18", "form": "10-Q", "unit": "shares"}]
+        if sym == "INTC":
+            if fact == "NetIncomeLoss":
+                return [
+                    {"span": "quarter", "period_ending": f"2026-{m:02d}-28", "period_beginning": f"2026-{m - 2:02d}-01",
+                     "value": 100.0, "reported_date": f"2026-{m:02d}-28", "form": "10-Q", "unit": "USD"}
+                    for m in (3, 6, 9, 12)
+                ]
+            if fact == "ProfitLoss":
+                return [{"span": "quarter", "period_ending": "2026-12-28", "period_beginning": "2026-10-01", "value": 999.0, "reported_date": "2027-01-25", "form": "10-Q", "unit": "USD"}]
+            if fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+                return [{"span": "quarter", "period_ending": "2026-12-28", "period_beginning": "2026-10-01", "value": 5000.0, "reported_date": "2027-01-25", "form": "10-Q", "unit": "shares"}]
+        if sym == "LRCX":
+            if fact == "LongTermDebt":
+                return [{"span": "instant", "period_ending": "2026-06-28", "value": 3722.0, "reported_date": "2026-08-07", "form": "10-K", "unit": "USD"}]
+            if fact == "LongTermDebtAndCapitalLeaseObligations":
+                return [
+                    {"span": "instant", "period_ending": "2026-06-28", "value": 3730.0, "reported_date": "2026-08-07", "form": "10-Q", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2026-09-27", "value": 3732.0, "reported_date": "2026-10-22", "form": "10-Q", "unit": "USD"},
+                ]
+        return []
+
+    c.api = chip_api
+    avgo_sf = v.sec_figures("AVGO", items=["net_income", "shares"])
+    check(any(p.get("point_in_time") == "true" for p in calls), "_sec_rows sends point_in_time='true' when point_in_time=True")
+    check(v._latest_end(avgo_sf["net_income"]) == "2025-11-02"
+          and len(avgo_sf["_annual"]["net_income"]) == 5
+          and all(r["value"] >= 5500.0 for r in avgo_sf["_annual"]["net_income"]),
+          f"AVGO switches wholesale to ProfitLoss without mixing NetIncomeLoss rows: {avgo_sf}")
+    calls.clear()
+    intc_sf = v.sec_figures("INTC", items=["net_income", "shares"])
+    check(not any(p.get("fact") == "ProfitLoss" for p in calls) and intc_sf["net_income"] == [("2026-12-28", 400.0, D(2026, 12, 28))],
+          f"INTC with current NetIncomeLoss never switches to ProfitLoss (NCI): {intc_sf}")
+    lrcx_debt = v._sec_rows("LRCX", v.INSTANT["debt"], instant=True, point_in_time=True)
+    check([(r["end"], r["value"]) for r in lrcx_debt] == [("2026-06-28", 3730.0), ("2026-09-27", 3732.0)],
+          f"LRCX picks single consistent lease-inclusive debt tag across all periods: {lrcx_debt}")
+finally:
+    c.api, v._splits = saved_api
+    c.reset_runtime_caches()
+
+# 6) run_backend.sec_pit_records + install_sec_pit_facts ProviderInterface & Fetcher integration
+import asyncio  # noqa: E402
+import dataclasses  # noqa: E402
+from openbb_core.app.provider_interface import ProviderInterface  # noqa: E402
+from openbb_sec.models.compare_company_facts import SecCompareCompanyFactsFetcher as SECFetch  # noqa: E402
+
+saved_sec = SECFetch.aextract_data, SECFetch.extract_data, sec_frames.symbol_map, sec_frames.fetch_data
+try:
+    async def fake_map(_sym):
+        return "0000002488"
+
+    async def fake_fetch(_url, _uc, _p):
+        return {
+            "cik": "0000002488", "taxonomy": "us-gaap", "tag": "NetIncomeLoss",
+            "label": "Net Income (Loss)", "description": "", "entityName": "AMD",
+            "units": {"USD": [
+                {"start": "2017-01-01", "end": "2017-12-30", "val": 43e6, "filed": "2018-02-27", "form": "10-K", "accn": "0001"},
+                {"start": "2017-01-01", "end": "2017-12-30", "val": -33e6, "filed": "2019-02-08", "form": "10-K", "accn": "0002"},
+            ]},
+        }
+
+    sec_frames.symbol_map, sec_frames.fetch_data = fake_map, fake_fetch
+    pre_names = [f.name for f in dataclasses.fields(ProviderInterface().params["CompareCompanyFacts"]["extra"])]
+    check("point_in_time" not in pre_names, "pre-warmed ProviderInterface lacks point_in_time before patch")
+    rb.install_sec_pit_facts([])
+    pi_names = [f.name for f in dataclasses.fields(ProviderInterface().params["CompareCompanyFacts"]["extra"])]
+    check("point_in_time" in pi_names, f"ProviderInterface refreshes singleton and exposes point_in_time query param: {pi_names}")
+    fetched_pit = asyncio.run(SECFetch().fetch_data({"symbol": "AMD", "fact": "NetIncomeLoss", "point_in_time": True}, {}))
+    pit_rows = getattr(fetched_pit, "result", fetched_pit)
+    check(sorted((str(d.reported_date), d.value) for d in pit_rows) == [("2018-02-27", 43e6), ("2019-02-08", -33e6)],
+          f"Fetcher.fetch_data with point_in_time=True preserves both original and restated filings: {pit_rows}")
+finally:
+    SECFetch.aextract_data, SECFetch.extract_data, sec_frames.symbol_map, sec_frames.fetch_data = saved_sec
+pit_input = [
+    # Original + unchanged comparative + reverted restatement
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-04-30", "val": 100.0, "filed": "2017-05-25", "form": "10-Q", "accn": "0001"},
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-04-30", "val": 100.0, "filed": "2018-05-24", "form": "10-Q", "accn": "0002"},  # unchanged comp -> collapsed
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-04-30", "val": 999.0, "filed": "2017-05-10", "form": "8-K", "accn": "0000"},   # 8-K dropped
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-07-30", "val": 1091.0, "filed": "2017-08-23", "form": "10-Q", "accn": "0003"},
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-07-30", "val": 583.0, "filed": "2018-08-22", "form": "10-Q", "accn": "0004"},
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-07-30", "val": 1091.0, "filed": "2019-02-21", "form": "10-K", "accn": "0005"},  # reverted -> kept!
+    # 9M + FY vintage Q4 derivation (and later comparative 9M restatement + later FY restatement)
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-10-29", "val": 1500.0, "filed": "2017-11-21", "form": "10-Q", "accn": "0006"},
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2018-01-28", "val": 2100.0, "filed": "2018-02-28", "form": "10-K", "accn": "0007"},  # orig Q4 = 600
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2017-10-29", "val": 1400.0, "filed": "2018-11-20", "form": "10-Q", "accn": "0008"},  # comp 9M restatement (no mixed-GAAP Q4!)
+    {"symbol": "NVDA", "unit": "USD", "start": "2017-01-30", "end": "2018-01-28", "val": 2050.0, "filed": "2019-02-21", "form": "10-K", "accn": "0009"},  # restated FY -> Q4 = 650
+]
+pit_out = rb.sec_pit_records(pit_input, sec_frames)
+check(not any(r.get("form") == "8-K" for r in pit_out), "sec_pit_records filters out 8-K rows")
+q1_vers = [(r["filed"], r["val"]) for r in pit_out if r.get("start") == "2017-01-30" and r.get("end") == "2017-04-30" and r.get("span") == "quarter"]
+check(q1_vers == [("2017-05-25", 100.0)], f"unchanged comparative collapsed to single original filing: {q1_vers}")
+h1_vers = [(r["filed"], r["val"]) for r in pit_out if r.get("start") == "2017-01-30" and r.get("end") == "2017-07-30" and r.get("span") == "h1"]
+check(h1_vers == [("2017-08-23", 1091.0), ("2018-08-22", 583.0), ("2019-02-21", 1091.0)],
+      f"run-length dedup preserves reverted value 1091 -> 583 -> 1091: {h1_vers}")
+q4_vers = [(r["filed"], r["val"]) for r in pit_out if r.get("end") == "2018-01-28" and r.get("span") == "quarter"]
+check(q4_vers == [("2018-02-28", 600.0), ("2019-02-21", 650.0)],
+      f"vintage Q4 derivation ignores comparative 9M restatement until restated FY arrives: {q4_vers}")
+
+# 7) Late filer (SMCI): PIT uses actual filing date even past deadline (no lookahead); D&A waits for both parts;
+#    multi-era debt backfill keeps older history without blending overlapping years; ProfitLoss disclosure & 20-F skip
+smci_rows = [
+    {"span": "quarter", "begin": "2023-07-01", "end": "2023-09-30", "value": 100.0, "filed": "2023-11-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2023-10-01", "end": "2023-12-31", "value": 100.0, "filed": "2024-02-01", "form": "10-Q"},
+    {"span": "quarter", "begin": "2024-01-01", "end": "2024-03-31", "value": 100.0, "filed": "2024-05-01", "form": "10-Q"},
+    {"span": "annual", "begin": "2023-07-01", "end": "2024-06-30", "value": 450.0, "filed": "2025-02-25", "form": "10-K"},
+]
+pit_smci = v.AsOf(v.ttm_pit(smci_rows))
+check(pit_smci.at(D(2025, 1, 15)) is None and pit_smci.at(D(2025, 2, 25)) == ("2024-06-30", 450.0, D(2025, 2, 25)),
+      f"SMCI late 10-K (2025-02-25) is not backdated to 90d deadline 2024-09-28: {pit_smci.at(D(2025, 1, 15))}")
+
+from composite.equity import filings as fl  # noqa: E402
+
+saved_rev = c.api, v._splits, v._profile, c.history
+try:
+    c.reset_runtime_caches()
+    v._splits = lambda sym: []
+    v._profile = lambda sym: {"industry": "Semiconductors", "currency": "USD"}
+    rev_calls = []
+
+    def rev_api(base, path, **p):
+        rev_calls.append(dict(p))
+        sym, fact = p.get("symbol"), p.get("fact")
+        if sym == "DACO" and fact == "OperatingIncomeLoss":
+            return [{"span": "quarter", "period_ending": f"2025-{m:02d}-30", "period_beginning": f"2025-{m - 2:02d}-01",
+                     "value": 50.0, "reported_date": f"2025-{m:02d}-30", "form": "10-Q", "unit": "USD"} for m in (3, 6, 9, 12)]
+        if sym == "DACO" and fact == "Depreciation":
+            return [{"span": "quarter", "period_ending": f"2025-{m:02d}-30", "period_beginning": f"2025-{m - 2:02d}-01",
+                     "value": 10.0, "reported_date": "2025-12-30" if m == 12 else f"2025-{m:02d}-30", "form": "10-Q", "unit": "USD"} for m in (3, 6, 9, 12)]
+        if sym == "DACO" and fact == "AmortizationOfIntangibleAssets":
+            return [{"span": "quarter", "period_ending": f"2025-{m:02d}-30", "period_beginning": f"2025-{m - 2:02d}-01",
+                     "value": 5.0, "reported_date": "2026-01-20" if m == 12 else f"2025-{m:02d}-30", "form": "10-Q", "unit": "USD"} for m in (3, 6, 9, 12)]
+        if sym == "AMD2":
+            if fact == "DebtLongtermAndShorttermCombinedAmount":
+                return [
+                    {"span": "instant", "period_ending": "2025-12-27", "value": 3000.0, "reported_date": "2026-02-01", "form": "10-K", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2026-09-26", "value": 3200.0, "reported_date": "2026-10-30", "form": "10-Q", "unit": "USD"},
+                ]
+            if fact == "LongTermDebtNoncurrent":
+                return [
+                    {"span": "instant", "period_ending": "2018-12-29", "value": 1100.0, "reported_date": "2019-02-08", "form": "10-K", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2025-12-27", "value": 2999.0, "reported_date": "2026-02-01", "form": "10-K", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2026-09-26", "value": 2999.0, "reported_date": "2026-10-30", "form": "10-Q", "unit": "USD"},
+                ]
+            if fact == "LongTermDebt":
+                return [{"span": "instant", "period_ending": "2018-12-29", "value": 9999.0, "reported_date": "2019-02-08", "form": "10-K", "unit": "USD"}]
+        if sym == "AVGO2":
+            if fact == "NetIncomeLoss":
+                return [{"span": "annual", "period_ending": "2024-11-03", "period_beginning": "2023-10-30", "value": 5895.0, "reported_date": "2024-12-20", "form": "10-K", "unit": "USD"}]
+            if fact == "ProfitLoss":
+                return [{"span": "quarter", "period_ending": e, "period_beginning": b, "value": 5000.0, "reported_date": fd, "form": "10-Q", "unit": "USD"}
+                        for b, e, fd in (("2025-11-03", "2026-02-01", "2026-03-11"), ("2026-02-02", "2026-05-03", "2026-06-09"),
+                                         ("2026-05-04", "2026-08-02", "2026-09-10"), ("2026-08-03", "2026-11-01", "2026-12-15"))]
+            if fact == "WeightedAverageNumberOfDilutedSharesOutstanding":
+                return [{"span": "quarter", "period_ending": "2026-11-01", "period_beginning": "2026-08-03", "value": 4800.0, "reported_date": "2026-12-15", "form": "10-Q", "unit": "shares"}]
+        if sym == "AMD3":
+            if fact == "DebtLongtermAndShorttermCombinedAmount":
+                return [
+                    {"span": "instant", "period_ending": "2012-12-31", "value": 500.0, "reported_date": "2013-02-15", "form": "10-K", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2023-06-30", "value": 2900.0, "reported_date": "2023-08-01", "form": "10-Q", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2023-12-31", "value": 3000.0, "reported_date": "2024-02-01", "form": "10-K", "unit": "USD"},
+                ]
+            if fact == "LongTermDebt":
+                return [
+                    {"span": "instant", "period_ending": "2018-12-31", "value": 1500.0, "reported_date": "2019-02-15", "form": "10-K", "unit": "USD"},
+                    {"span": "instant", "period_ending": "2023-09-30", "value": 2800.0, "reported_date": "2023-11-01", "form": "10-Q", "unit": "USD"},
+                ]
+        if sym == "TWOF,PEER":
+            return [
+                {"symbol": "TWOF", "span": "annual", "period_ending": "2025-12-31", "period_beginning": "2025-01-01", "value": 50.0, "form": "20-F", "unit": "USD"},
+                {"symbol": "PEER", "span": "annual", "period_ending": "2026-03-31", "period_beginning": "2025-04-01", "value": 60.0, "form": "20-F", "unit": "USD"},
+            ] if fact == "NetIncomeLoss" else []
+        if sym in ("TWOF2,USQ2", "TWOF2"):
+            if fact == "ProfitLoss":
+                raise c.CompositeError("SEC upstream down", kind="upstream")
+            return [
+                {"symbol": "TWOF2", "span": "annual", "period_ending": "2025-12-31", "period_beginning": "2025-01-01", "value": 50.0, "form": "20-F", "unit": "USD"},
+                {"symbol": "USQ2", "span": "quarter", "period_ending": "2026-09-30", "period_beginning": "2026-07-01", "value": 20.0, "form": "10-Q", "unit": "USD"},
+            ] if fact == "NetIncomeLoss" else []
+        return []
+
+    c.api = rev_api
+    da_pts = v._fill_da("DACO", [], [{"end": "2025-12-30"}], point_in_time=True)
+    check(da_pts == [("2025-12-30", 60.0, D(2026, 1, 20))],
+          f"D&A waits for both Depreciation (12-30) and Amortization (01-20) before emitting: {da_pts}")
+    amd2_debt = v._sec_rows("AMD2", v.INSTANT["debt"], instant=True, point_in_time=True)
+    check([(r["end"], r["value"]) for r in amd2_debt] == [("2018-12-29", 9999.0), ("2025-12-27", 3000.0), ("2026-09-26", 3200.0)],
+          f"Multi-era debt backfill keeps pre-2019 history without mixing inside 2025-2026: {amd2_debt}")
+    amd3_debt = v._sec_rows("AMD3", v.INSTANT["debt"], instant=True, point_in_time=True)
+    check([(r["end"], r["value"]) for r in amd3_debt] == [("2012-12-31", 500.0), ("2018-12-31", 1500.0), ("2023-06-30", 2900.0), ("2023-12-31", 3000.0)],
+          f"Multi-era gap fills 2018 across stray 2012 while omitting single-quarter 2023-09-30 from fallback tag: {amd3_debt}")
+    c.history = lambda syms, start, interval="1d": c.PriceHistory({"AVGO2": [("2026-12-10", 10.0), ("2026-12-20", 10.0)]})
+    vb_pl = v.bands("AVGO2", "pe", today=D(2026, 12, 22))
+    check("ProfitLoss" in vb_pl["convention"] and "without required filings left blank" in vb_pl["convention"],
+          f"ProfitLoss disclosure + missing-filing note vs denominator note: {vb_pl['convention']}")
+    rev_calls.clear()
+    twof = fl._facts(["TWOF", "PEER"], "net_income")
+    check("TWOF" in twof and not any(p.get("fact") == "ProfitLoss" for p in rev_calls),
+          f"Annual 20-F peers within 240d of each other never trigger optional ProfitLoss fetch: {rev_calls}")
+    pnotes = []
+    ptok = c._PARTIAL_NOTES.set(pnotes)
+    try:
+        opt_fail = fl._facts(["TWOF2", "USQ2"], "net_income")
+        check("TWOF2" in opt_fail and pnotes == [],
+              f"Failed optional ProfitLoss check on already-covered 20-F peer does not mark card partial: {pnotes}")
+    finally:
+        c._PARTIAL_NOTES.reset(ptok)
+finally:
+    c.api, v._splits, v._profile, c.history = saved_rev
+    c.reset_runtime_caches()
+
 done("test_valuation")

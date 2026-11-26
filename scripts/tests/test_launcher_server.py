@@ -207,6 +207,79 @@ check(st == 200 and json.loads(body)["dashboards"][0]["id"] == "d:b", "a rebuilt
 # origin compared without case / spaces; CSP on the page; backend URLs on the page's own host name; services
 check(req("GET", "/x/macro_chart?preset=nope", {"Origin": f"HTTP://127.0.0.1:{port}"})[0] == 502, "origin compared case-insensitively")
 check(req("GET", "/x/macro_chart?preset=nope", {"Origin": f"http://127.0.0.1:{port + 1}"})[0] == 403, "another port is another origin")
+
+# TERMINAL_EXTRA_ORIGINS: a listed desktop client (Tauri) may read widgets.json and views, never write; empty = unchanged
+import extra_origins  # noqa: E402
+
+TAURI = {"Origin": "tauri://localhost", "Sec-Fetch-Site": "cross-site"}
+check(server.EXTRA_ORIGINS == frozenset(), "no extra origins by default")
+st, hs, _ = full("GET", "/x/macro_chart?preset=nope", TAURI)
+check(st == 403 and "Access-Control-Allow-Origin" not in hs, "default: a Tauri client is refused like any other site")
+st, hs, _ = full("GET", "/widgets.json", TAURI)
+check(st == 200 and "Access-Control-Allow-Origin" not in hs, "default: widgets.json carries no CORS header")
+check(req("OPTIONS", "/x/macro_chart", {**TAURI, "Access-Control-Request-Method": "GET"})[0] == 405, "default: no preflight")
+server.EXTRA_ORIGINS = extra_origins.parse("tauri://localhost, http://tauri.localhost *")[0]
+try:
+    check(server.EXTRA_ORIGINS == frozenset({"tauri://localhost", "http://tauri.localhost"}), "the wildcard entry is dropped")
+    for o in ("tauri://localhost", "TAURI://LocalHost", "http://tauri.localhost"):
+        st, hs, body = full("GET", "/x/macro_chart?preset=nope", {"Origin": o, "Sec-Fetch-Site": "cross-site"})
+        check(st == 502 and hs.get("Access-Control-Allow-Origin") == o and "Origin" in hs.get("Vary", ""),
+              f"listed origin {o} runs a view (even cross-site); the error answer names it with Vary: Origin")
+    st, hs, body = full("GET", "/widgets.json", TAURI)
+    check(st == 200 and hs.get("Access-Control-Allow-Origin") == "tauri://localhost" and "Origin" in hs.get("Vary", "")
+          and isinstance(json.loads(body), dict), "listed origin reads widgets.json with CORS headers")
+    st, hs, _ = full("OPTIONS", "/x/macro_chart?preset=nope", {**TAURI, "Access-Control-Request-Method": "GET",
+                                                                "Access-Control-Request-Headers": "content-type"})
+    check(st == 204 and hs.get("Access-Control-Allow-Origin") == "tauri://localhost" and "GET" in hs.get("Access-Control-Allow-Methods", "")
+          and hs.get("Access-Control-Allow-Headers") == "content-type", "preflight for a view answered for the listed origin")
+    check(full("OPTIONS", "/api/state", {**TAURI, "Access-Control-Request-Method": "PUT"})[0] == 405, "no preflight for a write")
+    check(full("OPTIONS", "/x/macro_chart", {**TAURI, "Access-Control-Request-Method": "POST"})[0] == 405, "no preflight for POST on a view")
+    check(full("OPTIONS", "/x/macro_chart", {**TAURI, "Access-Control-Request-Method": "HEAD"})[0] == 405, "no preflight for HEAD (HEAD on a view is 405)")
+    check(full("OPTIONS", "/api/state", {**TAURI, "Access-Control-Request-Method": "GET"})[0] == 405, "no preflight for reading the saved layout")
+    check(full("OPTIONS", "/api/dashboards", {**TAURI, "Access-Control-Request-Method": "GET"})[0] == 405, "no preflight outside widgets.json and views")
+    check(full("OPTIONS", "/x/macro_chart", {**TAURI, "Host": f"rebind.example:{port}", "Access-Control-Request-Method": "GET"})[0] == 405,
+          "no preflight under a foreign Host")
+    # a folded (obs-fold) request header is never echoed raw into the preflight answer
+    sk = socket.create_connection(("127.0.0.1", port), timeout=20)
+    sk.sendall((f"OPTIONS /x/macro_chart HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: tauri://localhost\r\n"
+                "Access-Control-Request-Method: GET\r\nAccess-Control-Request-Headers: x-a,\r\n x-b\r\nConnection: close\r\n\r\n").encode())
+    raw_ans = b""
+    while chunk := sk.recv(65536):
+        raw_ans += chunk
+    sk.close()
+    head = raw_ans.split(b"\r\n\r\n", 1)[0]
+    check(head.startswith(b"HTTP/1.1 204") and b"Access-Control-Allow-Headers: x-a, x-b\r\n" in head
+          and not any(line[:1] in (b" ", b"\t") for line in head.split(b"\r\n")), "allowed headers rebuilt on one line")
+    for path in ("/api/dashboards", "/api/config", "/api/services"):
+        check("Access-Control-Allow-Origin" not in full("GET", path, TAURI)[1], f"no CORS header for a listed origin on {path}")
+    for o in ("https://evil.example", "tauri://evil", "http://tauri.localhost:8080", "null"):
+        st, hs, _ = full("GET", "/x/macro_chart?preset=nope", {"Origin": o})
+        check(st == 403 and "Access-Control-Allow-Origin" not in hs, f"unlisted origin {o} still refused")
+    st, hs, _ = full("GET", "/widgets.json", {"Origin": "https://evil.example"})
+    check("Access-Control-Allow-Origin" not in hs, "unlisted origin gets no CORS header on widgets.json")
+    # read only: the saved layout, service restarts and the client log stay this page's
+    st, hs, _ = full("GET", "/api/state", TAURI)
+    check(st == 403 and "Access-Control-Allow-Origin" not in hs, "listed origin cannot read the saved layout")
+    st, hs, _ = full("PUT", "/api/state", {**TAURI, "Content-Type": "application/json"}, json.dumps({"v": 2, "dashboards": {}}).encode())
+    check(st == 403 and "Access-Control-Allow-Origin" not in hs, "listed origin cannot write the saved layout")
+    check(full("POST", "/api/services/restart", TAURI, b"{}")[0] == 403, "listed origin cannot restart services")
+    check(full("POST", "/api/clientlog", TAURI, b"{}")[0] == 403, "listed origin cannot write the client log")
+    check(full("GET", "/x/macro_chart?preset=nope", {**TAURI, "Host": f"rebind.example:{port}"})[0] == 403, "the Host check still applies")
+    # the page itself is unaffected and its answers carry no CORS header
+    st, hs, _ = full("GET", "/x/macro_chart?preset=nope", {"Origin": f"http://127.0.0.1:{port}"})
+    check(st == 502 and "Access-Control-Allow-Origin" not in hs, "the page's own view calls are unchanged")
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=20)      # one keep-alive connection: no CORS carry-over
+    c.request("GET", "/widgets.json", headers={"Host": f"127.0.0.1:{port}", **TAURI})
+    r1 = c.getresponse()
+    r1.read()
+    c.request("GET", "/api/config", headers={"Host": f"127.0.0.1:{port}"})   # a route that never sets the CORS origin itself
+    r2 = c.getresponse()
+    r2.read()
+    check(r1.getheader("Access-Control-Allow-Origin") == "tauri://localhost" and r2.getheader("Access-Control-Allow-Origin") is None,
+          "the CORS origin is reset between requests on one connection")
+    c.close()
+finally:
+    server.EXTRA_ORIGINS = frozenset()
 st, hs, _ = full("GET", "/")
 csp = hs.get("Content-Security-Policy", "")
 check("script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0] and "object-src 'none'" in csp

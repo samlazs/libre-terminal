@@ -1586,16 +1586,25 @@
         control.classList.add("group-dd");
       } else {
         var isSym = g.paramName === "symbol";
-        control = el("input", { type: "text", value: g.value == null ? "" : Array.isArray(g.value) ? g.value.join(",") : g.value, spellcheck: "false", autocomplete: "off",
-          placeholder: isSym ? "ticker or name" : "", title: isSym ? "Type a ticker or a company name (toyota, 7203.T, SHEL.L) and pick a match. Every linked widget on this dashboard follows." : "Type a value and press Enter. Every linked widget on this dashboard follows." });
+        control = el("input", { type: "text", "data-group-param": g.paramName, value: g.value == null ? "" : Array.isArray(g.value) ? g.value.join(",") : g.value, spellcheck: "false", autocomplete: "off",
+          placeholder: isSym ? "ticker or name" : "", title: isSym ? "Type a ticker or a company name (toyota, 7203.T, SHEL.L) and pick a match. Press s from anywhere to focus. Every linked widget on this dashboard follows." : "Type a value and press Enter. Every linked widget on this dashboard follows." });
+        function cancelGroupInput() {
+          control.value = g.value == null ? "" : Array.isArray(g.value) ? g.value.join(",") : g.value;
+          T.closePop();
+          control.blur();
+        }
         if (isSym) {
           // names are looked up as you type; Enter takes the best match
           T.sec.suggest(control, {
             onPick: function (r) { control.value = r.symbol; T.sec.remember(r.symbol, r.name, r.type); control.blur(); if (r.symbol !== g.value) setGroup(g, r.symbol); },
-            onRaw: function (q) { control.blur(); setGroup(g, q); }
+            onRaw: function (q) { control.blur(); setGroup(g, q); },
+            onCancel: cancelGroupInput
           });
         }
-        control.addEventListener("keydown", function (e) { if (e.key === "Enter") control.blur(); });
+        control.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") control.blur();
+          else if (e.key === "Escape") { cancelGroupInput(); e.stopPropagation(); }
+        });
         control.addEventListener("change", function () { var v = control.value.trim(); if ((isSym ? v.toUpperCase() : v) !== (g.value || "")) setGroup(g, v); });
       }
       box.appendChild(el("div", { class: "group", title: "Drives every linked widget on this dashboard" }, [el("label", null, g.name), control]));
@@ -2193,7 +2202,9 @@
     var box = el("div", { class: "modal help-box" }, [
       el("div", { class: "help-head" }, [el("b", null, (T.product || "Libre Terminal") + (T.version ? " v" + T.version : "") + ": quick guide"), el("button", { class: "icon-btn", type: "button", title: "Close (Esc)", onclick: function () { m.close(); } }, "✕")]),
       el("div", { class: "help-body" }, [
-        sec("Keyboard", [["/ or Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"], ["Ctrl+K", "Add a widget from the library"],
+        sec("Keyboard", [["/ or Ctrl+G", "Go to a ticker, company name, dashboard, tab or dataset"],
+          ["s", "Change the Symbol on the current page without jumping to another dashboard"],
+          ["Ctrl+K", "Add a widget from the library"],
           ["[  ]", "Previous / next tab"], ["Esc", "Close a maximized card, menu or dialog"], ["?", "This guide"]]),
         sec("Find things", [["Search", "Type a ticker (AAPL, 7203.T, SHEL.L) or company name (toyota) for Company; an SEC CIK (0000320193) or an equity CUSIP (037833100) for its listing; a topic (cpi, sofr, options) for that card; a bond CUSIP (037833CJ7) for Bond Lookup; or FRED:<series> (FRED:DGS10) for the Compare chart."],
           ["Pickers", "Symbol, Country and Bank boxes at the top drive linked cards. Clicking a ticker, country, CUSIP, CRD, RSSD or bill id in a table fills them too."]]),
@@ -2336,6 +2347,10 @@
       else if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && !document.querySelector(".modal-bg")) {
         if (e.key === "?") { e.preventDefault(); openHelp(); }
         else if (e.key === "/") { e.preventDefault(); var g = $("goto"); if (g) { g.focus(); g.select(); } }
+        else if (e.key.toLowerCase() === "s") {
+          var symIn = document.querySelector('#groups input[data-group-param="symbol"]');
+          if (symIn) { e.preventDefault(); symIn.focus(); symIn.select(); }
+        }
         else if ((e.key === "[" || e.key === "]") && S.cur && S.cur.tabs.length > 1) {      // previous / next tab
           var ts = S.cur.tabs, i = ts.map(function (t) { return t.id; }).indexOf(S.tabId);
           openTab(ts[(i + (e.key === "]" ? 1 : -1) + ts.length) % ts.length].id);

@@ -42,6 +42,7 @@ _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _RETRY_DELAYS = (0.4, 1.0)          # sleep before the 2nd, 3rd attempt (tests set zeros; the last value repeats)
 _NO_RETRY_RE = re.compile(r"(?:[?&]provider=(?:oecd|nasdaq)(?:&|$)|/(?:oecd|nasdaq)/|sdmx\.oecd\.org|stats\.oecd\.org|api\.nasdaq\.com)", re.I)
 DEFAULT_UA = "Mozilla/5.0 (compatible; terminal-ui)"
+BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 COOLDOWN_CAP = 600.0                # seconds: a Retry-After longer than this is not believed
 _NET = "net"                        # in retry_on: connection errors and timeouts
 # an answer the source cut off or garbled while it was read (RemoteDisconnected is a BadStatusLine): network failures.
@@ -77,6 +78,9 @@ PROVIDERS = {
     # Google News answers 429 to a burst (probed: the 4th query within a few seconds): one at a time, 2.5 s apart
     "google_news": dict(timeout=15, attempts=1, retry_on=(), max_concurrency=1, min_interval=2.5, cooldown_on_429=300,
                         down_for=0, ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"),
+    # Yahoo v8 single-day chart metadata (active futures settlement base): bounded concurrency, no retries
+    "yahoo_chart": dict(timeout=8, attempts=1, retry_on=(), max_concurrency=6, min_interval=0.0,
+                        cooldown_on_429=60, down_for=0, ua=BROWSER_UA),
     "default":     dict(timeout=60, attempts=2, retry_on=(408, 502, 503, 504, _NET), max_concurrency=None, min_interval=0.0,
                         cooldown_on_429=60, down_for=0, ua=DEFAULT_UA),
 }
@@ -405,9 +409,6 @@ def _ssl_context():
             except Exception:  # noqa: BLE001
                 C._SSL.append(ssl.create_default_context())
         return C._SSL[0]
-
-
-BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 
 def _download(url, timeout=60, data=None, ua=None):

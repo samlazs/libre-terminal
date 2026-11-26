@@ -161,7 +161,7 @@ The News dashboard separates curated market headlines (folding duplicate wire st
 - **Source attribution on every card:** Each card names its source in the header (`Source: SEC`). Click it to switch to another provider for the same data or open the original source page. Cards that depend on a ticker route automatically to the exchange or provider that covers it (U.S. options via Yahoo/Nasdaq/Cboe, Canadian options via TMX, crypto options via Deribit; U.S. ETF holdings via Nasdaq, Canadian via TMX).
 - **Chart and table controls:** Change date ranges (`1M` to `Max`), switch transforms (`Level`, `YoY %`, `Indexed`, `Seasonal` against the 5-year range), or show and hide table columns without editing your saved layout. Export any table to CSV (with its source line) or save any chart as PNG.
 - **Custom dashboards:** Build your own tabs or dashboards with `+`, rearrange cards freely, and restore any built-in dashboard to its original layout through **⋯ > Reset to default layout**.
-- **Shortcuts and status:** Press `?` to view keyboard shortcuts (`/` focuses search, `[` and `]` move between tabs, double-clicking a card header maximizes it). Open **Data Explorers > Data status** to see which sources are down upstream and which API keys are configured.
+- **Shortcuts and status:** Press `?` to view keyboard shortcuts (`/` focuses search, `s` changes the symbol on the current page, `[` and `]` move between tabs, double-clicking a card header maximizes it). Open **Data Explorers > Data status** to see which sources are down upstream and which API keys are configured.
 
 ## Official sovereign yield curves
 
@@ -234,6 +234,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 - **Skip the first-launch wait:** `Start.cmd --no-wait` opens the browser right away while data finishes loading in the background.
 - **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` when setting custom ports). It adds 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) to the same dashboards. An optional free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) fills in the FMP cards.
 - **Custom local folder:** Set `TERMINAL_LOCAL_DIR` before launching. Services bind to `127.0.0.1` only.
+- **Let a trusted desktop app use the terminal's data:** Set `TERMINAL_EXTRA_ORIGINS` before launching to the app's origin, for example `setx TERMINAL_EXTRA_ORIGINS "tauri://localhost http://tauri.localhost"` for a Tauri app (then open a new window and start the terminal). Only exact origins are accepted (no `*`). Listed apps can read data and views but cannot change your saved layout or restart services. Leave it unset unless you trust the app.
 
 ### macOS / Linux (experimental, untested)
 

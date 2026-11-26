@@ -27,9 +27,9 @@ OPTIONS = [{"label": v.replace(" (TTM)", ""), "value": k} for k, v in MEASURES.i
 WINDOW_OPTIONS = [{"label": f"{y}Y", "value": str(y)} for y in (3, 5, 10)]
 YEARS = 5
 YAHOO_LAG = 90
-DEADLINE = {"10-Q": 45, "10-K": 90, "20-F": 120, "40-F": 120, "DEF 14A": 90}
-VALID_FORMS = ("10-Q", "10-K", "20-F", "40-F", "DEF 14A")
-ANNUAL_FORMS = ("10-K", "20-F", "40-F", "DEF 14A")
+DEADLINE = {"10-Q": 45, "10-QT": 45, "10-K": 90, "10-KT": 90, "20-F": 120, "40-F": 120, "DEF 14A": 90}
+VALID_FORMS = ("10-Q", "10-QT", "10-K", "10-KT", "20-F", "40-F", "DEF 14A")
+ANNUAL_FORMS = ("10-K", "10-KT", "20-F", "40-F", "DEF 14A")
 MAX_MULT = {"pe": 250.0, "ev_ebitda": 150.0, "ev_sales": 100.0, "ps": 100.0, "pb": 100.0}
 MAX_AGE = 520
 TRANSIENT_ERRS = ("timed out", "did not answer in time", "not reachable", "connection refused", "http 429", "http 502", "http 503", "http 504", "rate limit")
@@ -44,13 +44,14 @@ TAGS = {
                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"],
     "tax": ["IncomeTaxExpenseBenefit"],
 }
+NET_INCOME_FALLBACK = ["ProfitLoss"]
 DA_DEP_TAGS = ["Depreciation"]
 DA_AMORT_TAGS = ["AmortizationOfIntangibleAssets"]
 INSTANT_SHARES_TAGS = ["CommonStockSharesOutstanding"]
 INSTANT = {
     "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
     "assets": ["Assets"],
-    "debt": ["DebtLongtermAndShorttermCombinedAmount", "LongTermDebt", "LongTermDebtNoncurrent"],
+    "debt": ["DebtLongtermAndShorttermCombinedAmount", "LongTermDebt", "LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations"],
     "cash": ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
 }
 SEC_SRC = C.src("SEC", "XBRL company facts (quarterly and annual figures with their filing dates)", "https://www.sec.gov/edgar/search/")
@@ -83,25 +84,92 @@ def quarters(rows):
 
 
 def ttm(qs):
-    """[(end, value, available)] quarters -> trailing-twelve-month sums of four consecutive quarters (ends < 300 days apart)."""
+    """[(end, value, available)] quarters -> trailing-twelve-month sums of four contiguous quarters (60-120 d gaps, span < 300 d)."""
     out = []
     for i in range(3, len(qs)):
         w = qs[i - 3:i + 1]
-        if (_d(w[-1][0]) - _d(w[0][0])).days < 300:
+        if all(60 <= (_d(w[j][0]) - _d(w[j - 1][0])).days <= 120 for j in range(1, 4)) and (_d(w[-1][0]) - _d(w[0][0])).days < 300:
             out.append((w[-1][0], sum(x[1] for x in w), max(x[2] for x in w)))
     return out
 
 
+def _versioned_avail(rows, span_kind):
+    """Assign point-in-time availability dates per period end from each filing's reported date (deadline only if missing)."""
+    by_end = {}
+    for r in rows:
+        by_end.setdefault(r["end"], []).append(r)
+    out = []
+    for end, vers in by_end.items():
+        vers = sorted(vers, key=lambda r: r.get("filed") or "")
+        for r in vers:
+            kind = span_kind(r) if callable(span_kind) else span_kind
+            avail = _d(r["filed"]) if r.get("filed") else available(end, None, r.get("form"), kind)
+            out.append((r, avail))
+    return out
+
+
+def _latest_end(pts):
+    return max((p[0] for p in pts), default="")
+
+
+def _distinct_ends(pts):
+    return len({p[0] for p in pts})
+
+
+def ttm_pit(rows):
+    """Point-in-time TTM series [(end, value, available)] preserving original filings and applying restatements only from their filing date."""
+    q_vers = _versioned_avail([r for r in rows if r.get("span") == "quarter"], "quarter")
+    a_vers = _versioned_avail([r for r in rows if r.get("span") == "annual" and r.get("begin")], "annual")
+    events = {}
+    for r, avail in q_vers:
+        events.setdefault(avail, []).append(("q", r["end"], r.get("begin") or "", float(r["value"])))
+    for r, avail in a_vers:
+        events.setdefault(avail, []).append(("a", r["end"], r.get("begin") or "", float(r["value"])))
+    cur_q, cur_a, derived_q, out = {}, {}, {}, []
+    for t in sorted(events):
+        new_a = []
+        for kind, end, begin, val in events[t]:
+            if kind == "q":
+                cur_q[end] = (begin, val)
+                derived_q.pop(end, None)
+            else:
+                cur_a[end] = (begin, val)
+                new_a.append(end)
+        for a_end in new_a:
+            if a_end in cur_q:
+                continue
+            a_begin, a_val = cur_a[a_end]
+            if not a_begin:
+                continue
+            inside = sorted((e, v) for e, (b, v) in cur_q.items() if b >= a_begin and e <= a_end)
+            if len(inside) == 3 and (_d(a_end) - _d(inside[-1][0])).days > 60:
+                derived_q[a_end] = (inside[-1][0], a_val - sum(v for _, v in inside))
+        eff_q = {**derived_q, **cur_q}
+        w = sorted(eff_q)[-4:]
+        if len(w) == 4 and all(60 <= (_d(w[j]) - _d(w[j - 1])).days <= 120 for j in range(1, 4)) and (_d(w[-1]) - _d(w[0])).days < 300:
+            total = sum(eff_q[e][1] for e in w)
+            if not out or out[-1][0] != w[-1] or out[-1][1] != total:
+                out.append((w[-1], total, t))
+    return out
+
+
 def instants(rows):
-    return sorted((r["end"], r["value"], available(r["end"], r.get("filed"), r.get("form"), "annual" if str(r.get("form", "")).startswith(("10-K", "20-F", "40-F")) else "quarter"))
+    return sorted((r["end"], r["value"], available(r["end"], r.get("filed"), r.get("form"), "annual" if str(r.get("form", "")).startswith(ANNUAL_FORMS) else "quarter"))
                   for r in rows if r["span"] == "instant")
+
+
+def instants_pit(rows):
+    """Point-in-time instant balance-sheet series [(end, value, available)] with restatements effective on their filing date."""
+    vers = _versioned_avail([r for r in rows if r.get("span") == "instant"],
+                            lambda r: "annual" if str(r.get("form", "")).startswith(ANNUAL_FORMS) else "quarter")
+    return sorted(((r["end"], float(r["value"]), avail) for r, avail in vers), key=lambda p: (p[2], p[0]))
 
 
 class AsOf:
     """The latest-period figure known on a date: among the figures available by then, the one with the latest period end."""
 
     def __init__(self, pts):
-        self.pts = sorted(pts, key=lambda p: p[2])
+        self.pts = sorted(pts, key=lambda p: (p[2], p[0]))
         self.keys = [p[2] for p in self.pts]
         self.best = []
         b = None
@@ -187,34 +255,87 @@ def multiples(closes, shares, figures, measure):
 
 
 # ---------------------------------------------------------------- data
-def _sec_rows(sym, tags, instant=False, cache_key=None):
-    """[{span, end, begin, value, filed, form}] for one line item, the first tag listed winning a period; 12 hours on disk."""
+def _parse_sec_tag_rows(rows, instant, point_in_time):
+    tag_rows = {}
+    for r in rows or []:
+        base_form = str(r.get("form") or "").split("/")[0]
+        if base_form and base_form not in VALID_FORMS:
+            continue
+        span = "instant" if instant else r.get("span")
+        if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
+            continue
+        if r.get("value") is None or not r.get("period_ending") or span not in ("quarter", "annual", "instant") or str(r.get("unit") or "USD") not in ("USD", "shares"):
+            continue
+        key = (span, str(r["period_ending"])[:10])
+        filed = str(r.get("reported_date") or "")[:10]
+        rec = {
+            "span": span, "end": key[1], "begin": str(r.get("period_beginning") or "")[:10],
+            "value": float(r["value"]), "filed": filed, "form": str(r.get("form") or ""),
+        }
+        if point_in_time:
+            tag_rows.setdefault(key, {})[filed] = rec
+        else:
+            tag_rows.setdefault(key, {}).setdefault("", rec)
+    return tag_rows
+
+
+def _sec_rows(sym, tags, instant=False, cache_key=None, point_in_time=False):
+    """[{span, end, begin, value, filed, form}] for one line item; 12 hours on disk."""
     def run():
-        merged, err = {}, None
+        merged, seen_keys, by_tag, err = {}, set(), [], None
+        single_tag = (tags == INSTANT["debt"])
         for tag in tags:
             try:
-                rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=sym, fact=tag, instantaneous="true" if instant else None)
+                api_kw = {"point_in_time": "true"} if point_in_time else {}
+                rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=sym, fact=tag,
+                             instantaneous="true" if instant else None, **api_kw)
             except C.CompositeError as e:
                 if getattr(e, "transient", False) or any(w in str(e).lower() for w in TRANSIENT_ERRS):
                     raise
                 err = e
                 continue
-            for r in rows or []:
-                base_form = str(r.get("form") or "").split("/")[0]
-                if base_form and base_form not in VALID_FORMS:
-                    continue
-                span = "instant" if instant else r.get("span")
-                if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
-                    continue
-                if r.get("value") is None or not r.get("period_ending") or span not in ("quarter", "annual", "instant") or str(r.get("unit") or "USD") not in ("USD", "shares"):
-                    continue
-                merged.setdefault((span, str(r["period_ending"])[:10]), {
-                    "span": span, "end": str(r["period_ending"])[:10], "begin": str(r.get("period_beginning") or "")[:10],
-                    "value": float(r["value"]), "filed": str(r.get("reported_date") or "")[:10], "form": str(r.get("form") or "")})
+            tag_rows = _parse_sec_tag_rows(rows, instant, point_in_time)
+            if single_tag:
+                if tag_rows:
+                    by_tag.append(tag_rows)
+                continue
+            for key, vers in tag_rows.items():
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    merged[key] = list(vers.values())
+        if single_tag and by_tag:
+            max_end = max(k[1] for tr in by_tag for k in tr)
+            chosen = next(tr for tr in by_tag if (_d(max_end) - _d(max(k[1] for k in tr))).days <= 60)
+            merged = {key: list(vers.values()) for key, vers in chosen.items()}
+            covered = {k[1] for k in chosen}
+            cov_sorted = sorted(covered)
+
+            def _in_era_gap(end):
+                if end in covered:
+                    return False
+                prv = max((c for c in cov_sorted if c < end), default=None)
+                nxt = min((c for c in cov_sorted if c > end), default=None)
+                return prv is None or nxt is None or (_d(nxt) - _d(prv)).days > 400
+
+            while True:
+                # Backfill uncovered historical eras (including multi-year gaps behind stray old filings on the current tag)
+                # without patching single missing quarters inside an already-covered era from a different debt convention.
+                pre_tags = [{k: v for k, v in tr.items() if _in_era_gap(k[1])} for tr in by_tag]
+                pre_tags = [pt for pt in pre_tags if pt]
+                if not pre_tags:
+                    break
+                pre_max = max(k[1] for pt in pre_tags for k in pt)
+                pre_chosen = next(pt for pt in pre_tags if (_d(pre_max) - _d(max(k[1] for k in pt))).days <= 60)
+                for key, vers in pre_chosen.items():
+                    merged[key] = list(vers.values())
+                    covered.add(key[1])
+                cov_sorted = sorted(covered)
         if not merged and err is not None and "CIK" in str(err):
             raise err
-        return sorted(merged.values(), key=lambda r: (r["end"], r["span"]))
-    return C.cached_disk(C.disk_name("secval3_", sym + "_" + (cache_key or tags[0])), 12 * 3600, run)
+        flat = [rec for vers in merged.values() for rec in vers]
+        return sorted(flat, key=lambda r: (r["end"], r["span"], r["filed"]))
+    prefix = "secval8_pit_" if point_in_time else "secval6_"
+    return C.cached_disk(C.disk_name(prefix, sym + "_" + (cache_key or tags[0])), 12 * 3600, run)
 
 
 class SplitsUnavailable(C.CompositeError):
@@ -235,26 +356,59 @@ def _splits(sym):
     return C.cached_disk(C.disk_name("splits_", sym), 7 * 86400, run)
 
 
-def _fill_da(sym, da_ttm, oi_rows):
+def _fill_da(sym, da_ttm, oi_rows, point_in_time=True):
     """Fill missing or stale combined D&A periods with SEC Depreciation + AmortizationOfIntangibleAssets."""
     oi_latest = max((r["end"] for r in oi_rows or ()), default="")
-    da_latest = da_ttm[-1][0] if da_ttm else ""
+    da_latest = _latest_end(da_ttm)
     if da_ttm and (not oi_latest or (_d(oi_latest) - _d(da_latest)).days <= 180):
         return da_ttm
     with C.cf.ThreadPoolExecutor(max_workers=2) as ex:
-        dep_f = ex.submit(_sec_rows, sym, DA_DEP_TAGS, False, "da_dep")
-        amo_f = ex.submit(_sec_rows, sym, DA_AMORT_TAGS, False, "da_amort")
-        dep_map = {e: (v, a) for e, v, a in ttm(quarters(dep_f.result()))}
-        amo_map = {e: (v, a) for e, v, a in ttm(quarters(amo_f.result()))}
-    by_end = {e: (v, a) for e, v, a in da_ttm}
-    for e in sorted(set(dep_map) | set(amo_map)):
-        if e in by_end:
+        dep_f = ex.submit(_sec_rows, sym, DA_DEP_TAGS, False, "da_dep", point_in_time)
+        amo_f = ex.submit(_sec_rows, sym, DA_AMORT_TAGS, False, "da_amort", point_in_time)
+        dep_ttm = ttm_pit(dep_f.result()) if point_in_time else ttm(quarters(dep_f.result()))
+        amo_ttm = ttm_pit(amo_f.result()) if point_in_time else ttm(quarters(amo_f.result()))
+    have_ends = {e for e, _, _ in da_ttm}
+    events = {}
+    for e, v, a in dep_ttm:
+        if e not in have_ends:
+            events.setdefault(a, []).append(("d", e, v))
+    for e, v, a in amo_ttm:
+        if e not in have_ends:
+            events.setdefault(a, []).append(("a", e, v))
+    dep_ends = {e for e, _, _ in dep_ttm}
+    amo_ends = {e for e, _, _ in amo_ttm}
+    cur_d, cur_a = {}, {}
+    extra = []
+    for t in sorted(events):
+        touched = set()
+        for kind, e, v in events[t]:
+            (cur_d if kind == "d" else cur_a)[e] = v
+            touched.add(e)
+        for e in sorted(touched):
+            if (e in dep_ends and e not in cur_d) or (e in amo_ends and e not in cur_a):
+                continue
+            extra.append((e, cur_d.get(e, 0.0) + cur_a.get(e, 0.0), t))
+    return sorted(list(da_ttm) + extra, key=lambda p: (p[2], p[0]))
+
+
+def _share_points(rows, splits):
+    """Split-adjusted share count [(end, value, available)] preserving filing versions while preferring 10-Q/10-QT quarters."""
+    by_end = {}
+    for r in rows:
+        if r["value"] <= 0:
             continue
-        dv, da_ = dep_map.get(e, (0.0, None))
-        av, aa_ = amo_map.get(e, (0.0, None))
-        avail = max(x for x in (da_, aa_) if x is not None)
-        by_end[e] = (dv + av, avail)
-    return sorted((e, v, a) for e, (v, a) in by_end.items())
+        is_q = r["span"] == "quarter" and not r["form"].startswith(ANNUAL_FORMS)
+        is_a = r["span"] == "annual"
+        is_i = r["span"] == "instant"
+        if not (is_q or is_a or is_i):
+            continue
+        by_end.setdefault(r["end"], []).append((0 if is_q else 1 if is_i else 2, r))
+    chosen = []
+    for vers in by_end.values():
+        best_rank = min(rank for rank, _ in vers)
+        chosen.extend(r for rank, r in vers if rank == best_rank)
+    ver_pts = _versioned_avail(chosen, lambda r: "annual" if r["form"].startswith(ANNUAL_FORMS) else "quarter")
+    return [(r["end"], r["value"] * split_factor(splits, r["filed"] or r["end"]), avail) for r, avail in ver_pts]
 
 
 def sec_figures(sym, items=None):
@@ -262,18 +416,29 @@ def sec_figures(sym, items=None):
     all_names = list(TAGS) + list(INSTANT)
     names = [k for k in all_names if items is None or k in items]
     with C.cf.ThreadPoolExecutor(max_workers=4) as ex:
-        got = dict(zip(names, ex.map(lambda k: _sec_rows(sym, INSTANT.get(k) or TAGS[k], k in INSTANT), names)))
+        got = dict(zip(names, ex.map(lambda k: _sec_rows(sym, INSTANT.get(k) or TAGS[k], k in INSTANT, point_in_time=True), names)))
     if not any(got.values()):
         raise C.CompositeError(f"SEC has no XBRL figures for {sym}.")
     out = {}
     for k in ("revenue", "net_income", "operating_income"):
         if k in got:
-            out[k] = ttm(quarters(got[k]))
+            out[k] = ttm_pit(got[k])
     if "da" in got:
-        out["da"] = _fill_da(sym, ttm(quarters(got["da"])), got.get("operating_income"))
+        out["da"] = _fill_da(sym, ttm_pit(got["da"]), got.get("operating_income"), point_in_time=True)
     for k in INSTANT:
         if k in got:
-            out[k] = instants(got[k])
+            out[k] = instants_pit(got[k])
+    if "net_income" in got:
+        ref_end = max([_latest_end(pts) for k, pts in out.items() if k != "net_income" and isinstance(pts, list) and pts]
+                      + [r["end"] for k, rs in got.items() if k != "net_income" for r in rs], default="")
+        ni_end = _latest_end(out["net_income"])
+        if not out["net_income"] or (ref_end and (_d(ref_end) - _d(ni_end)).days > 180):
+            pl_rows = _sec_rows(sym, NET_INCOME_FALLBACK, cache_key="net_income_pl", point_in_time=True)
+            pl_ttm = ttm_pit(pl_rows)
+            if pl_ttm and (not out["net_income"] or _latest_end(pl_ttm) > ni_end):
+                out["net_income"] = pl_ttm
+                got["net_income"] = pl_rows
+                out["_pl"] = True
     if "shares" in got:
         try:
             splits = _splits(sym)                     # a saved list is served (flagged stale) when the fetch fails
@@ -283,22 +448,17 @@ def sec_figures(sym, items=None):
                 "share counts cannot be split-adjusted (a wrong per-share basis would shift the bands). Reload in a minute.",
                 kind=C.kind_of(e) if C.kind_of(e) in ("rate_limited", "timeout", "unavailable") else "upstream",
                 retry_after=e.retry_after) from None
-        sh = {}
         # the backend derives a fiscal Q4 "quarter" as annual minus three quarters, which is meaningless for an average share
-        # count (AAPL Q4 2026: -30 million): quarters from 10-Q filings only, and the annual average at the fiscal year end
-        for r in got["shares"]:
-            tenq = r["span"] == "quarter" and not r["form"].startswith(ANNUAL_FORMS)
-            if r["value"] > 0 and (tenq or (r["span"] == "annual" and r["end"] not in sh)):
-                sh[r["end"]] = (r["value"] * split_factor(splits, r["filed"] or r["end"]), available(r["end"], r["filed"], r["form"], r["span"]))
-        latest_other = max((pts[-1][0] for k, pts in out.items() if pts), default="")
-        sh_latest = max(sh, default="")
-        if not sh or (latest_other and (_d(latest_other) - _d(sh_latest)).days > 180):
-            for r in _sec_rows(sym, INSTANT_SHARES_TAGS, instant=True, cache_key="shares_inst"):
-                if r["value"] > 0 and r["end"] not in sh:
-                    form = str(r.get("form") or "")
-                    sh[r["end"]] = (r["value"] * split_factor(splits, r["filed"] or r["end"]),
-                                    available(r["end"], r["filed"], form, "annual" if form.startswith(ANNUAL_FORMS) else "quarter"))
-        out["shares"] = sorted((e, v, a) for e, (v, a) in sh.items())
+        # count (AAPL Q4 2026: -30 million): quarters from 10-Q/10-QT filings only, and the annual average at the fiscal year end
+        sh_pts = _share_points(got["shares"], splits)
+        latest_other = max((_latest_end(pts) for k, pts in out.items() if isinstance(pts, list) and pts), default="")
+        sh_latest = _latest_end(sh_pts)
+        if not sh_pts or (latest_other and (_d(latest_other) - _d(sh_latest)).days > 180):
+            have_ends = {p[0] for p in sh_pts}
+            inst_rows = [r for r in _sec_rows(sym, INSTANT_SHARES_TAGS, instant=True, cache_key="shares_inst", point_in_time=True)
+                         if r["end"] not in have_ends]
+            sh_pts.extend(_share_points(inst_rows, splits))
+        out["shares"] = sorted(sh_pts, key=lambda p: (p[2], p[0]))
     out["_annual"] = got
     return out
 
@@ -403,7 +563,7 @@ def _figures(sym, px_ccy, prof=None, items=None, last_px=None):
     if "." not in sym and not sym.startswith("^"):
         try:
             figs = sec_figures(sym, items=items)
-            return figs, "SEC filings (each figure from its filing date or deadline)", [SEC_SRC, YAHOO_SRC], True
+            return figs, "SEC filings (point-in-time by filing date)", [SEC_SRC, YAHOO_SRC], True
         except SplitsUnavailable:
             raise                                     # blank with the note, never a silent switch of basis
         except C.CompositeError as e:
@@ -437,9 +597,9 @@ def _sec_needs_fallback(figs, measure, today, closes_len):
     if any(not s for s in cash_need):
         return True
     all_req = [figs["shares"]] + series_list + cash_need
-    if any((today - _d(s[-1][0])).days > MAX_AGE for s in all_req):
+    if any((today - _d(_latest_end(s))).days > MAX_AGE for s in all_req):
         return True
-    if closes_len > 100 and any(len(s) < 4 for s in series_list + [figs["shares"]]):
+    if closes_len > 100 and any(_distinct_ends(s) < 4 for s in series_list + [figs["shares"]]):
         return True
     return False
 
@@ -498,13 +658,15 @@ def bands(symbol="AAPL", measure="pe", years="5", today=None, **_):
             y_ok, y_ser = _denom_ok(yfigs, measure)
             s_ok, s_ser = _denom_ok(figs, measure)
             y_cash = bool(yfigs.get("cash")) if measure in ("ev_ebitda", "ev_sales") else True
+            y_latest = _latest_end(y_ser[0]) if y_ok else ""
+            s_latest = _latest_end(s_ser[0]) if s_ok else ""
             y_fresh = (y_ok and bool(yfigs.get("shares")) and y_cash
-                       and (today - _d(y_ser[0][-1][0])).days <= MAX_AGE
-                       and (today - _d(yfigs["shares"][-1][0])).days <= MAX_AGE)
-            sec_shares_bad = (not figs.get("shares")) or (today - _d(figs["shares"][-1][0])).days > MAX_AGE
-            sec_denom_bad = (not s_ok) or any((today - _d(s[-1][0])).days > MAX_AGE for s in s_ser)
-            sec_cash_bad = measure in ("ev_ebitda", "ev_sales") and (not figs.get("cash") or (today - _d(figs["cash"][-1][0])).days > MAX_AGE)
-            if y_fresh and (sec_shares_bad or sec_denom_bad or sec_cash_bad or len(y_ser[0]) > len(s_ser[0]) or y_ser[0][-1][0] > s_ser[0][-1][0]):
+                       and (today - _d(y_latest)).days <= MAX_AGE
+                       and (today - _d(_latest_end(yfigs["shares"]))).days <= MAX_AGE)
+            sec_shares_bad = (not figs.get("shares")) or (today - _d(_latest_end(figs["shares"]))).days > MAX_AGE
+            sec_denom_bad = (not s_ok) or any((today - _d(_latest_end(s))).days > MAX_AGE for s in s_ser)
+            sec_cash_bad = measure in ("ev_ebitda", "ev_sales") and (not figs.get("cash") or (today - _d(_latest_end(figs["cash"]))).days > MAX_AGE)
+            if y_fresh and (sec_shares_bad or sec_denom_bad or sec_cash_bad or _distinct_ends(y_ser[0]) > _distinct_ends(s_ser[0]) or y_latest > s_latest):
                 figs, basis, sources = yfigs, ybasis, ysources
         except C.CompositeError:
             pass
@@ -520,13 +682,30 @@ def bands(symbol="AAPL", measure="pe", years="5", today=None, **_):
     sh_as_of = AsOf(figs["shares"])
     raw_series = multiples(closes, sh_as_of, as_of_map, measure)
     cap = MAX_MULT[measure]
-    clipped = 0
+    clipped = neg_days = miss_days = 0
+
+    def _has_inputs(day):
+        d = _d(day)
+        if not sh_as_of.at(d):
+            return False
+        if measure in ("ev_ebitda", "ev_sales") and not (as_of_map["debt"].at(d) and as_of_map["cash"].at(d)):
+            return False
+        if measure == "ev_ebitda" and "operating_income" in as_of_map:
+            return bool(as_of_map["operating_income"].at(d) and as_of_map["da"].at(d))
+        key = {"pe": "net_income", "pb": "equity", "ps": "revenue", "ev_sales": "revenue", "ev_ebitda": "ebitda"}[measure]
+        return bool(as_of_map[key].at(d))
+
     series = []
     for d, v in raw_series:
         if v is not None and v > cap:
             clipped += 1
             series.append((d, None))
         else:
+            if v is None:
+                if _has_inputs(d):
+                    neg_days += 1
+                else:
+                    miss_days += 1
             series.append((d, v))
     pts = [(d, v) for d, v in series if v is not None]
     if not pts:
@@ -558,10 +737,11 @@ def bands(symbol="AAPL", measure="pe", years="5", today=None, **_):
     ]
     lay = C._layout(True)
     lay["yaxis"]["ticksuffix"] = "x"
-    gaps = len(series) - len(pts) - clipped
-    notes = ([f"{gaps} days without a positive denominator left blank"] if gaps else []) + \
+    notes = ([f"{neg_days} days without a positive denominator left blank"] if neg_days else []) + \
+            ([f"{miss_days} days without required filings left blank"] if miss_days else []) + \
             ([f"{clipped} days above {cap:.0f}x clipped"] if clipped else [])
-    tail = (" · no debt in filings (taken as 0)" if no_debt else "") + ((" · " + " · ".join(notes)) if notes else "")
+    pl_tail = " · net income incl. noncontrolling interests (ProfitLoss)" if figs.get("_pl") else ""
+    tail = (" · no debt in filings (taken as 0)" if no_debt else "") + pl_tail + ((" · " + " · ".join(notes)) if notes else "")
     lay["annotations"] = [C._note(f"{sym} · {label} ({yrs}Y) to {cur_day} · {basis}{tail}")]
     results = [{"date": d, "multiple": None if v is None else round(v, 3), "close": round(px, 2)} for (d, v), (_, px) in zip(reversed(series), reversed(closes))]
     out = {"data": traces, "layout": lay, "sources": sources, "results": results, "summary": summary,
@@ -621,9 +801,19 @@ def roic_dupont(symbol="AAPL", **_):
             with C.cf.ThreadPoolExecutor(max_workers=4) as ex:
                 got = dict(zip(names, ex.map(lambda k: _sec_rows(sym, INSTANT.get(k) or TAGS[k], k in INSTANT), names)))
             f = {k: {r["end"]: r["value"] for r in got[k] if r["span"] == ("instant" if k in INSTANT else "annual")} for k in names}
+            ni_end = max(f["net_income"], default="")
+            other_end = max((max(f[k]) for k in f if k != "net_income" and f[k]), default="")
+            pl_used = False
+            if not ni_end or (other_end and (_d(other_end) - _d(ni_end)).days > 180):
+                pl_rows = _sec_rows(sym, NET_INCOME_FALLBACK, cache_key="net_income_pl")
+                pl_ann = {r["end"]: r["value"] for r in pl_rows if r["span"] == "annual"}
+                if pl_ann and max(pl_ann) > ni_end:
+                    f["net_income"] = pl_ann
+                    pl_used = True
             # balances at the fiscal year end only (a 10-K instant matches an annual flow's end)
             if f["net_income"] and (dt.date.today() - _d(max(f["net_income"]))).days <= MAX_AGE:
-                return _dupont_out(sym, dupont_rows(f, bank), bank, "SEC 10-K figures (USD)", [SEC_SRC], "USD")
+                basis = "SEC 10-K figures (USD; net income incl. noncontrolling interests via ProfitLoss)" if pl_used else "SEC 10-K figures (USD)"
+                return _dupont_out(sym, dupont_rows(f, bank), bank, basis, [SEC_SRC], "USD")
         except C.CompositeError as e:
             _sec_failed(e)
     y = yahoo_figures(sym)

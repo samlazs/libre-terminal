@@ -12,7 +12,7 @@
   document.addEventListener("mousedown", function (e) {
     if (openPop && !openPop.node.contains(e.target) && !(openPop.anchor && openPop.anchor.contains(e.target))) T.closePop();
   }, true);
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && openPop) { T.closePop(); e.stopPropagation(); } }, true);
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape" && openPop) { var esc = openPop.onEscape; T.closePop(); if (esc) esc(); e.stopPropagation(); } }, true);
   window.addEventListener("resize", function () { T.closePop(); });
   // a popover is placed once under its anchor: it closes when the page scrolls under it or its anchor is gone (dashboard
   // or tab switch), instead of floating mid-screen (review D3)
@@ -43,7 +43,7 @@
     var top = r.bottom + 4;
     if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 4);
     node.style.left = left + "px"; node.style.top = top + "px";
-    openPop = { node: node, anchor: anchor, onClose: opts.onClose };
+    openPop = { node: node, anchor: anchor, onClose: opts.onClose, onEscape: opts.onEscape };
     watchAnchor();
     return node;
   };

@@ -60,6 +60,7 @@ terminal/xwidgets.py         widget definitions of those views
 terminal/columns.py          table column layer: headers, formats, default column sets per endpoint
 terminal/option_math.py      implied volatility and Greeks for substitute option chains
 terminal/redact.py           strips key material from logs and error text
+terminal/extra_origins.py    the optional TERMINAL_EXTRA_ORIGINS list (trusted desktop clients), read by both guards
 terminal/local_paths.py      where local/ is and what goes in it (the only place those paths are defined)
 terminal/health.json         data functions broken upstream (shown in Data Explorers > Data status)
 terminal/static/             request.js (T.request: the only fetch() caller, bounded waits; T.httpError and
@@ -153,7 +154,7 @@ Standard library only. It serves the page and its static files, the built dashbo
 | `GET /api/config` | The version and settings the page needs |
 | `GET /api/dashboards` | The built dashboards from `local/dashboards.json`; `503` until the first build |
 | `GET /api/state`, `PUT /api/state` | The saved layout (see Saved state below); a `PUT` with a stale `_rev` gets `409` |
-| `GET /x/*` | The terminal's own views, same origin only |
+| `GET /x/*` | The terminal's own views, same origin only (plus any origin listed in `TERMINAL_EXTRA_ORIGINS`) |
 | `GET /widgets.json` | The terminal's own view definitions (`xwidgets.py`) |
 | `GET /api/services` | Each backend as running, stopped (with the reason) or not started, plus restart progress |
 | `GET /api/warm` | Warm-up status of the composite views |
@@ -167,6 +168,7 @@ Static files and the vendor bundle answer with an ETag (`304` when unchanged). `
 
 - **Host allow-list.** Only `127.0.0.1` and `localhost` on this port are answered; any other `Host` gets 403. This blocks DNS-rebinding pages.
 - **Same origin for state, views and writes.** `/x/*`, `PUT /api/state`, `POST /api/clientlog` and `POST /api/services/restart` refuse cross-site requests (`Sec-Fetch-Site`) and any `Origin` other than the page's own (403). Requests with neither header, such as scripts or curl, pass.
+- **Extra allowed origins (optional, off by default).** `TERMINAL_EXTRA_ORIGINS` lists origins of trusted desktop clients that may call the terminal from their own web view, for example a Tauri app, which sends `Origin: tauri://localhost` on macOS/Linux and `http://tauri.localhost` on Windows. Entries are separated by commas or spaces and compared exactly (case-insensitive); there are no wildcards, and an entry that is not `scheme://host[:port]` (such as `*`) is ignored with a line in the log. A listed origin is let into both backends (6900/6901) and, on this server, may read `/widgets.json` and run `/x/*` views, whatever `Sec-Fetch-Site` says; the answers, errors and preflights included, name that origin in `Access-Control-Allow-Origin` with `Vary: Origin`. It stays **read only** here: `GET`/`PUT /api/state`, `POST /api/services/restart` and `POST /api/clientlog` still answer 403, because the saved layout and service control belong to the terminal page. The Host allow-list, the `127.0.0.1` bind, the backend URLs and the page's CSP do not change. Empty means exactly the default behaviour above.
 - **Content-Security-Policy on the page** (`content_security_policy()` in `server.py`): scripts and styles only from the page's own origin (Plotly is served from `/vendor`), data only from the two local backends, frames from those backends, https pages (provider widgets, SEC documents) and `blob:` (PDFs). Plugins (`object-src`) and base URLs are disabled, and the page can be framed only by its own origin.
 - **Response headers:** `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-cache` by default, so the browser always revalidates.
 - **Cache cleanup.** A daemon thread runs `local_paths.prune_local()` every 24 hours. It removes cache files untouched for 30 days (backend entries after 14 days) and freeze dumps after 14 days, then trims `local/cache/` to 150 MB, oldest first.
@@ -252,7 +254,8 @@ Applied in memory at start; no installed file is modified.
   it binds openbb_cboe's shared HTTP cache to a dead event loop.
 - **Backend request guard** (`install_guard`): Host allow-list (blocks DNS rebinding), Origin must be the UI (any local
   host name, case-insensitive), requests without an Origin are refused when `Sec-Fetch-Site` says cross-site, CORS names
-  that origin only, error bodies redacted, unhandled pre-header exceptions return sanitized HTTP 500 JSON with CORS
+  that origin only (origins listed in `TERMINAL_EXTRA_ORIGINS` are let in the same way, see the UI server's Security
+  notes), error bodies redacted, unhandled pre-header exceptions return sanitized HTTP 500 JSON with CORS
   headers. `/_terminal/warm_chart` pre-warms TradingView bars and symbol metadata inside the guard without altering OpenAPI.
 - Reliability hardening: `install_yfinance_crumb_fix` prevents `yfinance.data.YfData` from persisting error text into
   `_crumb` on non-200 responses and serializes concurrent-thread 401 recovery; TradingView uses stale-cache fallback and

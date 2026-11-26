@@ -37,10 +37,58 @@ FACTS = {
     "ppe": ("Property, plant & equipment (net)", ["PropertyPlantAndEquipmentNet"], True),
 }
 
-VALID_FORMS = ("10-Q", "10-K", "20-F", "40-F", "DEF 14A")
-ANNUAL_FORMS = ("10-K", "20-F", "40-F", "DEF 14A")
+FACT_FALLBACKS = {"net_income": ["ProfitLoss"]}
+
+VALID_FORMS = ("10-Q", "10-QT", "10-K", "10-KT", "20-F", "40-F", "DEF 14A")
+ANNUAL_FORMS = ("10-K", "10-KT", "20-F", "40-F", "DEF 14A")
 
 FACT_OPTIONS = [{"label": v[0], "value": k} for k, v in FACTS.items()]
+
+
+def _latest_sym_end(spans):
+    return max((pts[-1][0] for k in ("quarter", "annual", "instant") for pts in [spans.get(k)] if pts), default="")
+
+
+def _fetch_sec_fact_series(symbols, tags, instant, optional=False):
+    # every tag is asked for every company and merged by period: companies change tags over time (AAPL revenue is
+    # SalesRevenueNet to FY2018, then RevenueFromContractWithCustomerExcludingAssessedTax; AMZN capex moved to
+    # PaymentsToAcquireProductiveAssets in 2017), so "the first tag with data" cut their history short. A period
+    # reported under several tags keeps the value of the tag listed first.
+    merged = {}
+    for tag in tags:
+        try:
+            rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=",".join(symbols), fact=tag, instantaneous="true" if instant else None)
+        except C.CompositeError as e:
+            if not optional:
+                C.partial_from(e, f"SEC {tag}")
+            continue
+        for r in rows or []:
+            if r.get("value") is None or not r.get("period_ending") or r.get("symbol") not in symbols:
+                continue
+            base_form = str(r.get("form") or "").split("/")[0]
+            if base_form and base_form not in VALID_FORMS:
+                continue
+            span = "instant" if instant else r.get("span")
+            if span not in ("quarter", "annual", "instant"):
+                continue
+            if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
+                continue
+            val = C.num(r.get("value"))
+            if val is None:
+                continue
+            d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
+            d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(val)))
+    out = {}
+    for sym, spans in merged.items():
+        # fiscal Q4 is only reported inside the annual figure: annual minus the three reported quarters
+        for end, (begin, total) in spans["annual"].items():
+            inside = sorted((qe, qb, v) for qe, (qb, v) in spans["quarter"].items() if begin and qb >= begin and qe <= end)
+            if len(inside) == 3 and end not in spans["quarter"]:
+                covered_to = max(q[0] for q in inside)
+                if (dt.date.fromisoformat(end) - dt.date.fromisoformat(covered_to)).days > 60:
+                    spans["quarter"][end] = (covered_to, total - sum(q[2] for q in inside))
+        out[sym] = {k: sorted([e, v[1]] for e, v in d.items()) for k, d in spans.items()}
+    return out
 
 
 def _facts(symbols, fact):
@@ -48,47 +96,27 @@ def _facts(symbols, fact):
     label, tags, instant = FACTS[fact]
 
     def run():
-        # every tag is asked for every company and merged by period: companies change tags over time (AAPL revenue is
-        # SalesRevenueNet to FY2018, then RevenueFromContractWithCustomerExcludingAssessedTax; AMZN capex moved to
-        # PaymentsToAcquireProductiveAssets in 2017), so "the first tag with data" cut their history short. A period
-        # reported under several tags keeps the value of the tag listed first.
-        merged = {}
-        for tag in tags:
-            try:
-                rows = C.api(C.V5, "equity/compare/company_facts", provider="sec", symbol=",".join(symbols), fact=tag, instantaneous="true" if instant else None)
-            except C.CompositeError as e:
-                C.partial_from(e, f"SEC {tag}")
-                continue
-            for r in rows or []:
-                if r.get("value") is None or not r.get("period_ending") or r.get("symbol") not in symbols:
-                    continue
-                base_form = str(r.get("form") or "").split("/")[0]
-                if base_form and base_form not in VALID_FORMS:
-                    continue
-                span = "instant" if instant else r.get("span")
-                if span not in ("quarter", "annual", "instant"):
-                    continue
-                if not instant and span == "annual" and base_form and base_form not in ANNUAL_FORMS:
-                    continue
-                val = C.num(r.get("value"))
-                if val is None:
-                    continue
-                d = merged.setdefault(r["symbol"], {"quarter": {}, "annual": {}, "instant": {}})[span]
-                d.setdefault(str(r["period_ending"])[:10], (str(r.get("period_beginning") or "")[:10], float(val)))
-        out = {}
-        for sym, spans in merged.items():
-            # fiscal Q4 is only reported inside the annual figure: annual minus the three reported quarters
-            for end, (begin, total) in spans["annual"].items():
-                inside = sorted((qe, qb, v) for qe, (qb, v) in spans["quarter"].items() if begin and qb >= begin and qe <= end)
-                if len(inside) == 3 and end not in spans["quarter"]:
-                    covered_to = max(q[0] for q in inside)
-                    if (dt.date.fromisoformat(end) - dt.date.fromisoformat(covered_to)).days > 60:
-                        spans["quarter"][end] = (covered_to, total - sum(q[2] for q in inside))
-            out[sym] = {k: sorted([e, v[1]] for e, v in d.items()) for k, d in spans.items()}
+        out = _fetch_sec_fact_series(symbols, tags, instant)
+        if fact in FACT_FALLBACKS:
+            if len(symbols) > 1:
+                peer_max = max((_latest_sym_end(d) for d in out.values()), default="")
+                need_fb = [s for s in symbols if s not in out or not _latest_sym_end(out[s]) or
+                           (peer_max and (dt.date.fromisoformat(peer_max) - dt.date.fromisoformat(_latest_sym_end(out[s]))).days > 240)]
+            else:
+                today_iso = dt.date.today().isoformat()
+                need_fb = [s for s in symbols if s not in out or not _latest_sym_end(out[s]) or
+                           (dt.date.fromisoformat(today_iso) - dt.date.fromisoformat(_latest_sym_end(out[s]))).days > 420]
+            if need_fb:
+                fb = _fetch_sec_fact_series(need_fb, FACT_FALLBACKS[fact], instant, optional=all(s in out for s in need_fb))
+                for s in need_fb:
+                    if fb.get(s) and _latest_sym_end(fb[s]) > _latest_sym_end(out.get(s) or {}):
+                        entry = dict(fb[s])
+                        entry["_pl"] = True
+                        out[s] = entry
         if not out:
             raise C.CompositeError(f"SEC filings have no '{label}' figures for: {', '.join(symbols)}")
         return out
-    return C.cached_disk(C.disk_name("facts4_" + fact + "_", "_".join(sorted(symbols))), 12 * 3600, run)
+    return C.cached_disk(C.disk_name("facts8_" + fact + "_", "_".join(sorted(symbols))), 12 * 3600, run)
 
 
 # HANDOFF P3-5: peer ratios. Derived figures combine two reported ones matched on the period end; a ratio is None when
@@ -209,7 +237,9 @@ def compare(group="hyperscalers", symbols=None, fact="capex", period="quarter", 
     lay = C._layout(len(traces) > 1, hovermode="closest")
     lay["yaxis"].update({"ticksuffix": "%"} if pct else {"tickprefix": "$", "ticksuffix": "bn"})
     what = {"pct_revenue": f"{label} as % of revenue", "yoy": f"{label}, change on a year earlier (%)"}.get(measure)
-    notes = ([what] if what else []) + (["No figures under the tags this source covers: " + ", ".join(missing)] if missing else []) + \
+    pl_syms = [s for s in syms if any((datas[f].get(s) or {}).get("_pl") for f in needed)]
+    notes = ([what] if what else []) + (["Net income incl. noncontrolling interests (ProfitLoss): " + ", ".join(pl_syms)] if pl_syms else []) + \
+        (["No figures under the tags this source covers: " + ", ".join(missing)] if missing else []) + \
         (["Missing quarters in the SEC data (line not drawn across them): " + ", ".join(holes)] if holes else []) + \
         (["Blank where the denominator is missing or not above zero"] if pct else [])
     if notes:

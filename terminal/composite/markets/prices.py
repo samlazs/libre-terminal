@@ -8,23 +8,69 @@ import json
 import re
 import threading
 import time
+import urllib.parse
 
 import composite as C
 
 # ---------------------------------------------------------------- price history
 class PriceHistory(dict):
     """{symbol: [(iso_date, close), ...]} (closes adjusted for splits only), plus .divs = {symbol: {iso_date: cash
-    distribution}} on ex-dates as Yahoo reports them, for total returns (total_return)."""
+    distribution}} on ex-dates as Yahoo reports them, and .prev_close = {symbol: (iso_date, prev_close)}."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.divs = {}
+        self.prev_close = {}
         self.stale_ts = None
         self.swr_ts = None
 
     def merge(self, part):
         self.update(part)
         self.divs.update(getattr(part, "divs", {}))
+        self.prev_close.update(getattr(part, "prev_close", {}))
+
+
+def futures_prev_from_chart(payload):
+    """(bar_date_iso, prev_close) from Yahoo's single-day v8 chart payload when the live bar matches regularMarketTime.
+
+    On a continuous =F contract roll day, daily history pairs today's rolled contract with yesterday's expiring one.
+    When an active session is running, Yahoo's 1d chart meta carries the active contract's true previous settlement
+    (`chartPreviousClose`) and its live bar timestamp equals `regularMarketTime`. Closed/holiday settled sessions stamp
+    00:00 exchange midnight instead and set `chartPreviousClose` to that settled close, so those return None.
+    """
+    res = ((payload or {}).get("chart") or {}).get("result") or []
+    if not res or not isinstance(res[0], dict):
+        return None
+    meta = res[0].get("meta") or {}
+    ts = res[0].get("timestamp") or []
+    bt = C.num(ts[-1]) if ts else None
+    mkt_t = C.num(meta.get("regularMarketTime"))
+    pc = C.num(meta.get("chartPreviousClose")) or C.num(meta.get("previousClose"))
+    px = C.num(meta.get("regularMarketPrice"))
+    if bt is None or mkt_t is None or abs(bt - mkt_t) > 120 or pc is None or pc <= 0 or px is None or px <= 0:
+        return None
+    tzoff = int(C.num(meta.get("gmtoffset")) or 0)
+    bar_date = dt.datetime.fromtimestamp(int(bt) + tzoff, dt.timezone.utc).strftime("%Y-%m-%d")
+    return (bar_date, float(pc))
+
+
+def _fetch_futures_prev(symbols):
+    """{symbol: (bar_date_iso, prev_close)} for active futures (=F) so 1D changes survive front-month contract rolls."""
+    futs = [s for s in symbols if str(s).upper().endswith("=F")]
+    if not futs:
+        return {}
+
+    def one(sym):
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(sym)}?range=1d&interval=1d"
+        try:
+            payload = C.fetch(url, provider="yahoo_chart", parse="json", timeout=8)
+        except C.CompositeError as e:
+            C.partial_from(e, f"Yahoo Finance futures settlement ({sym})")
+            return sym, None
+        return sym, C.futures_prev_from_chart(payload)
+
+    with C.cf.ThreadPoolExecutor(max_workers=min(6, len(futs))) as ex:
+        return {sym: val for sym, val in ex.map(one, futs) if val is not None}
 
 
 def _fetch_history(symbols, start, interval, _retry=True):
@@ -62,6 +108,11 @@ def _fetch_history(symbols, start, interval, _retry=True):
             for part in ex.map(lambda s: C._fetch_history([s], start, interval, _retry=False), missing[:20]):
                 out.update({k: v for k, v in part.items() if v})
                 out.divs.update(getattr(part, "divs", {}))
+                out.prev_close.update(getattr(part, "prev_close", {}))
+    if interval == "1d":
+        need_pc = [s for s in out if out[s] and s.upper().endswith("=F") and s not in out.prev_close]
+        if need_pc:
+            out.prev_close.update(C._fetch_futures_prev(need_pc))
     return out
 
 
@@ -97,26 +148,53 @@ def _sym_hist_load(sym, interval):
     return None
 
 
-def _sym_hist_save(sym, interval, start_iso, rows, divs, now=None):
+def _sym_hist_pc(sym, interval):
+    entry = C._sym_hist_load(sym, interval)
+    pc = entry.get("pc") if isinstance(entry, dict) else None
+    if isinstance(pc, (list, tuple)) and len(pc) == 2 and C.num(pc[1]) is not None:
+        return (str(pc[0])[:10], float(pc[1]))
+    return None
+
+
+_HIST_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _hist_lock(sym):
+    with C._guard:
+        lk = _HIST_LOCKS.get(sym)
+        if lk is None:
+            lk = _HIST_LOCKS[sym] = threading.Lock()
+        return lk
+
+
+def _sym_hist_save(sym, interval, start_iso, rows, divs, now=None, prev_close=None):
     """Persist one symbol's history only when non-empty (W4 complete-answer rule); never shrink an earlier start."""
     if not rows:
         return
     ts = time.time() if now is None else float(now)
-    old = C._sym_hist_load(sym, interval)
-    if old and old.get("rows") and old.get("start") and old["start"] < start_iso:
-        merged_rows = [[p[0], float(p[1])] for p in old["rows"] if p[0] < start_iso] + [[d, float(v)] for d, v in rows]
-        merged_divs = {d: float(v) for d, v in (old.get("divs") or {}).items() if d < start_iso}
-        merged_divs.update({d: float(v) for d, v in (divs or {}).items()})
-        merged_start = old["start"]
-    else:
-        merged_rows = [[d, float(v)] for d, v in rows]
-        merged_divs = {d: float(v) for d, v in (divs or {}).items()}
-        merged_start = start_iso
-    entry = {"t": ts, "start": merged_start, "rows": merged_rows, "divs": merged_divs}
-    with C._guard:
-        C._cache[("hsym", sym, interval)] = (C._mono(ts), entry)
-    if interval == "1d":
-        C._write_json(C._sym_hist_path(sym), entry)
+    with C._hist_lock(sym):
+        old = C._sym_hist_load(sym, interval)
+        if old and old.get("rows") and old.get("start") and old["start"] < start_iso:
+            merged_rows = [[p[0], float(p[1])] for p in old["rows"] if p[0] < start_iso] + [[d, float(v)] for d, v in rows]
+            merged_divs = {d: float(v) for d, v in (old.get("divs") or {}).items() if d < start_iso}
+            merged_divs.update({d: float(v) for d, v in (divs or {}).items()})
+            merged_start = old["start"]
+        else:
+            merged_rows = [[d, float(v)] for d, v in rows]
+            merged_divs = {d: float(v) for d, v in (divs or {}).items()}
+            merged_start = start_iso
+        pc_entry = None
+        if isinstance(prev_close, (list, tuple)) and len(prev_close) == 2 and C.num(prev_close[1]) is not None:
+            pc_entry = [str(prev_close[0])[:10], float(prev_close[1])]
+        elif isinstance(old, dict) and isinstance(old.get("pc"), list) and len(old["pc"]) == 2 and merged_rows and old["pc"][0] == merged_rows[-1][0]:
+            pc_entry = old["pc"]
+        entry = {"t": ts, "start": merged_start, "rows": merged_rows, "divs": merged_divs}
+        if pc_entry is not None:
+            entry["pc"] = pc_entry
+        with C._guard:
+            C._cache[("hsym", sym, interval)] = (C._mono(ts), entry)
+        if interval == "1d":
+            C._write_json(C._sym_hist_path(sym), entry)
 
 
 def _sym_hist_get(sym, start_iso, interval, now=None):
@@ -148,9 +226,10 @@ def _bg_refresh_history(syms, start_iso, interval):
             with _cf.ThreadPoolExecutor(max_workers=2) as ex:
                 for part in ex.map(lambda ch: C._fetch_history(ch, start_iso, interval), chunks):
                     divs = getattr(part, "divs", {})
+                    fpc = getattr(part, "prev_close", {})
                     for s, rows in (part or {}).items():
                         if rows:
-                            C._sym_hist_save(s, interval, start_iso, rows, divs.get(s))
+                            C._sym_hist_save(s, interval, start_iso, rows, divs.get(s), prev_close=fpc.get(s))
         except Exception as e:  # noqa: BLE001
             import sys
             try:
@@ -186,10 +265,16 @@ def history(symbols, start: dt.date, interval="1d"):
                 out[s] = rows
                 if divs:
                     out.divs[s] = divs
+                pc = C._sym_hist_pc(s, interval)
+                if pc and pc[0] == rows[-1][0]:
+                    out.prev_close[s] = pc
             elif st == "stale":
                 out[s] = rows
                 if divs:
                     out.divs[s] = divs
+                pc = C._sym_hist_pc(s, interval)
+                if pc and pc[0] == rows[-1][0]:
+                    out.prev_close[s] = pc
                 stale_syms.append(s)
                 swr_times.append(ts)
                 if cstart and cstart < bg_start:
@@ -197,7 +282,7 @@ def history(symbols, start: dt.date, interval="1d"):
             else:
                 need.append(s)
                 if st == "expired":
-                    fallback[s] = (ts, rows, divs)
+                    fallback[s] = (ts, rows, divs, C._sym_hist_pc(s, interval))
         if stale_syms:
             C._bg_refresh_history(stale_syms, bg_start, interval)
         if need:
@@ -207,18 +292,24 @@ def history(symbols, start: dt.date, interval="1d"):
                 for part in ex.map(lambda ch: C._fetch_history(ch, start_iso, interval), chunks):
                     fetched.merge(part)
             fdivs = getattr(fetched, "divs", {})
+            fpc = getattr(fetched, "prev_close", {})
             for s in need:
                 rows = fetched.get(s) or []
                 if rows:
                     out[s] = rows
                     if fdivs.get(s):
                         out.divs[s] = fdivs[s]
-                    C._sym_hist_save(s, interval, start_iso, rows, fdivs.get(s))
+                    C._sym_hist_save(s, interval, start_iso, rows, fdivs.get(s), prev_close=fpc.get(s))
+                    pc = fpc.get(s) or C._sym_hist_pc(s, interval)
+                    if pc and pc[0] == rows[-1][0]:
+                        out.prev_close[s] = pc
                 elif s in fallback:
-                    ts, fb_rows, fb_divs = fallback[s]
+                    ts, fb_rows, fb_divs, fb_pc = fallback[s]
                     out[s] = fb_rows
                     if fb_divs:
                         out.divs[s] = fb_divs
+                    if fb_pc and fb_pc[0] == fb_rows[-1][0]:
+                        out.prev_close[s] = fb_pc
                     fallback_times.append(ts)
         if not any(out.values()):            # not cached: Yahoo answering nothing is usually momentary
             raise C.CompositeError("Yahoo Finance returned no prices just now (it may be throttling or restarting). Press reload in a minute.")

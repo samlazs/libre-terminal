@@ -187,6 +187,87 @@ st, hs, body = call("/err", origin="http://127.0.0.1:6950")
 check(st == 500 and b"TOPSECRET999" not in body and b"REDACTED" in body, "error body redacted")
 check(int(hs["content-length"]) == len(body) and hs.get("access-control-allow-origin") == "http://127.0.0.1:6950", "length fixed and the page may read the error")
 
+# TERMINAL_EXTRA_ORIGINS: exact origins only, no wildcards; empty = today's guard
+import extra_origins  # noqa: E402
+
+good, bad = extra_origins.parse(" tauri://localhost,http://tauri.localhost  HTTP://Example.COM:8443 https://x.example:443 ")
+check(good == frozenset({"tauri://localhost", "http://tauri.localhost", "http://example.com:8443", "https://x.example"}) and bad == [],
+      "origins split on commas and spaces, lower-cased, default port dropped")
+for entry in ("*", "http://*.example", "*.example", "null", "localhost", "http://x.example/", "http://x.example/path",
+              "http://u@x.example", "http://x.example:0", "http://x.example:99999", "file://", "http://x.example?q"):
+    check(extra_origins.parse(entry) == (frozenset(), [entry]), f"rejected: {entry!r}")
+check(extra_origins.parse("") == (frozenset(), []) and extra_origins.parse(None) == (frozenset(), []), "empty setting: nothing")
+check(extra_origins.normalize("http://[::1]:7000") == "http://[::1]:7000", "a bracketed IPv6 host parses")
+logged = []
+os.environ["TERMINAL_EXTRA_ORIGINS"] = "tauri://localhost *"
+try:
+    check(extra_origins.from_env(logged.append) == frozenset({"tauri://localhost"}), "from_env keeps the valid entry")
+finally:
+    del os.environ["TERMINAL_EXTRA_ORIGINS"]
+check(any("ignored '*'" in m for m in logged) and any("tauri://localhost" in m for m in logged), "ignored entries and the accepted list are logged")
+check(not extra_origins.allowed("tauri://localhost", frozenset()) and not extra_origins.allowed(None, frozenset({"tauri://localhost"})),
+      "nothing is allowed by an empty list or without an Origin")
+# default guard (installed above with no list): a Tauri origin is refused
+check(call("/", origin="tauri://localhost")[0] == 403 and call("/", origin="http://tauri.localhost", site="cross-site")[0] == 403,
+      "default: a Tauri client is refused")
+
+
+class FakeConfigX:                  # a fresh class, so this guard is not stacked on the one installed above
+    def __init__(self, app):
+        self.app = app
+        self.loaded_app = None
+
+    def load(self):
+        self.loaded_app = self.app
+
+
+uc.Config = FakeConfigX
+os.environ["TERMINAL_EXTRA_ORIGINS"] = "tauri://localhost http://tauri.localhost http://*.evil.example"
+try:
+    rb.install_guard("6900")
+finally:
+    del os.environ["TERMINAL_EXTRA_ORIGINS"]
+    uc.Config = FakeConfig
+cfg_x = FakeConfigX(app)
+cfg_x.load()
+guard_x = cfg_x.loaded_app
+
+
+def call_x(path, origin=None, site=None, method="GET", extra=()):
+    sent = []
+    headers = [(b"host", b"127.0.0.1:6900")] + ([(b"origin", origin.encode())] if origin else [])
+    headers += ([(b"sec-fetch-site", site.encode())] if site else []) + list(extra)
+
+    async def send(msg):
+        sent.append(msg)
+
+    async def receive():
+        return {"type": "http.request"}
+    asyncio.run(guard_x({"type": "http", "method": method, "path": path, "headers": headers}, receive, send))
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return start["status"], {k.decode().lower(): v.decode() for k, v in start["headers"]}, body
+
+
+for o in ("tauri://localhost", "http://tauri.localhost", "Tauri://LOCALHOST"):
+    st, hs, _ = call_x("/", origin=o, site="cross-site")
+    check(st == 200 and hs.get("access-control-allow-origin") == o and hs.get("vary") == "Origin",
+          f"listed origin {o} passes even cross-site; CORS names it (not *) with Vary: Origin")
+st, hs, body = call_x("/err", origin="tauri://localhost", site="cross-site")
+check(st == 500 and b"TOPSECRET999" not in body and hs.get("access-control-allow-origin") == "tauri://localhost" and hs.get("vary") == "Origin",
+      "error answers to a listed origin are redacted and carry its CORS headers")
+st, hs, _ = call_x("/", origin="tauri://localhost", site="cross-site", method="OPTIONS",
+                   extra=[(b"access-control-request-method", b"GET"), (b"access-control-request-headers", b"x-terminal-refresh")])
+check(st == 200 and hs.get("access-control-allow-origin") == "tauri://localhost" and hs.get("vary") == "Origin"
+      and "x-terminal-refresh" in hs.get("access-control-allow-headers", "").lower(), "preflight from a listed origin answered with its CORS headers")
+for o in ("https://evil.example", "http://a.evil.example", "tauri://other", "http://tauri.localhost:1234"):
+    check(call_x("/", origin=o)[0] == 403, f"unlisted origin {o} still refused (the wildcard entry was dropped)")
+check(call_x("/", site="cross-site")[0] == 403, "a cross-site request without an Origin is still refused")
+check(call_x("/", origin="http://127.0.0.1:6950")[0] == 200, "the terminal page is still let in")
+check(call_x("/", origin="null")[0] == 403, "an opaque (null) Origin is refused")
+st, hs, _ = call_x("/", origin="tauri://localhost", extra=[(b"host", b"rebind.example:6900")])
+check(st == 403 and "access-control-allow-origin" not in hs, "the Host check still applies to a listed origin")
+
 # ---- IMF PortWatch ArcGIS fix: HTTP 200 error payloads must raise (never silently truncate or cache page 1)
 from openbb_core.app.model.abstract.error import OpenBBError  # noqa: E402
 from openbb_core.provider.utils import helpers as core_helpers  # noqa: E402
