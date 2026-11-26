@@ -6,7 +6,8 @@ wrappers around this file, so every platform runs the same logic.
 Standard library only; works with any Python 3.9 or newer.
 
   python scripts/launcher.py install [--upgrade] [--with-v4]    create/refresh .venv-v5 (and optional .venv-v4) from lock files
-  python scripts/launcher.py start   [--no-browser] [--with-v4] start what is not running, rebuild dashboards, open the browser
+  python scripts/launcher.py start   [--no-browser] [--no-update] [--with-v4] start what is not running, rebuild dashboards, open the browser
+  python scripts/launcher.py update  [--check] [--yes] [--enable]  check GitHub for a newer release and update in place
   python scripts/launcher.py stop    [all|ui|v5|v4|backends]     stop all or selected service(s)
   python scripts/launcher.py restart [all|ui|v5|v4|backends]     restart all or selected service(s) (e.g. `restart ui` ~2s)
   python scripts/launcher.py status                              what is running, and where
@@ -49,7 +50,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "terminal"))
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
 import local_paths  # noqa: E402  (where keys, state, logs and caches live: local/)
+import updater  # noqa: E402
 
 THIS = Path(__file__).resolve()
 WIN = os.name == "nt"
@@ -156,7 +160,12 @@ def find_uv() -> str | None:
     if found:
         return found
     exe = "uv.exe" if WIN else "uv"
-    for d in (Path.home() / ".local" / "bin", Path.home() / ".cargo" / "bin"):
+    cands = [Path.home() / ".local" / "bin", Path.home() / ".cargo" / "bin"]
+    if WIN:
+        local_app = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app:
+            cands.append(Path(local_app) / "Programs" / "uv")
+    for d in cands:
         if (d / exe).exists():
             return str(d / exe)
     return None
@@ -249,6 +258,7 @@ def cmd_install(a):
                  f"Preparing OpenBB in {ENVS[env]}", "Run the install again; if it keeps failing, delete the " + ENVS[env] + " folder and retry.",
                  env=child_env(), note=" (up to a minute)")
         ok(f"{ENVS[env]} ready")
+    updater.clear_sync_pending(ROOT)
     say("\nInstall finished.")
     starter = "double-click Start.cmd" if WIN else "run sh start.sh"
     keys = "Setup-Keys.cmd" if WIN else "sh setup-keys.sh"
@@ -634,11 +644,7 @@ def wait_for_warm(port: int, timeout: float = WARM_WAIT_TIMEOUT, poll: float = 1
         time.sleep(poll)
 
 
-def cmd_start(a):
-    p = resolve_ports(a)
-    prune_local()
-    if not venv_python("v5").exists():
-        fail("The terminal is not installed yet.", "Run Install.cmd (Windows, double-click) or sh install.sh (experimental on macOS/Linux) first.")
+def _start_services(a) -> tuple[list[str], bool]:
     use_v4 = want_v4(a)
     services = ["v5", "ui"]
     if use_v4:
@@ -647,6 +653,126 @@ def cmd_start(a):
         else:
             warn("--with-v4 requested, but .venv-v4 is not installed. Run Install.cmd --with-v4 first; starting V5 only.")
             use_v4 = False
+    return services, use_v4
+
+
+def _forward_start_args(a) -> list[str]:
+    out: list[str] = []
+    if getattr(a, "no_browser", False):
+        out.append("--no-browser")
+    if getattr(a, "no_wait", False):
+        out.append("--no-wait")
+    if getattr(a, "with_v4", False):
+        out.append("--with-v4")
+    if getattr(a, "skip_v4", False):
+        out.append("--skip-v4")
+    for flag, attr in (("--ui-port", "ui_port"), ("--v5-port", "v5_port"), ("--v4-port", "v4_port")):
+        val = getattr(a, attr, None)
+        if val is not None:
+            out += [flag, str(val)]
+    return out
+
+
+def _stop_for_update(a) -> None:
+    stop_args = argparse.Namespace(
+        service="all",
+        ui_port=getattr(a, "ui_port", None),
+        v5_port=getattr(a, "v5_port", None),
+        v4_port=getattr(a, "v4_port", None),
+    )
+    cmd_stop(stop_args)
+    p = resolve_ports(a)
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        sups = any(supervisor_alive(s) for s in ("ui", "v5", "v4"))
+        listeners = listening_pids_map([p[s] for s in ("ui", "v5", "v4")])
+        all_lpids = sorted({pid for pids in listeners.values() for pid in pids})
+        l_cmds = command_lines(all_lpids) if all_lpids else {}
+        ours_listening = any(ours(c) for c in l_cmds.values())
+        if not sups and not ours_listening:
+            return
+        time.sleep(0.3)
+
+
+def _maybe_update_on_start(a) -> int | None:
+    if not updater.is_git_checkout(ROOT):
+        pending = updater.read_sync_pending(ROOT)
+        if pending:
+            warn(f"Previous update to {pending.get('version') or 'a newer version'} still needs Python package sync.")
+            if WIN and updater.is_interactive():
+                say("Finishing package update now (this can take 1 to 4 minutes)...")
+                if updater.sync_dependencies(ROOT, with_v4=bool(pending.get("with_v4"))) == 0:
+                    updater.clear_sync_pending(ROOT)
+                    ok("Package sync finished.")
+                else:
+                    warn("Package sync did not finish.")
+                    say("Double-click Install.cmd to finish updating packages, then Start.cmd.")
+                    return 1
+            else:
+                say("Double-click Install.cmd to finish updating packages, then Start.cmd." if WIN
+                    else "Run `sh install.sh` to finish updating packages.")
+                return 1
+    if not WIN or getattr(a, "no_update", False):
+        return None
+    if os.environ.get("TERMINAL_NO_UPDATE", "").strip().lower() in ("1", "true", "yes"):
+        return None
+    if updater.is_git_checkout(ROOT) or updater.is_update_check_disabled(ROOT) or not updater.is_interactive():
+        return None
+    try:
+        cur = updater.installed_version(ROOT)
+    except updater.UpdateError:
+        return None
+    rel = updater.check_for_update(root=ROOT, current=cur, quiet=True)
+    if rel is None:
+        return None
+    choice = updater.prompt_user_update(rel, cur, say_fn=say)
+    if choice == "no":
+        say(f"Skipping update; starting Libre Terminal {cur}...")
+        return None
+    if choice == "disable":
+        try:
+            updater.set_update_check_disabled(True, ROOT)
+        except OSError as e:
+            warn(f"Could not save update preference: {e}")
+        say("Startup update checks turned off. You can still update any time with: launcher.py update (or turn checks back on with: launcher.py update --enable).")
+        say(f"Starting Libre Terminal {cur}...")
+        return None
+    if choice == "cancel":
+        say("\nCancelled.")
+        return 1
+    try:
+        res = updater.perform_update(
+            rel,
+            root=ROOT,
+            stop_fn=lambda: _stop_for_update(a),
+            sync_fn=lambda with_v4=False: updater.sync_dependencies(ROOT, with_v4=with_v4),
+            say_fn=say,
+        )
+    except updater.IncompleteRollbackError as e:
+        warn(f"Update did not finish cleanly: {e}")
+        say("Do not delete that backup folder until you restore or re-extract Libre Terminal.")
+        return 1
+    except updater.UpdateError as e:
+        warn(f"Could not update: {e}")
+        say(f"Starting your current version ({cur})...")
+        return None
+    if res.get("sync_failed"):
+        warn(f"Program files updated to {res['version']}, but package sync did not finish.")
+        say("Double-click Install.cmd to finish updating packages, then Start.cmd.")
+        return 1
+    ok(f"Updated Libre Terminal to {res['version']}. Starting the new version...")
+    cmd = [str(venv_python("v5")), str(ROOT / "scripts" / "launcher.py"), "start", "--no-update", *_forward_start_args(a)]
+    return subprocess.run(cmd, cwd=ROOT).returncode
+
+
+def cmd_start(a):
+    p = resolve_ports(a)
+    prune_local()
+    if not venv_python("v5").exists():
+        fail("The terminal is not installed yet.", "Run Install.cmd (Windows, double-click) or sh install.sh (experimental on macOS/Linux) first.")
+    if (rc_upd := _maybe_update_on_start(a)) is not None:
+        return rc_upd
+    services, use_v4 = _start_services(a)
     apply_keys_if_changed(running=any(probe(s, p[s]) == "up" for s in services if s != "ui"))
     if len(set(p.values())) < 3:
         fail(f"Ports must differ: {p}")
@@ -1137,6 +1263,89 @@ def cmd_logs(a):
     return 0
 
 
+def cmd_update(a):
+    if getattr(a, "enable", False):
+        try:
+            updater.set_update_check_disabled(False, ROOT)
+        except OSError as e:
+            warn(f"Could not update preference: {e}")
+            return 1
+        ok("Startup update checks are turned back on.")
+        return 0
+    check_only = getattr(a, "check", False)
+    is_git = updater.is_git_checkout(ROOT)
+    if is_git and not check_only:
+        say("This folder is a git checkout. To update, stop the terminal, run `git pull`, and re-run Install.cmd." if WIN
+            else "This folder is a git checkout. To update, stop the terminal, run `git pull`, and re-run `sh install.sh`.")
+        return 1
+    try:
+        cur = updater.installed_version(ROOT)
+    except updater.UpdateError as e:
+        warn(f"Could not read installed version: {e}")
+        return 1
+    say(f"Checking for Libre Terminal updates (installed: {cur})...")
+    try:
+        rel = updater.check_for_update(root=ROOT, current=cur, timeout=updater.EXPLICIT_CHECK_TIMEOUT, quiet=False)
+    except updater.UpdateError as e:
+        warn(f"Could not check for updates: {e}")
+        return 1
+    if rel is None:
+        ok(f"Libre Terminal {cur} is up to date.")
+        if is_git:
+            say("  (This folder is a git checkout; update with `git pull` instead of zip replacement.)")
+        elif updater.is_update_check_disabled(ROOT):
+            say("  (Startup update checks are currently turned off; run `launcher.py update --enable` to turn them back on.)")
+        return 0
+    if check_only:
+        say(f"A newer version is available: {rel['version']} (installed: {cur}).")
+        for line in updater.format_release_summary(rel.get("body") or ""):
+            say(f"  {line}" if line else "")
+        if rel.get("url"):
+            say(f"Release notes: {rel['url']}")
+        if is_git:
+            say("  (This folder is a git checkout; update with `git pull` instead of zip replacement.)")
+        elif updater.is_update_check_disabled(ROOT):
+            say("  (Startup update checks are currently turned off; run `launcher.py update --enable` to turn them back on.)")
+        return 0
+    if not getattr(a, "yes", False):
+        choice = updater.prompt_user_update(rel, cur, say_fn=say)
+        if choice == "no":
+            say("Update skipped.")
+            return 0
+        if choice == "disable":
+            try:
+                updater.set_update_check_disabled(True, ROOT)
+            except OSError as e:
+                warn(f"Could not save update preference: {e}")
+                return 1
+            say("Startup update checks turned off. Run `launcher.py update --enable` to turn them back on.")
+            return 0
+        if choice == "cancel":
+            say("\nCancelled.")
+            return 1
+    try:
+        res = updater.perform_update(
+            rel,
+            root=ROOT,
+            stop_fn=lambda: _stop_for_update(a),
+            sync_fn=lambda with_v4=False: updater.sync_dependencies(ROOT, with_v4=with_v4),
+            say_fn=say,
+        )
+    except updater.IncompleteRollbackError as e:
+        warn(f"Update did not finish cleanly: {e}")
+        say("Do not delete that backup folder until you restore or re-extract Libre Terminal.")
+        return 1
+    except updater.UpdateError as e:
+        fail(f"Update failed: {e}")
+    if res.get("sync_failed"):
+        warn(f"Program files updated to {res['version']}, but package sync did not finish.")
+        say("Double-click Install.cmd to finish updating packages, then Start.cmd." if WIN
+            else "Run `sh install.sh` to finish updating packages.")
+        return 1
+    ok(f"Updated Libre Terminal to {res['version']}.")
+    return 0
+
+
 # ------------------------------------------------------------------ CLI
 def main():
     ap = argparse.ArgumentParser(description="Install, start and stop the terminal.", formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("\n\n")[2])
@@ -1152,8 +1361,13 @@ def main():
     s = sub.add_parser("start", parents=[ports], help="start everything that is not running (V5 + UI default; --with-v4 adds legacy V4)")
     s.add_argument("--no-browser", action="store_true")
     s.add_argument("--no-wait", action="store_true", help="open the browser right away without waiting for initial data/chart warming")
+    s.add_argument("--no-update", action="store_true", help="skip the startup GitHub release update check")
     s.add_argument("--with-v4", action="store_true", help="also start the optional legacy V4 backend")
     s.add_argument("--skip-v4", action="store_true", help="backward-compatible alias (V5-only is now the default)")
+    s = sub.add_parser("update", parents=[ports], help="check GitHub for a newer release and update in place")
+    s.add_argument("--check", action="store_true", help="only check whether a newer release is available")
+    s.add_argument("--yes", action="store_true", help="apply an available update without prompting")
+    s.add_argument("--enable", action="store_true", help="re-enable startup update checks after choosing 'don't ask again'")
     s = sub.add_parser("stop", parents=[ports], help="stop all or selected service(s)")
     s.add_argument("service", nargs="?", default="all", choices=["all", "ui", "v5", "v4", "backends"])
     s = sub.add_parser("restart", parents=[ports], help="restart all or selected service(s) (e.g. restart ui)")
@@ -1216,7 +1430,8 @@ def main():
     local_paths.ensure()        # create local/ (or move an old layout into it) before anything reads or writes there
     handler = {"install": cmd_install, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart, "status": cmd_status,
                "logs": cmd_logs, "keys": cmd_keys, "smoke": cmd_smoke, "health": cmd_health, "dashboards": cmd_dashboards,
-               "test": cmd_test, "gate": cmd_gate, "check": cmd_check, "snapshot": cmd_snapshot, "diff": cmd_diff, "run": cmd_run}[a.cmd]
+               "test": cmd_test, "gate": cmd_gate, "check": cmd_check, "snapshot": cmd_snapshot, "diff": cmd_diff, "run": cmd_run,
+               "update": cmd_update}[a.cmd]
     return handler(a) or 0
 
 

@@ -120,10 +120,12 @@ IF SOMETHING GOES WRONG
    - Logs are in the local\\logs folder inside Libre-Terminal.
    - More help: https://github.com/samlazs/libre-terminal#updating-and-troubleshooting
 
-UPDATING FROM AN EARLIER VERSION
-   Double-click Stop.cmd in the old folder. To keep your saved layouts and API keys,
-   copy the "local" folder from the old folder into this new folder, then
-   double-click Install.cmd and Start.cmd.
+UPDATING TO A NEWER VERSION
+   Start.cmd checks GitHub for a newer release when it starts. If one is available,
+   it shows what changed and lets you update in place (keeping your "local" folder),
+   skip once, or turn off startup checks (re-enable via: launcher.py update --enable).
+   To update by hand instead: double-click Stop.cmd in the old folder, extract the
+   new ZIP, copy your old "local" folder into it, then run Install.cmd and Start.cmd.
 
 UNINSTALL
    Double-click Stop.cmd, then delete the Libre-Terminal folder.

@@ -1,7 +1,7 @@
 @echo off
 title Libre Terminal
 REM Double-click to start the V5 data backend and the terminal UI, then open the terminal in your browser.
-REM Options from a command prompt: Start.cmd --no-browser, Start.cmd --no-wait, Start.cmd --with-v4, Start.cmd --ui-port 7950 --v5-port 7900
+REM Options from a command prompt: Start.cmd --no-browser, Start.cmd --no-wait, Start.cmd --no-update, Start.cmd --with-v4, Start.cmd --ui-port 7950 --v5-port 7900
 if not exist "%~dp0scripts\launcher.py" (
   echo.
   echo You opened Start.cmd from inside the ZIP file. It cannot run from there.
@@ -22,18 +22,23 @@ if not exist ".venv-v5\Scripts\python.exe" (
   pause
   exit /b 1
 )
-".venv-v5\Scripts\python.exe" scripts\launcher.py start %*
-if errorlevel 1 (
-  echo.
-  echo Something did not start. The reason is in the lines above.
-  echo Logs are in %~dp0local\logs
-  echo Help: https://github.com/samlazs/libre-terminal#updating-and-troubleshooting
-  echo.
-  pause
-  exit /b 1
+set "LOGDIR=%~dp0local\logs"
+setlocal enabledelayedexpansion
+(
+  ".venv-v5\Scripts\python.exe" scripts\launcher.py start %*
+  if errorlevel 1 (
+    echo.
+    echo Something did not start. The reason is in the lines above.
+    echo Logs are in !LOGDIR!
+    echo Help: https://github.com/samlazs/libre-terminal#updating-and-troubleshooting
+    echo.
+    pause
+    endlocal & exit /b 1
+  ) else (
+    echo.
+    echo You can close this window. The terminal keeps running in the background
+    echo until you double-click Stop.cmd or restart the computer.
+    timeout /t 15 >nul 2>nul
+    endlocal & exit /b 0
+  )
 )
-echo.
-echo You can close this window. The terminal keeps running in the background
-echo until you double-click Stop.cmd or restart the computer.
-timeout /t 15 >nul 2>nul
-exit /b 0

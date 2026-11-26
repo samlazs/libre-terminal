@@ -24,7 +24,8 @@ The browser calls the backends directly for their own widgets and calls the UI s
 ## File map
 
 ```
-scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / gate / check / snapshot / diff / run
+scripts/launcher.py          install / start / stop / restart / status / logs / keys / smoke / health / dashboards / test / gate / check / snapshot / diff / update / run
+scripts/updater.py           GitHub release check, ZIP verification, staged in-place update with rollback
 scripts/install.ps1          Windows installer behind Install.cmd: refuses a folder path over 83 chars (MAX_PATH), makes sure uv is present, then runs launcher.py install
 scripts/run_backend.py       starts a backend with the runtime patches below and the freeze watchdog
 scripts/build_dashboards.py  compact dashboard generator engine -> local/dashboards.json
@@ -369,7 +370,7 @@ Each `test_*.py` runs in its own process with a temporary `local/` folder cleane
 | `test_budget.py` | One route budget table for server and browser, request deadlines cut outbound calls, no unbounded backend wait |
 | `test_coverage.py`, `test_country_monitor.py` | Declared route coverage (global / U.S. only / closed set) with offline cases; Country Monitor periods and partial answers |
 | `test_day_change.py`, `test_legend_change.py` | Day change from the previous close in quotes and the chart legend (Xetra and NYSE, hand-worked values; the legend in a headless browser) |
-| `test_install_guard.py`, `test_logs.py`, `test_lifecycle.py` | Install path guard (MAX_PATH), log rotation while running, live lifecycle faults on an isolated instance (`--live`) |
+| `test_install_guard.py`, `test_logs.py`, `test_lifecycle.py`, `test_updater.py` | Install path guard (MAX_PATH), log rotation while running, live lifecycle faults on an isolated instance (`--live`), GitHub auto-updater & Start.cmd self-replacement |
 
 `frontend_checks.js` holds the browser-side checks (redaction, error classifier, relative dates, CSV formula
 escaping, v4 per-card override diff/merge/migration, market routing, column formats, statements, view preferences,

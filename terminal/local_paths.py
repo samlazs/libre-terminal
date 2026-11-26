@@ -179,6 +179,23 @@ def prune_local(now: float | None = None, max_cache_mb: float = 150.0) -> int:
                         gone += 1
                 except OSError:
                     pass
+    upd_dir = LOCAL / "upd"
+    if upd_dir.is_dir():
+        for d in upd_dir.iterdir():
+            try:
+                if now - d.stat().st_mtime > 86400:
+                    if d.is_dir():
+                        shutil.rmtree(d, ignore_errors=True)
+                    else:
+                        d.unlink(missing_ok=True)
+                    gone += 1
+            except OSError:
+                pass
+        try:
+            if not any(upd_dir.iterdir()):
+                upd_dir.rmdir()
+        except OSError:
+            pass
     cap = int(max_cache_mb * 1024 * 1024)
     if cap > 0 and CACHE_DIR.exists():
         evictable = []

@@ -209,7 +209,7 @@ To add keys, double-click **`Setup-Keys.cmd`** in your `Libre-Terminal` folder, 
 
 Everything personal (your watchlists, custom layouts, peer lists, and optional API keys) lives inside the `local` folder.
 
-- **Updating to a newer release:** Run **`Stop.cmd`** in your old folder, download and extract the new ZIP, copy your old `local` folder into the new `Libre-Terminal` folder if you want to keep your saved work, then run **`Install.cmd`** and **`Start.cmd`**.
+- **Updating to a newer release:** **`Start.cmd`** checks GitHub for a newer release when it launches. If a newer version exists, it shows what changed and lets you update in place (keeping your `local` folder), skip once, or turn off startup checks (`launcher.py update --enable` turns them back on). If you are already on the latest version, it launches straight away. To update by hand instead: run **`Stop.cmd`** in your old folder, download and extract the new ZIP, copy your old `local` folder into the new `Libre-Terminal` folder, then run **`Install.cmd`** and **`Start.cmd`**.
 - **Backing up or moving computers:** Stop the terminal and copy the `local` folder. To start completely fresh, stop the terminal and delete `local`.
 
 | Problem | What to do |
@@ -232,6 +232,7 @@ Everything personal (your watchlists, custom layouts, peer lists, and optional A
 ### Startup and backend options
 
 - **Skip the first-launch wait:** `Start.cmd --no-wait` opens the browser right away while data finishes loading in the background.
+- **Skip or manage the update check manually:** `Start.cmd --no-update` (or set `TERMINAL_NO_UPDATE=1`) skips the startup GitHub check once. Run `.venv-v5\Scripts\python.exe scripts\launcher.py update` (add `--check`, `--yes`, or `--enable` after choosing "don't ask again") to check or update manually.
 - **Legacy V4 backend (+480 MB):** Run `Install.cmd --with-v4` and `Start.cmd --with-v4` (add `--v4-port 7901` when setting custom ports). It adds 39 legacy cards (FMP, Intrinio, Finviz, EconDB, WSJ) to the same dashboards. An optional free [FMP key](https://site.financialmodelingprep.com/developer/docs) (250 calls/day) fills in the FMP cards.
 - **Custom local folder:** Set `TERMINAL_LOCAL_DIR` before launching. Services bind to `127.0.0.1` only.
 - **Let a trusted desktop app use the terminal's data:** Set `TERMINAL_EXTRA_ORIGINS` before launching to the app's origin, for example `setx TERMINAL_EXTRA_ORIGINS "tauri://localhost http://tauri.localhost"` for a Tauri app (then open a new window and start the terminal). Only exact origins are accepted (no `*`). Listed apps can read data and views but cannot change your saved layout or restart services. Leave it unset unless you trust the app.
