@@ -159,7 +159,7 @@ TITLES = {
 PROVIDER_FIXES = {"tmx/markets/movers": "tmx", "economy/calendar": "nasdaq", "commodity/psd_data": "usda", "commodity/psd_report": "usda"}
 
 # ------------------------------------------------------------------ concept siblings: one card, several sources
-# The same concept served by different routes or data services (source inventory, local/notes/source-inventory.md, section H).
+# The same concept served by different routes or data services (source inventory, local/notes/archive/source-inventory.md, section H).
 # Each member: (endpoint, provider or None, label, options). Options: mk = markets the source covers (us, ca, crypto, nordic,
 # other; a ticker-driven card takes the first member covering the ticker's market), sym = how the source wants the ticker
 # ("tmx": RY for RY.TO; "nordic": VOLV B for VOLV-B.ST; "crypto_base": BTC for BTC-USD), rn = parameters renamed when
