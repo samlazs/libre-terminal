@@ -52,6 +52,7 @@ EXPECTED_IGNORED_ROOT = {
     ".venv-v5",
     ".git",
     ".mcp.json",
+    "AGENTS.md",
     "." + "cla" + "ude",
     "__pycache__",
     ".ruff_cache",

@@ -4,6 +4,7 @@ local/
 # ---- Python environments (recreated by the installer); local tool settings with absolute paths ----
 .venv*/
 .mcp.json
+AGENTS.md
 .claude/
 
 # ---- Safety net: a key file left outside local/ is never published ----
