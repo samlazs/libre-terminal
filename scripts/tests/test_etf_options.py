@@ -50,4 +50,69 @@ check(ox.pick_expiries(["2026-12-16", "2026-12-17", "2026-12-18", "2027-01-15"],
       "monthly: the third Friday, not the daily Thursday before it")
 check(ox.pick_expiries(["2025-04-16", "2025-04-17", "2025-05-16"], "monthly", dt.date(2025, 4, 14)) == ["2025-04-17"], "monthly: Thursday when the Friday is a holiday")
 
+# off-hours OI backfill: when Yahoo chain has IV=0.20 and OI=0, gex() backfills OI from _nasdaq_oi and marks fallback
+saved_gex = ox._chain, getattr(ox, "_nasdaq_oi", None), c.history
+try:
+    EXP_GEX = "2027-11-23"  # 365 days from T0 (2026-11-23)
+    raw_zero_oi = [
+        {"strike": 100.0, "option_type": "call", "open_interest": 0, "implied_volatility": 0.2, "expiration": EXP_GEX,
+         "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0},
+        {"strike": 100.0, "option_type": "put", "open_interest": 0, "implied_volatility": 0.2, "expiration": EXP_GEX,
+         "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0},
+    ]
+    ox._chain = lambda sym: list(raw_zero_oi)
+    ox._nasdaq_oi = lambda sym: {(EXP_GEX, 100.0, "call"): 1000.0}
+    out_fb = c.dispatch("gex_strike", {"symbol": "TSTO", "today": T0})
+    src_names = [s["name"] for s in out_fb["sources"]]
+    check(out_fb["status"] == "fallback" and "Nasdaq" in src_names, f"gex backfill marks fallback and Nasdaq source: {out_fb['status']} {src_names}")
+    check(abs(out_fb["results"][0]["gex_mn"] - 0.198) <= 0.001 and out_fb["summary"]["max_pain"] == 100.0,
+          f"gex backfill computes 1,000 calls GEX = +0.198mn and Max Pain = 100: {out_fb['results']} {out_fb['summary']}")
+
+    raw_with_oi = [dict(raw_zero_oi[0], open_interest=1000), raw_zero_oi[1]]
+    nasdaq_called = [0]
+    ox._chain = lambda sym: list(raw_with_oi)
+    ox._nasdaq_oi = lambda sym: (nasdaq_called.__setitem__(0, nasdaq_called[0] + 1) or {})
+    out_ok = c.dispatch("gex_strike", {"symbol": "TSTO", "today": T0})
+    check(nasdaq_called[0] == 0 and [s["name"] for s in out_ok["sources"]] == ["Yahoo Finance"],
+          f"gex with existing OI skips _nasdaq_oi ({nasdaq_called[0]}) and keeps Yahoo Finance only")
+
+    # Cboe-direct chain attribution on gex_strike and vol_cone (+ Cboe omitted OI -> Nasdaq)
+    ox._chain = lambda sym: (list(raw_with_oi), "cboe")
+    out_cboe = c.dispatch("gex_strike", {"symbol": "TSTO", "today": T0})
+    check([s["name"] for s in out_cboe["sources"]] == ["Cboe"] and "Cboe IV" in out_cboe["convention"],
+          f"gex Cboe-direct attribution: {out_cboe['sources']} | {out_cboe['convention']}")
+
+    raw_cboe_vc = [dict(raw_with_oi[0], expiration="2026-12-24")]
+    ox._chain = lambda sym: (list(raw_cboe_vc), "cboe")
+    c.history = lambda syms, start: {"TSTO": list(cl)}
+    out_vc_cboe = c.dispatch("vol_cone", {"symbol": "TSTO", "today": dt.date(2026, 11, 24)})
+    check([s["name"] for s in out_vc_cboe["sources"]] == ["Yahoo Finance", "Cboe"],
+          f"vol_cone Cboe-direct attribution: {out_vc_cboe['sources']}")
+
+    ox._chain = lambda sym: (list(raw_zero_oi), "cboe")
+    ox._nasdaq_oi = lambda sym: {(EXP_GEX, 100.0, "call"): 1000.0}
+    out_cboe_fb = c.dispatch("gex_strike", {"symbol": "TSTO", "today": T0})
+    check([s["name"] for s in out_cboe_fb["sources"]] == ["Cboe", "Nasdaq"]
+          and any("Cboe omitted off-hours open interest" in nt for nt in (out_cboe_fb.get("notes") or ())),
+          f"gex Cboe-direct + Nasdaq note: {out_cboe_fb['sources']} | {out_cboe_fb.get('notes')}")
+
+    # Non-mixing OI replacement: 19/20 contracts zeroed, 1 contract has Yahoo OI=5000 at strike 105 (not in Nasdaq);
+    # whole OI column is replaced by Nasdaq snapshot (strike 100 call = 1000) so Yahoo's 5000 does not mix into GEX.
+    mixed_chain = [
+        {"strike": 100.0 + i * 0.5, "option_type": "call" if i % 2 == 0 else "put",
+         "open_interest": 5000 if (i == 10) else 0, "implied_volatility": 0.2,
+         "expiration": EXP_GEX, "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0}
+        for i in range(20)
+    ]
+    ox._chain = lambda sym: (list(mixed_chain), "yahoo")
+    ox._nasdaq_oi = lambda sym: {(EXP_GEX, 100.0, "call"): 1000.0, (EXP_GEX, 100.5, "put"): 500.0}
+    out_nomix = c.dispatch("gex_strike", {"symbol": "TSTO", "today": T0})
+    strikes_shown = {r["strike"]: r["gex_mn"] for r in out_nomix["results"]}
+    check(strikes_shown.get(105.0, 0.0) == 0.0 and abs(strikes_shown.get(100.0, 0.0) - 0.198) <= 0.001,
+          f"gex whole-column OI replacement avoids mixing Yahoo strike 105 (5000) with Nasdaq: {strikes_shown}")
+finally:
+    ox._chain, c.history = saved_gex[0], saved_gex[2]
+    if saved_gex[1] is not None:
+        ox._nasdaq_oi = saved_gex[1]
+
 done("test_etf_options")

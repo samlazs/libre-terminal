@@ -208,7 +208,7 @@ def _fail(msg, *, kind, http_status=None, retry_after=None):
     return e
 
 
-def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None, headers=None):
+def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None, headers=None, headers_out=None):
     """GET (or POST `data`) one URL under its provider's policy; the one place the terminal opens a connection.
 
     parse: "json" (NaN -> None; empty body -> {"results": []}; non-JSON -> upstream error), "text" (UTF-8) or "bytes".
@@ -280,6 +280,8 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
                     time.sleep(wait)
             try:
                 with C._transport(req, this_timeout, ctx) as r:
+                    if headers_out is not None and getattr(r, "headers", None) is not None and hasattr(r.headers, "items"):
+                        headers_out.update({k.lower(): v for k, v in r.headers.items()})
                     body = r.read()
             finally:
                 if pol["min_interval"]:
@@ -348,8 +350,10 @@ def fetch(url, *, provider=None, parse="bytes", timeout=None, data=None, ua=None
     raise last
 
 
-def http_json(url, timeout=45):
+def http_json(url, timeout=45, headers_out=None):
     """A JSON answer (backend or public API) under the URL's provider policy; see fetch."""
+    if headers_out is not None:
+        return C.fetch(url, parse="json", timeout=timeout, headers_out=headers_out)
     return C.fetch(url, parse="json", timeout=timeout)
 
 
@@ -363,9 +367,12 @@ def api_full(base, path, _timeout=45, **params):
     return j if isinstance(j, dict) else {"results": j}
 
 
-def api(base, path, _timeout=45, **params):
+def api(base, path, _timeout=45, _headers_out=None, **params):
     q = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
-    j = C.http_json(f"{base}/{path}?{q}", timeout=_timeout)
+    if _headers_out is not None:
+        j = C.http_json(f"{base}/{path}?{q}", timeout=_timeout, headers_out=_headers_out)
+    else:
+        j = C.http_json(f"{base}/{path}?{q}", timeout=_timeout)
     return j.get("results", j) if isinstance(j, dict) else j
 
 

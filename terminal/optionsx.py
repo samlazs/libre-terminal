@@ -21,15 +21,46 @@ import composite as C
 EXPIRY_OPTIONS = [{"label": "Nearest monthly", "value": "monthly"}, {"label": "All expiries within 60 days", "value": "60d"}]
 WINDOWS = [10, 21, 42, 63, 126]
 YAHOO = C.src("Yahoo Finance", "option chain (open interest, implied volatility per contract) and daily closes", "https://finance.yahoo.com/")
+CBOE = C.src("Cboe", "option chain (open interest, implied volatility per contract)", "https://www.cboe.com/")
+NASDAQ = C.src("Nasdaq", "option chain open interest", "https://www.nasdaq.com/")
+
+
+def _unpack_chain(res):
+    if isinstance(res, tuple) and len(res) == 2:
+        return res
+    return res, "yahoo"
 
 
 def _chain(sym):
-    def run():
+    def _yf():
         rows = C.api(C.V5, "derivatives/options/chains", provider="yfinance", symbol=sym, _timeout=60) or []
         if not rows:
             raise C.CompositeError(f"Yahoo Finance has no option chain for {sym}.")
-        return rows
-    return C.cached(("yahoo_chain", sym), 900, run)
+        return rows, "yahoo"
+
+    def run():
+        hdrs = {}
+        try:
+            rows = C.api(C.V5, "derivatives/options/chains", provider="cboe", symbol=sym, _timeout=60, _headers_out=hdrs) or []
+            if rows:
+                prov = "yahoo_sub" if "yahoo" in str(hdrs.get("x-terminal-source") or "").lower() else "cboe"
+                return rows, prov
+            return _yf()
+        except C.CompositeError:
+            return _yf()
+    return C.cached(("options_chain", sym), 900, run)
+
+
+def _nasdaq_oi(sym):
+    def run():
+        rows = C.api(C.V5, "derivatives/options/chains", provider="nasdaq", symbol=sym, _timeout=45) or []
+        out = {}
+        for r in rows:
+            k, t, exp, oi = r.get("strike"), str(r.get("option_type") or "").lower(), r.get("expiration"), r.get("open_interest")
+            if isinstance(k, (int, float)) and t in ("call", "put") and exp and isinstance(oi, (int, float)) and oi > 0:
+                out[(str(exp)[:10], float(k), t)] = float(oi)
+        return out
+    return C.cached(("nasdaq_oi", sym), 900, run)
 
 
 def pick_expiries(expiries, mode, today):
@@ -97,9 +128,10 @@ def _rows(raw):
 
 def gex(symbol="SPY", expiry="monthly", today=None, **_):
     sym = (C._syms(symbol, 1) or ["SPY"])[0]
-    C.us_only(sym, "The Yahoo Finance option chain")
+    C.us_only(sym, "The U.S. option chain")
     today = today or dt.date.today()
-    raw = _chain(sym)
+    raw, prov = _unpack_chain(_chain(sym))
+    chain_src = CBOE if prov == "cboe" else YAHOO
     spot = next((r.get("underlying_price") for r in raw if isinstance(r.get("underlying_price"), (int, float))), None)
     if not spot:
         raise C.CompositeError(f"The {sym} chain carries no underlying price.")
@@ -107,8 +139,22 @@ def gex(symbol="SPY", expiry="monthly", today=None, **_):
     mode = expiry if expiry in ("monthly", "60d") else "monthly"
     exps = pick_expiries([r["expiration"] for r in rows], mode, today)
     if not exps:
-        raise C.CompositeError(f"No {sym} expiry from today on in the Yahoo chain.")
+        raise C.CompositeError(f"No {sym} expiry from today on in the {chain_src['name']} chain.")
     use = [r for r in rows if r["expiration"] in exps]
+    sources = [chain_src]
+    oi_rows = sum(1 for r in use if r["oi"] > 0)
+    if use and (oi_rows == 0 or (len(use) >= 20 and oi_rows * 10 < len(use))):
+        try:
+            oi_map = _nasdaq_oi(sym) or {}
+        except C.CompositeError as e:
+            C.partial_from(e, "Nasdaq open interest")
+            oi_map = {}
+        matched = sum(1 for r in use if (r["expiration"], r["strike"], r["type"]) in oi_map)
+        if matched > oi_rows:
+            for r in use:
+                r["oi"] = oi_map.get((r["expiration"], r["strike"], r["type"]), 0.0)
+            C.note_fallback("Nasdaq open interest", f"{chain_src['name']} omitted off-hours open interest")
+            sources = [chain_src, NASDAQ]
     g = gex_by_strike(use, spot, today)
     if not g:
         raise C.CompositeError(f"No open interest with a usable implied volatility near the money for {sym}.")
@@ -124,18 +170,19 @@ def gex(symbol="SPY", expiry="monthly", today=None, **_):
     if mp is not None:
         lay["shapes"].append({"type": "line", "x0": mp, "x1": mp, "yref": "paper", "y0": 0, "y1": 1, "line": {"color": C.PALETTE[3], "width": 1.5, "dash": "dash"}})
     which = f"expiry {exps[0]}" if len(exps) == 1 else f"{len(exps)} expiries {exps[0]} to {exps[-1]}"
-    conv = f"{sym} spot {spot:,.2f} (dotted) · " + (f"Max Pain {mp:,.2f} for {exps[0]} (dashed)" if mp is not None else f"Max Pain n/a for {exps[0]} (no open interest)") + f" · {which} · dealers assumed long calls, short puts · Black-Scholes gamma from Yahoo IV"
+    iv_label = "Cboe IV" if prov == "cboe" else ("calculated IV" if prov == "yahoo_sub" else "Yahoo IV")
+    conv = f"{sym} spot {spot:,.2f} (dotted) · " + (f"Max Pain {mp:,.2f} for {exps[0]} (dashed)" if mp is not None else f"Max Pain n/a for {exps[0]} (no open interest)") + f" · {which} · dealers assumed long calls, short puts · Black-Scholes gamma from {iv_label}"
     lay["annotations"] = [C._note(conv)]
     results = [{"strike": k, "gex_mn": v, "spot": spot, "max_pain": mp} for k, v in zip(xs, ys)]
     # The chain carries no quote time of its own: its newest data point is the latest contract trade time (the shown expiries
     # first, else any contract in the chain); the underlying price in it is undated.
     as_of = C.newest_date(r["traded"] for r in use) or C.newest_date(r["traded"] for r in rows)
-    out = {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv,
+    out = {"data": traces, "layout": lay, "sources": sources, "results": results, "convention": conv,
            "summary": {"spot": spot, "max_pain": mp, "net_gex_mn": round(total, 1), "expiries": exps}}
     if as_of:
         out["as_of"] = as_of
     else:
-        out["as_of_na"] = f"The Yahoo chain for {sym} gives no trade time for any contract, and its underlying price is undated."
+        out["as_of_na"] = f"The {chain_src['name']} chain for {sym} gives no trade time for any contract, and its underlying price is undated."
     return out
 
 
@@ -197,8 +244,9 @@ def vol_cone(symbol="SPY", today=None, **_):
     traces.append({"type": "scatter", "mode": "lines+markers", "name": f"Today realised  {c[21][5]:.1f}% (21d)" if 21 in c else "Today realised", "x": xs,
                    "y": [round(c[w][5], 2) for w in xs], "line": {"width": 2, "color": C.PALETTE[1]}, "hovertemplate": "%{y:.1f}%<extra>today</extra>"})
     note_iv = ""
+    chain_prov = "yahoo"
     try:
-        raw = _chain(sym)
+        raw, chain_prov = _unpack_chain(_chain(sym))
         spot = next((r.get("underlying_price") for r in raw if isinstance(r.get("underlying_price"), (int, float))), None)
         if not spot:
             spot = closes[-1][1]
@@ -217,8 +265,9 @@ def vol_cone(symbol="SPY", today=None, **_):
     lay["annotations"] = [C._note(conv)]
     results = [{"window_days": w, "min": round(c[w][0], 2), "p25": round(c[w][1], 2), "median": round(c[w][2], 2),
                 "p75": round(c[w][3], 2), "max": round(c[w][4], 2), "today_realised": round(c[w][5], 2)} for w in xs]
+    sources = [YAHOO, CBOE] if term and chain_prov == "cboe" else [YAHOO]
     # the last complete session of the price history the cone is built from (the implied-volatility curve is the chain as of now)
-    return {"data": traces, "layout": lay, "sources": [YAHOO], "results": results, "convention": conv, "as_of": closes[-1][0]}
+    return {"data": traces, "layout": lay, "sources": sources, "results": results, "convention": conv, "as_of": closes[-1][0]}
 
 
 def static_sources(name, p):

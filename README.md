@@ -8,6 +8,8 @@ It puts equities, options, sovereign yield curves, corporate bonds, credit sprea
 
 Most of it works straight away, with no account, login, or API key. Optional free keys from FRED, EIA, BLS, and Congress.gov add more U.S. economic, energy, labor, and legislative data.
 
+> **[Try the interactive demo](https://samlazs.github.io/libre-terminal/)** *(explore the real UI in your browser on a frozen market snapshot, no install)* &nbsp;·&nbsp; **[Download for Windows (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)**
+
 ![Cross-asset Markets Summary in Libre Terminal](docs/markets-summary.jpg)
 
 *Markets Summary: watchlist, top market news, index and Treasury futures, U.S. indices and sectors, normalized returns, currencies, and country ETFs on a single screen.*

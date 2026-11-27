@@ -140,6 +140,7 @@
     var src = ctx.source || "The source", clean = T.cleanMessage(msg), atSource = "The problem is at the source, not in your settings. Try again later (press ↻).";
     if (kind === "input") return { cls: "input", kind: "info", text: clean || "Choose the missing setting to load this card.", hint: null, param: null };
     if (kind === "not_covered") return { cls: "covered", kind: "info", text: clean || ("Not covered" + (ctx.symbol ? " for " + ctx.symbol : "") + " by " + src + "."), hint: "Try another symbol." };
+    if (kind === "demo_unavailable") return { cls: "demo", kind: "info", text: clean || "Not included in this frozen preview.", hint: "Download Libre Terminal locally for live data across all 28 dashboards and any global ticker." };
     if (kind === "rate_limited") return { cls: "ratelimit", kind: "info", text: src + " is limiting how often it can be asked right now.", hint: "Try again in about " + waitText(info.retryAfter, /OECD/i.test(String(msg) + src) ? 10 : 2) + " (press ↻)." };
     if (kind === "timeout") {
       if (/keeps loading in the background/i.test(String(msg))) return { cls: "slow", kind: "info", text: src + " is slow to answer the first request for this dataset.", hint: "It keeps loading in the background; press ↻ in a minute." };
@@ -1311,11 +1312,20 @@
             if (!fr.ok || !fj) throw T.httpError(fr.status, ftxt, fj ? null : "The terminal could not pick a document (HTTP " + fr.status + ").");
             lastEnvelope = fj;
             if (Array.isArray(fj.sources)) answerSources = fj.sources;
-            if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+\/api\/v1\/sec\/filing_viewer_app\?/.test(fj.frame || "")) {
+            var demoFrameOk = T.DEMO && /^\.\/demo\/frames\/[A-Za-z0-9._-]+\.html$/.test(fj.frame || "");
+            if (!demoFrameOk && !/^http:\/\/(127\.0\.0\.1|localhost):\d+\/api\/v1\/sec\/filing_viewer_app\?/.test(fj.frame || "")) {
               clearBody(); drawTools(); stamp();
               return message("info", fj.message || "Nothing to show for this choice.");
             }
             frameSrc = fj.frame;
+          }
+          if (ctx.backend.id !== "x" && T.DEMO && typeof T.DEMO.resolveFrame === "function") {
+            var demoFrame = T.DEMO.resolveFrame(frameSrc, def, p);
+            if (!demoFrame) {
+              clearBody(); drawTools(); foot.textContent = "";
+              return message("info", "Not included in this frozen preview.", "Interactive embedded frames run locally. Download Libre Terminal for live data across all 28 dashboards and any global ticker.");
+            }
+            frameSrc = demoFrame;
           }
           clearBody();
           // sandboxed: the embedded page (a backend tool or a provider widget) cannot navigate the terminal itself
@@ -1325,7 +1335,7 @@
           var fr2 = el("iframe", { title: def.name, referrerpolicy: "no-referrer", sandbox: "allow-scripts allow-same-origin allow-popups allow-forms" });
           fr2.style.visibility = "hidden";
           // the SEC filing viewer is a white document page on another origin: shown inverted to the dark palette (review G1)
-          if (/filing_viewer_app/.test(frameSrc)) fr2.classList.add("dark-doc");
+          if (/filing_viewer_app/.test(frameSrc) || (T.DEMO && lastEnvelope && lastEnvelope.dark_doc)) fr2.classList.add("dark-doc");
           frameTimer = setTimeout(function () {
             if (!alive || my !== seq || !waitBox.isConnected) return;
             waitMsg.textContent = "Still loading this chart — fetching upstream data…";

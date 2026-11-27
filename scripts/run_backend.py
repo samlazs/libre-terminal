@@ -1261,13 +1261,46 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
             raise OpenBBError("Yahoo Finance returned no option prices recent enough to calculate implied volatility.")
         return views[name]
 
+    def _default_smile_expiration(view):
+        df = getattr(view, "dataframe", None)
+        if df is None or df.empty or "implied_volatility" not in df.columns:
+            return None
+        priced = df[df["implied_volatility"] > 0]
+        if priced.empty:
+            return None
+        spot = float(view.underlying_price[0] or 0.0) if getattr(view, "underlying_price", None) else 0.0
+        uniq = priced.drop_duplicates(["expiration", "strike"])
+        if spot > 0:
+            below = uniq[uniq["strike"] < spot].groupby("expiration")["strike"].count()
+            above = uniq[uniq["strike"] > spot].groupby("expiration")["strike"].count()
+            good = set(below[below >= 2].index) & set(above[above >= 2].index)
+            if good:
+                uniq = uniq[uniq["expiration"].isin(good)]
+        dtes = uniq.groupby("expiration")["dte"].min() if "dte" in uniq.columns else None
+        exps = sorted(str(e)[:10] for e in uniq["expiration"].unique())
+        if not exps:
+            return None
+        if dtes is not None:
+            later = sorted(str(e)[:10] for e, d in dtes.items() if d >= 1)
+            if later:
+                return later[0]
+            nonneg = sorted(str(e)[:10] for e, d in dtes.items() if d >= 0)
+            if nonneg:
+                return nonneg[0]
+        return exps[0]
+
     def use_view(module: str, pick):
         mod = importlib.import_module(f"openbb_cboe.utils.options.{module}")
         orig = getattr(mod, module)
 
         def builder(data, *args, **kwargs):
             name = pick(kwargs)
-            return orig(view_of(data, name) if name else data, *args, **kwargs)
+            view = view_of(data, name) if name else data
+            if module == "create_smile" and not (args and args[0]) and not kwargs.get("expirations"):
+                chosen = _default_smile_expiration(view)
+                if chosen:
+                    kwargs["expirations"] = chosen
+            return orig(view, *args, **kwargs)
 
         setattr(mod, module, builder)               # the routes import the builder when they are called
 

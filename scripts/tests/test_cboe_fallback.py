@@ -48,12 +48,12 @@ check(close(om.years_to_expiry(date(2026, 12, 18), "SPX", friday) * 365, 28 - 6.
 
 
 # ---- a chain priced at a known 30% comes back at 30%
-def chain(root="ABC", expiry=date(2026, 12, 18), quotes=True, traded=friday, strikes=(80, 90, 100, 110, 120), oi=10):
+def chain(root="ABC", expiry=date(2026, 12, 18), quotes=True, traded=friday, strikes=(80, 90, 100, 110, 120), oi=10, spot=100.0):
     years, out = om.years_to_expiry(expiry, root, friday), []
     for k in strikes:
         for side in ("call", "put"):
-            v = float(om.black76(100.0, np.array([float(k)]), years, np.array([0.3]), 1.0, np.array([side == "call"]))[0])
-            out.append({"contract_symbol": f"{root}{expiry:%y%m%d}{side[0].upper()}{k * 1000:08d}", "expiration": expiry,
+            v = float(om.black76(spot, np.array([float(k)]), years, np.array([0.3]), 1.0, np.array([side == "call"]))[0])
+            out.append({"contract_symbol": f"{root}{expiry:%y%m%d}{side[0].upper()}{round(k * 1000):08d}", "expiration": expiry,
                         "strike": float(k), "option_type": side, "bid": v * 0.99 if quotes else 0.0,
                         "ask": v * 1.01 if quotes else 0.0, "last_trade_price": v,
                         "last_trade_time": traded.tz_convert("UTC"), "open_interest": oi, "volume": 1})
@@ -87,6 +87,13 @@ expired, _ = om.analyse_chain(pd.concat([chain(), chain(expiry=date(2026, 11, 20
                               100.0, friday, 0.0, saturday)
 check(set(expired.expiration) == {date(2026, 12, 18)}, "Friday's expiry is gone on Saturday")
 check(om.priced_part(df, 130.0).empty, "an expiry priced on one side of spot only is not plotted")
+thin_side = pd.concat([
+    chain(expiry=date(2026, 11, 23), strikes=(347.5, 350.0), spot=350.98),
+    chain(expiry=date(2026, 11, 24), strikes=(347.5, 350.0, 352.5), spot=350.98),
+], ignore_index=True)
+thin_df, _ = om.analyse_chain(thin_side, 350.98, friday, 0.0, saturday)
+check(om.priced_part(thin_df, 350.98).empty, "dying expiries with fewer than two priced strikes on each side of spot are excluded")
+check(len(om.priced_part(df, 100.0)) == 10, "an expiry with at least two priced strikes on each side of spot is kept")
 
 # ---- settlements, index snapshots, symbols
 rows = [{"product": "VX", "symbol": s, "expiration": e, "price": v, "settlement_date": "2026-11-20"} for s, e, v in (
@@ -220,6 +227,33 @@ async def installed():
                            ("create_term_structure", {}), ("create_stats", {})):
         build = getattr(importlib.import_module(f"openbb_cboe.utils.options.{module}"), module)
         check(len(build(got[0], **kwargs).results) > 0, f"{module} {kwargs} draws from the substitute chain")
+
+    # default smile skips 0DTE when a later multi-strike expiry exists, while still honoring an explicit expiry
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    today_et = now_et.date()
+    exp0, exp1 = today_et, today_et + timedelta(days=7)
+    quote_t = pd.Timestamp(f"{today_et} 10:00", tz="America/New_York")
+
+    def smile_chain_for(expiry, strikes=(80, 90, 100, 110, 120)):
+        yrs, rows_out = om.years_to_expiry(expiry, "SML", quote_t), []
+        for k in strikes:
+            for side in ("call", "put"):
+                v = float(om.black76(100.0, np.array([float(k)]), yrs, np.array([0.28]), 1.0, np.array([side == "call"]))[0])
+                rows_out.append({"contract_symbol": f"SML{expiry:%y%m%d}{side[0].upper()}{k * 1000:08d}", "expiration": expiry,
+                                 "strike": float(k), "option_type": side, "bid": v * 0.99, "ask": v * 1.01,
+                                 "last_trade_price": v, "last_trade_time": quote_t.tz_convert("UTC"), "open_interest": 10, "volume": 5})
+        return pd.DataFrame(rows_out)
+
+    built_smile = rb.build_substitute_chain("SML", (pd.concat([smile_chain_for(exp0), smile_chain_for(exp1)], ignore_index=True), 100.0, quote_t), 0.0, today_et)
+    smile_mod = importlib.import_module("openbb_cboe.utils.options.create_smile")
+    def_smile = smile_mod.create_smile(built_smile[0], otm=True)
+    def_exps = {str(r.Expiration)[:10] for r in def_smile.results}
+    check(def_exps == {exp1.isoformat()} and len(def_smile.results) >= 4, f"default smile skips 0DTE {exp0} -> {def_exps}")
+    exp_smile = smile_mod.create_smile(built_smile[0], expirations=exp0.isoformat(), otm=True)
+    check({str(r.Expiration)[:10] for r in exp_smile.results} == {exp0.isoformat()}, "explicit 0DTE expiration is still honored")
+
     check(len(got[0].strategies(days=-1)) == 2, "a straddle for each expiry")
     try:
         await data_handler.load_symbol("NONE")

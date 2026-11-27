@@ -156,8 +156,12 @@ def analyse_chain(rows: pd.DataFrame, spot: float, quoted_at, rate: float, today
 
 
 def priced_part(df: pd.DataFrame, spot: float) -> pd.DataFrame:
-    """The rows a volatility chart can plot: priced strikes of the expiries priced on both sides of spot."""
+    """The rows a volatility chart can plot: priced strikes of expiries with at least two priced strikes on each side of spot."""
     out = df[df["main"] & df["implied_volatility"].notna()]
-    span = out.groupby("expiration")["strike"].agg(["min", "max"])
-    keep = span[(span["min"] <= spot) & (span["max"] >= spot)].index
+    if out.empty:
+        return out.reset_index(drop=True)
+    uniq = out.drop_duplicates(["expiration", "strike"])
+    below = uniq[uniq["strike"] < spot].groupby("expiration")["strike"].count()
+    above = uniq[uniq["strike"] > spot].groupby("expiration")["strike"].count()
+    keep = below[below >= 2].index.intersection(above[above >= 2].index)
     return out[out["expiration"].isin(keep)].reset_index(drop=True)

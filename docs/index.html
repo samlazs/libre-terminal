@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Libre Terminal — Interactive Preview</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d0d0d'/%3E%3Cpath d='M3 11l3-4 3 2 4-5' fill='none' stroke='%233987e5' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./demo/static/app.css">
+<link rel="stylesheet" href="./demo/demo.css">
+</head>
+<body>
+<div id="demo-bar" role="region" aria-label="Interactive preview bar">
+  <div class="demo-bar-l">
+    <span class="demo-pill-tag">FROZEN PREVIEW</span>
+    <span class="demo-date-txt">Interactive snapshot as of <strong id="demo-date">loading…</strong></span>
+  </div>
+  <nav class="demo-jumps" aria-label="Featured showcase screens">
+    <button type="button" class="demo-jump" data-dash="d:markets" data-tab="overview">Markets</button>
+    <button type="button" class="demo-jump" data-dash="d:eq-company" data-tab="overview">Company</button>
+    <button type="button" class="demo-jump" data-dash="d:credit" data-tab="bond-lookup-trace">Credit / TRACE</button>
+    <button type="button" class="demo-jump" data-dash="d:rates" data-tab="policy-expectations">Rates &amp; Fed</button>
+    <button type="button" class="demo-jump" data-dash="d:options" data-tab="volatility">Options Vol</button>
+    <button type="button" class="demo-jump" data-dash="d:energy" data-tab="oil">Energy</button>
+    <button type="button" class="demo-jump" data-dash="d:trade" data-tab="chokepoints">Shipping</button>
+  </nav>
+  <div class="demo-bar-r">
+    <a class="demo-btn primary" href="https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip" target="_blank" rel="noopener">Download for Windows</a>
+    <a class="demo-btn" href="https://github.com/samlazs/libre-terminal" target="_blank" rel="noopener">GitHub</a>
+  </div>
+</div>
+<div id="app">
+  <aside id="sidebar">
+    <div class="brand">
+      <span id="brand-name" class="brand-name">Libre Terminal</span>
+      <a class="brand-credit" href="https://github.com/openbq-org/OpenBB" target="_blank" rel="noopener" title="Data functions come from the open-source OpenBB Platform">built on the OpenBB Platform</a>
+      <button id="btn-collapse" class="icon-btn" title="Collapse sidebar">«</button>
+    </div>
+    <div class="side-search"><input id="dash-filter" type="search" placeholder="Filter dashboards…" autocomplete="off"></div>
+    <div id="dash-list" class="dash-list"></div>
+    <div class="side-foot">
+      <div id="backend-status"></div>
+      <div id="warm-status" class="warm-status hidden"></div>
+      <div id="save-status" class="muted small"></div>
+    </div>
+  </aside>
+  <main id="main">
+    <header id="topbar">
+      <button id="btn-expand" class="icon-btn hidden" title="Show sidebar">»</button>
+      <div id="dash-title" class="dash-title" title="Double-click to rename"></div>
+      <div id="groups" class="groups"></div>
+      <div class="spacer"></div>
+      <input id="goto" type="search" placeholder="Ticker, company, data…  / or Ctrl+G" autocomplete="off" spellcheck="false" title="Type a ticker or a company name (AAPL, JPM, SPY) or the name of a dashboard, tab or dataset. Press / or Ctrl+G from anywhere.">
+      <button id="btn-add" class="btn primary" title="Add a widget (Ctrl+K)">+ Widget</button>
+      <button id="btn-refresh" class="btn" title="Reload every widget on this tab">Refresh</button>
+      <button id="btn-restart" class="btn" title="Restart the data services and clear cached errors if charts or data stop responding">Restart</button>
+      <button id="btn-more" class="btn" title="Dashboard actions">⋯</button>
+      <button id="btn-help" class="btn" title="Quick guide: shortcuts, search, sources, exports, keys (?)">?</button>
+    </header>
+    <nav id="tabs" class="tabs"></nav>
+    <div id="banner" class="banner hidden"></div>
+    <div id="warm-banner" class="banner info hidden"></div>
+    <section id="canvas-wrap"><div id="canvas"></div><div id="empty" class="empty hidden"></div></section>
+  </main>
+</div>
+<div id="modal-root"></div>
+<div id="pop-root"></div>
+<script src="https://cdn.plot.ly/plotly-4.1.1.min.js"></script>
+<script src="./demo/static/request.js"></script>
+<script src="./demo/demo.js"></script>
+<script src="./demo/static/md.js"></script>
+<script src="./demo/static/table.js"></script>
+<script src="./demo/static/statements.js"></script>
+<script src="./demo/static/controls.js"></script>
+<script src="./demo/static/securities.js"></script>
+<script src="./demo/static/grid.js"></script>
+<script src="./demo/static/widgets.js"></script>
+<script src="./demo/static/app.js"></script>
+</body>
+</html>
