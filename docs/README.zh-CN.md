@@ -10,6 +10,9 @@
 
 绝大部分功能开箱即用，无需注册账户、登录或 API 密钥。另可选配 FRED、EIA、BLS 和 Congress.gov 的免费密钥，获取更多美国经济、能源、劳动力及立法数据。
 
+> **[体验交互式演示](https://samlazs.github.io/libre-terminal/)** *（在浏览器中基于静态市场快照直接体验真实界面）*<br>
+> **[下载 Windows 版（.zip）](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)**
+
 ![Libre Terminal 跨资产 Markets Summary 看板](markets-summary.jpg)
 
 *Markets Summary：自选列表、市场要闻、股指与美国国债期货、美国主要股指与行业板块、归一化收益、外汇以及国家 ETF，尽在同一屏。*

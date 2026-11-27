@@ -10,6 +10,9 @@ Reúne en un solo lugar renta variable, opciones, curvas de rendimiento soberana
 
 La mayor parte funciona de inmediato, sin cuenta, inicio de sesión ni clave API. Las claves gratuitas opcionales de FRED, EIA, BLS y Congress.gov añaden más datos estadounidenses de economía, energía, mercado laboral y actividad legislativa.
 
+> **[Probar la demo interactiva](https://samlazs.github.io/libre-terminal/)** *(explore la interfaz real en su navegador con una instantánea fija del mercado)*<br>
+> **[Descargar para Windows (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)**
+
 ![Resumen de mercados multiactivo en Libre Terminal](markets-summary.jpg)
 
 *Markets Summary: lista de seguimiento, principales noticias de mercado, futuros sobre índices y sobre deuda del Tesoro, índices y sectores estadounidenses, rentabilidades normalizadas, divisas y ETF por país en una sola pantalla.*

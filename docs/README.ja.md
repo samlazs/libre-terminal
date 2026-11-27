@@ -10,6 +10,9 @@
 
 ほとんどの機能は、アカウント登録やログイン、APIキーなしですぐにご利用いただけます。FRED、EIA、BLS、Congress.gov の無料キー（任意）を追加すると、米国の経済・エネルギー・労働・立法関連のデータがさらに充実します。
 
+> **[インタラクティブ・デモを試す](https://samlazs.github.io/libre-terminal/)** *（固定されたマーケットスナップショット上で、実際のUIをブラウザから操作できます）*<br>
+> **[Windows版をダウンロード（.zip）](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)**
+
 ![Libre Terminal のクロスアセット Markets Summary](markets-summary.jpg)
 
 *Markets Summary：ウォッチリスト、主要マーケットニュース、株価指数先物・米国債先物、米国株価指数とセクター、基準化リターン、通貨、国別ETFを1画面に集約。*

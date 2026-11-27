@@ -10,6 +10,9 @@
 
 대부분의 기능은 계정, 로그인, API 키 없이 바로 사용할 수 있습니다. FRED, EIA, BLS, Congress.gov의 무료 키(선택 사항)를 등록하면 미국 경제·에너지·노동·입법 데이터가 추가됩니다.
 
+> **[인터랙티브 데모 체험하기](https://samlazs.github.io/libre-terminal/)** *(고정된 시장 스냅샷으로 브라우저에서 실제 UI를 직접 둘러볼 수 있습니다)*<br>
+> **[Windows용 다운로드 (.zip)](https://github.com/samlazs/libre-terminal/releases/latest/download/Libre-Terminal-Windows.zip)**
+
 ![Libre Terminal의 크로스에셋 Markets Summary 화면](markets-summary.jpg)
 
 *Markets Summary: 관심종목, 주요 시장 뉴스, 지수·국채 선물, 미국 지수와 섹터, 정규화 수익률, 통화, 국가별 ETF를 한 화면에 담았습니다.*
