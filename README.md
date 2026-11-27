@@ -1,5 +1,7 @@
 # Libre Terminal
 
+**English** &nbsp;·&nbsp; [简体中文](docs/README.zh-CN.md) &nbsp;·&nbsp; [日本語](docs/README.ja.md) &nbsp;·&nbsp; [한국어](docs/README.ko.md) &nbsp;·&nbsp; [Español](docs/README.es.md)
+
 A free, open-source market research terminal that runs on your own computer and opens in your browser.
 
 It puts equities, options, sovereign yield curves, corporate bonds, credit spreads, FX, commodities, energy, shipping, macro data, SEC filings, and news in one place, across **28 dashboards**. The data comes from public and official sources (Federal Reserve, ECB, BIS, IMF, OECD, SEC, FINRA, CFTC, U.S. EIA, FDIC, Yahoo Finance, Nasdaq, TMX, and Deribit) through the open-source [OpenBB Platform](https://github.com/OpenBB-finance/OpenBB).
