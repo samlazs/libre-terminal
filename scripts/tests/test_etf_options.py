@@ -110,6 +110,85 @@ try:
     strikes_shown = {r["strike"]: r["gex_mn"] for r in out_nomix["results"]}
     check(strikes_shown.get(105.0, 0.0) == 0.0 and abs(strikes_shown.get(100.0, 0.0) - 0.198) <= 0.001,
           f"gex whole-column OI replacement avoids mixing Yahoo strike 105 (5000) with Nasdaq: {strikes_shown}")
+
+    # Partial Yahoo OI zeroing (>10% populated, but active contracts have volume > 0 & OI == 0):
+    # 14 contracts have OI=100 (58.3%), 10 active contracts (incl. ATM 100.0 call) have volume=50 & OI=0, plus Yahoo-only strikes 110.0-111.5.
+    partial_chain = [
+        {"strike": 100.0 + i * 0.5, "option_type": "call" if i % 2 == 0 else "put",
+         "open_interest": 0 if i < 10 else 100, "volume": 50 if i < 10 else 0,
+         "implied_volatility": 0.2, "expiration": EXP_GEX,
+         "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0}
+        for i in range(24)
+    ]
+    nq_full = {(EXP_GEX, 100.0 + i * 0.5, "call" if i % 2 == 0 else "put"): (1000.0 if i == 0 else 100.0)
+               for i in range(20)}
+    ox._chain = lambda sym: (list(partial_chain), "yahoo_sub")
+    ox._nasdaq_oi = lambda sym: dict(nq_full)
+    out_partial = c.dispatch("gex_strike", {"symbol": "TSTP", "today": T0})
+    p_srcs = [s["name"] for s in out_partial["sources"]]
+    p_notes = " | ".join(out_partial.get("notes") or ())
+    p_strikes = {r["strike"]: r["gex_mn"] for r in out_partial["results"]}
+    check(out_partial["status"] == "fallback" and "Nasdaq" in p_srcs and "omitted partial open interest" in p_notes,
+          f"partial Yahoo OI triggers Nasdaq replacement & note: {out_partial['status']} {p_srcs} {p_notes}")
+    check(abs(p_strikes.get(100.0, 0.0) - 0.198) <= 0.001 and p_strikes.get(110.0, 0.0) == 0.0,
+          f"partial Yahoo OI replaces whole column with Nasdaq (+0.198mn at 100.0, drops unreturned 110.0): {p_strikes}")
+
+    # Index roots (SPX, ^SPX) must never ask Nasdaq for open interest (Nasdaq returns 400 -> spurious partial)
+    idx_nq_calls = [0]
+
+    def fail_if_called(sym):
+        idx_nq_calls[0] += 1
+        raise c.CompositeError(f"Nasdaq 400 for {sym}")
+
+    ox._chain = lambda sym: (list(partial_chain), "yahoo_sub")
+    ox._nasdaq_oi = fail_if_called
+    for idx_sym in ("SPX", "^SPX"):
+        out_idx = c.dispatch("gex_strike", {"symbol": idx_sym, "today": T0})
+        check(idx_nq_calls[0] == 0 and out_idx["status"] == "ok"
+              and [s["name"] for s in out_idx["sources"]] == ["Yahoo Finance"],
+              f"index {idx_sym} skips _nasdaq_oi without spurious partial: calls={idx_nq_calls[0]} {out_idx['status']}")
+
+    # Healthy intraday Yahoo chain (21/24 near-ATM have OI=100, 17 traded with OI + 3 newly opened with volume=5, OI=0 -> 15% < 20%):
+    # must NOT call Nasdaq and status stays ok.
+    healthy_chain = [
+        {"strike": 100.0 + i * 0.5, "option_type": "call" if i % 2 == 0 else "put",
+         "open_interest": 0 if i < 3 else 100, "volume": 5 if i < 3 else (10 if i < 20 else 0),
+         "implied_volatility": 0.2, "expiration": EXP_GEX,
+         "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0}
+        for i in range(24)
+    ]
+    ox._chain = lambda sym: (list(healthy_chain), "yahoo_sub")
+    ox._nasdaq_oi = fail_if_called
+    out_healthy = c.dispatch("gex_strike", {"symbol": "TSTH", "today": T0})
+    check(idx_nq_calls[0] == 0 and out_healthy["status"] == "ok"
+          and [s["name"] for s in out_healthy["sources"]] == ["Yahoo Finance"],
+          f"healthy intraday Yahoo chain skips _nasdaq_oi and stays ok: calls={idx_nq_calls[0]} {out_healthy['status']}")
+
+    # When partial_zero asks Nasdaq and Nasdaq fails, keep Yahoo GEX as status=ok (never spurious partial).
+    def raise_nq(sym):
+        raise c.CompositeError("Nasdaq unavailable")
+
+    ox._chain = lambda sym: (list(partial_chain), "yahoo_sub")
+    ox._nasdaq_oi = raise_nq
+    out_pfail = c.dispatch("gex_strike", {"symbol": "TSTN", "today": T0})
+    check(out_pfail["status"] == "ok" and [s["name"] for s in out_pfail["sources"]] == ["Yahoo Finance"]
+          and len(out_pfail["results"]) > 0,
+          f"partial_zero failure from Nasdaq leaves Yahoo GEX ok: {out_pfail['status']} {out_pfail['sources']}")
+
+    # When severe_zero (<10% OI) asks Nasdaq and Nasdaq fails, mark status=partial with Nasdaq open interest note.
+    severe_chain = [
+        {"strike": 100.0 + i * 0.5, "option_type": "call" if i % 2 == 0 else "put",
+         "open_interest": 100 if i == 0 else 0, "volume": 10,
+         "implied_volatility": 0.2, "expiration": EXP_GEX,
+         "last_trade_time": "2026-11-23T15:00:00", "underlying_price": 100.0}
+        for i in range(24)
+    ]
+    ox._chain = lambda sym: (list(severe_chain), "yahoo_sub")
+    ox._nasdaq_oi = raise_nq
+    out_sfail = c.dispatch("gex_strike", {"symbol": "TSTS", "today": T0})
+    s_notes = " | ".join(out_sfail.get("notes") or ())
+    check(out_sfail["status"] == "partial" and "Nasdaq open interest" in s_notes,
+          f"severe_zero failure from Nasdaq marks partial: {out_sfail['status']} {s_notes}")
 finally:
     ox._chain, c.history = saved_gex[0], saved_gex[2]
     if saved_gex[1] is not None:

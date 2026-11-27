@@ -952,6 +952,7 @@ CHAIN_TTL = 300
 CHAINS_KEPT = 16
 YAHOO_OPTION_INDICES = {"SPX", "NDX", "RUT", "VIX", "XSP", "OEX", "DJX"}
 CBOE_OPTION_ALIASES = {"GSPC": "SPX"}
+CLOSED_MARKET_STATES = {"POST", "POSTPOST", "CLOSED", "PREPRE"}
 
 
 def canonical_option_symbol(symbol: str) -> str:
@@ -997,7 +998,7 @@ def yahoo_retry(read, pause: float = 1.0):
 
 
 def yahoo_chain(symbol: str):
-    """(rows, regular-session price, its time) or None without listed options. The regular price and its time, not the
+    """(rows, regular-session price, its time, session_closed) or None without listed options. The regular price and its time, not the
     after-hours ones OpenBB's fetcher keeps: the option quotes stop at the close."""
     from concurrent.futures import ThreadPoolExecutor
 
@@ -1059,7 +1060,8 @@ def yahoo_chain(symbol: str):
         rows[col] = rows[col].fillna(0).astype("int64") if col in rows else 0
     keep = ["contract_symbol", "expiration", "strike", "option_type", "bid", "ask", "last_trade_price", "last_trade_time",
             "open_interest", "volume"]
-    return rows[keep], float(spot), pd.Timestamp(int(stamp), unit="s", tz="UTC").tz_convert("America/New_York")
+    session_closed = str((info or {}).get("marketState") or "").upper() in CLOSED_MARKET_STATES
+    return rows[keep], float(spot), pd.Timestamp(int(stamp), unit="s", tz="UTC").tz_convert("America/New_York"), session_closed
 
 
 _BILL_RATE = {"at": 0.0, "rate": None}
@@ -1109,8 +1111,9 @@ def build_substitute_chain(symbol: str, fetched, rate, today):
                                   "priced. They return in market hours.")
             return super().strategies(*args, **kwargs)
 
-    rows, spot, quoted_at = fetched
-    df, basis = option_math.analyse_chain(rows, spot, quoted_at, rate or 0.0, today)
+    rows, spot, quoted_at, *rest = fetched
+    session_closed = bool(rest[0]) if rest else False
+    df, basis = option_math.analyse_chain(rows, spot, quoted_at, rate or 0.0, today, session_closed=session_closed)
     if df.empty:
         return None
     df["underlying_symbol"] = symbol

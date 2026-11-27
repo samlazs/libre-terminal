@@ -23,6 +23,7 @@ WINDOWS = [10, 21, 42, 63, 126]
 YAHOO = C.src("Yahoo Finance", "option chain (open interest, implied volatility per contract) and daily closes", "https://finance.yahoo.com/")
 CBOE = C.src("Cboe", "option chain (open interest, implied volatility per contract)", "https://www.cboe.com/")
 NASDAQ = C.src("Nasdaq", "option chain open interest", "https://www.nasdaq.com/")
+_INDEX_ROOTS = {"SPX", "GSPC", "NDX", "RUT", "VIX", "VIXW", "XSP", "OEX", "DJX"}
 
 
 def _unpack_chain(res):
@@ -121,7 +122,8 @@ def _rows(raw):
     for r in raw:
         k, t = r.get("strike"), str(r.get("option_type") or "").lower()
         if isinstance(k, (int, float)) and t in ("call", "put") and r.get("expiration"):
-            out.append({"strike": float(k), "type": t, "oi": float(r.get("open_interest") or 0), "iv": r.get("implied_volatility"),
+            out.append({"strike": float(k), "type": t, "oi": float(r.get("open_interest") or 0),
+                        "vol": float(r.get("volume") or 0), "iv": r.get("implied_volatility"),
                         "expiration": str(r["expiration"])[:10], "traded": r.get("last_trade_time")})
     return out
 
@@ -143,17 +145,28 @@ def gex(symbol="SPY", expiry="monthly", today=None, **_):
     use = [r for r in rows if r["expiration"] in exps]
     sources = [chain_src]
     oi_rows = sum(1 for r in use if r["oi"] > 0)
-    if use and (oi_rows == 0 or (len(use) >= 20 and oi_rows * 10 < len(use))):
+    traded = [r for r in use if r["vol"] > 0]
+    vol_zero = sum(1 for r in traded if r["oi"] == 0)
+    near = [r for r in use if abs(r["strike"] / spot - 1) <= 0.25]
+    near_oi = sum(1 for r in near if r["oi"] > 0)
+    severe_zero = oi_rows == 0 or (len(use) >= 20 and oi_rows * 10 < len(use))
+    partial_zero = prov != "cboe" and (
+        (len(traded) >= 10 and vol_zero * 5 >= len(traded))
+        or (len(traded) < 10 and len(near) >= 20 and near_oi * 10 < len(near) * 7)
+    )
+    if use and sym.lstrip("^").upper() not in _INDEX_ROOTS and (severe_zero or partial_zero):
         try:
             oi_map = _nasdaq_oi(sym) or {}
         except C.CompositeError as e:
-            C.partial_from(e, "Nasdaq open interest")
+            if severe_zero:
+                C.partial_from(e, "Nasdaq open interest")
             oi_map = {}
         matched = sum(1 for r in use if (r["expiration"], r["strike"], r["type"]) in oi_map)
         if matched > oi_rows:
             for r in use:
                 r["oi"] = oi_map.get((r["expiration"], r["strike"], r["type"]), 0.0)
-            C.note_fallback("Nasdaq open interest", f"{chain_src['name']} omitted off-hours open interest")
+            why = "omitted off-hours open interest" if severe_zero else "omitted partial open interest"
+            C.note_fallback("Nasdaq open interest", f"{chain_src['name']} {why}")
             sources = [chain_src, NASDAQ]
     g = gex_by_strike(use, spot, today)
     if not g:

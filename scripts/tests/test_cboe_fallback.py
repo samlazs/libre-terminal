@@ -95,6 +95,53 @@ thin_df, _ = om.analyse_chain(thin_side, 350.98, friday, 0.0, saturday)
 check(om.priced_part(thin_df, 350.98).empty, "dying expiries with fewer than two priced strikes on each side of spot are excluded")
 check(len(om.priced_part(df, 100.0)) == 10, "an expiry with at least two priced strikes on each side of spot is kept")
 
+# ---- early close / closed session 0DTE expiry handling
+early_close_et = pd.Timestamp("2026-11-27 13:00", tz="America/New_York")
+early_close_utc = pd.Timestamp("2026-11-27 18:00", tz="UTC")
+check(om.years_to_expiry(date(2026, 11, 27), "CRWV", early_close_et, session_closed=True) == 0.0,
+      "early close drops same-day expiry when session_closed=True")
+check(om.years_to_expiry(date(2026, 11, 27), "CRWV", early_close_utc, session_closed=True) == 0.0,
+      "UTC-zoned quoted_at converts to NY exchange date for early close")
+check(close(om.years_to_expiry(date(2026, 12, 4), "CRWV", early_close_utc, session_closed=True) * 365, 7.125),
+      "later expiry from 13:00 ET early close has 7.125 calendar days to 16:00 ET settlement")
+check(close(om.years_to_expiry(date(2026, 11, 27), "CRWV", early_close_et, session_closed=False) * 365, 0.125),
+      "intraday session_closed=False preserves same-day 0DTE time to 16:00 ET (3h = 0.125d)")
+check(close(om.years_to_expiry(date(2026, 11, 27), "CRWV", pd.Timestamp("2026-11-25 16:00", tz="America/New_York"),
+                               session_closed=True) * 365, 2.0),
+      "pre-market / prior-close quote with session_closed=True keeps future 2026-11-27 expiry")
+
+def early_close_chain(expiry, yrs):
+    rows_out = []
+    for k in (80, 90, 100, 110, 120):
+        for side in ("call", "put"):
+            v = float(om.black76(100.0, np.array([float(k)]), yrs, np.array([0.30]), 1.0, np.array([side == "call"]))[0])
+            rows_out.append({"contract_symbol": f"CRWV{expiry:%y%m%d}{side[0].upper()}{k * 1000:08d}", "expiration": expiry,
+                             "strike": float(k), "option_type": side, "bid": v * 0.99, "ask": v * 1.01,
+                             "last_trade_price": v, "last_trade_time": early_close_et.tz_convert("UTC"),
+                             "open_interest": 10, "volume": 5})
+    return pd.DataFrame(rows_out)
+
+ec_rows = pd.concat([
+    early_close_chain(date(2026, 11, 27), 0.125 / 365),
+    early_close_chain(date(2026, 12, 4), 7.125 / 365),
+], ignore_index=True)
+ec_df, _ = om.analyse_chain(ec_rows, 100.0, early_close_et, 0.0, date(2026, 11, 27), session_closed=True)
+check(set(ec_df.expiration) == {date(2026, 12, 4)} and np.allclose(ec_df.implied_volatility, 0.30, atol=1e-5),
+      "analyse_chain drops settled 0DTE on early close and recovers 30% IV on next expiry")
+ec_sub, _ = rb.build_substitute_chain("CRWV", (ec_rows, 100.0, early_close_et, True), 0.0, date(2026, 11, 27))
+check(ec_sub.expirations == ["2026-12-04"] and np.allclose(ec_sub.dataframe["implied_volatility"], 0.30, atol=1e-5),
+      "build_substitute_chain 4-tuple honors session_closed=True")
+ec_compat, _ = rb.build_substitute_chain("CRWV", (ec_rows, 100.0, early_close_et), 0.0, date(2026, 11, 27))
+check(ec_compat.expirations == ["2026-11-27", "2026-12-04"],
+      "build_substitute_chain 3-tuple stays backward-compatible (session_closed=False)")
+check({"POST", "POSTPOST", "CLOSED", "PREPRE"}.issubset(rb.CLOSED_MARKET_STATES)
+      and "REGULAR" not in rb.CLOSED_MARKET_STATES and "PRE" not in rb.CLOSED_MARKET_STATES,
+      "CLOSED_MARKET_STATES includes PREPRE overnight state and excludes REGULAR/PRE")
+ec_prepre, _ = om.analyse_chain(ec_rows, 100.0, early_close_et, 0.0, date(2026, 11, 27),
+                                session_closed="PREPRE" in rb.CLOSED_MARKET_STATES)
+check(set(ec_prepre.expiration) == {date(2026, 12, 4)},
+      "PREPRE overnight state drops settled 0DTE on early close and keeps next expiry")
+
 # ---- settlements, index snapshots, symbols
 rows = [{"product": "VX", "symbol": s, "expiration": e, "price": v, "settlement_date": "2026-11-20"} for s, e, v in (
     ("VX/F7", "2027-01-20", 26.2462), ("VX47/X6", "2026-11-24", 27.825), ("VX/Z6", "2026-12-16", 28.4582))]

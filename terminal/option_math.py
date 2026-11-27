@@ -77,14 +77,19 @@ def parity_forward(strikes, calls, puts, discount) -> float:
     return float(np.median(k[near] + gap[near] / discount))
 
 
-def years_to_expiry(expiration, root: str, quoted_at) -> float:
-    """Calendar years from the quote time to settlement (09:30 ET for AM-settled roots, else 16:00 ET)."""
+def years_to_expiry(expiration, root: str, quoted_at, session_closed: bool = False) -> float:
+    """Calendar years from the quote time to settlement (09:30 ET for AM-settled roots, else 16:00 ET).
+    When session_closed is True, contracts expiring on or before the quote's New York session date have settled (0.0)."""
+    ts = pd.Timestamp(quoted_at)
+    quoted_et = ts.tz_convert("America/New_York") if ts.tzinfo else ts.tz_localize("America/New_York")
+    if session_closed and expiration <= quoted_et.date():
+        return 0.0
     clock = "09:30" if root in AM_SETTLED else "16:00"
     end = pd.Timestamp(f"{expiration} {clock}", tz="America/New_York")
-    return (end - quoted_at).total_seconds() / (365 * 86400)
+    return (end - quoted_et).total_seconds() / (365 * 86400)
 
 
-def analyse_chain(rows: pd.DataFrame, spot: float, quoted_at, rate: float, today) -> tuple[pd.DataFrame, str]:
+def analyse_chain(rows: pd.DataFrame, spot: float, quoted_at, rate: float, today, session_closed: bool = False) -> tuple[pd.DataFrame, str]:
     """(chain with calculated IV and Greeks, "mid" or "last" for the prices used).
 
     rows: contract_symbol, expiration (date), strike, option_type, bid, ask, last_trade_price, last_trade_time (zoned),
@@ -93,7 +98,7 @@ def analyse_chain(rows: pd.DataFrame, spot: float, quoted_at, rate: float, today
     """
     df = rows[rows["expiration"] >= today].copy()
     df["root"] = df["contract_symbol"].str[:-15]
-    left = {key: years_to_expiry(key[0], key[1], quoted_at) for key in set(zip(df["expiration"], df["root"]))}
+    left = {key: years_to_expiry(key[0], key[1], quoted_at, session_closed=session_closed) for key in set(zip(df["expiration"], df["root"]))}
     df = df[[left[key] > 0 for key in zip(df["expiration"], df["root"])]].reset_index(drop=True)
     df["dte"] = [(day - today).days for day in df["expiration"]]
     df["main"] = False
