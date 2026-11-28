@@ -738,11 +738,15 @@ def fund_allocation_rows(rows: list) -> list:
     def key(ir):
         i, r = ir
         if not isinstance(r, dict):
-            return (len(FUND_BREAKDOWN_ORDER), 0, i)
+            return (len(FUND_BREAKDOWN_ORDER), 0, 0.0, i)
         b = r.get("breakdown")
         bi = FUND_BREAKDOWN_ORDER.index(b) if b in FUND_BREAKDOWN_ORDER else len(FUND_BREAKDOWN_ORDER)
-        ri = BOND_RATING_ORDER.index(r.get("category")) if b == "bond_rating" and r.get("category") in BOND_RATING_ORDER else len(BOND_RATING_ORDER)
-        return (bi, ri if b == "bond_rating" else 0, i)
+        if b == "bond_rating":
+            ri = BOND_RATING_ORDER.index(r.get("category")) if r.get("category") in BOND_RATING_ORDER else len(BOND_RATING_ORDER)
+            return (bi, ri, 0.0, i)
+        w = r.get("weight")
+        w_key = -float(w) if isinstance(w, (int, float)) and not isinstance(w, bool) and math.isfinite(w) else 0.0
+        return (bi, 0, w_key, i)
 
     return [r for _, r in sorted(enumerate(out), key=key)]
 
@@ -1138,6 +1142,210 @@ def build_substitute_chain(symbol: str, fetched, rate, today):
     return chain, note
 
 
+def _default_smile_expiration(view):
+    """Earliest priced expiration with >=2 strikes on each side of spot, preferring dte >= 1 over 0DTE."""
+    df = getattr(view, "dataframe", None)
+    if df is None or df.empty or "implied_volatility" not in df.columns:
+        return None
+    priced = df[df["implied_volatility"] > 0]
+    if priced.empty:
+        return None
+    spot = float(view.underlying_price[0] or 0.0) if getattr(view, "underlying_price", None) else 0.0
+    uniq = priced.drop_duplicates(["expiration", "strike"])
+    if spot > 0:
+        below = uniq[uniq["strike"] < spot].groupby("expiration")["strike"].count()
+        above = uniq[uniq["strike"] > spot].groupby("expiration")["strike"].count()
+        good = set(below[below >= 2].index) & set(above[above >= 2].index)
+        if good:
+            uniq = uniq[uniq["expiration"].isin(good)]
+    dtes = uniq.groupby("expiration")["dte"].min() if "dte" in uniq.columns else None
+    exps = sorted(str(e)[:10] for e in uniq["expiration"].unique())
+    if not exps:
+        return None
+    if dtes is not None:
+        later = sorted(str(e)[:10] for e, d in dtes.items() if d >= 1)
+        if later:
+            return later[0]
+        nonneg = sorted(str(e)[:10] for e, d in dtes.items() if d >= 0)
+        if nonneg:
+            return nonneg[0]
+    return exps[0]
+
+
+def build_cboe_smile(data, expirations=None, otm: bool = False, skew: bool = False, **kwargs):
+    """Build the Cboe IV smile/skew chart without upstream's OTM slice drop (`:-1`), first-zero ATM bug, or hidden Calls."""
+    from typing import Any
+
+    from openbb_cboe.utils.options import create_smile as smile_mod
+    from openbb_cboe.utils.options.theme import finalize, new_figure
+    from openbb_core.app.model.abstract.error import OpenBBError
+    from openbb_core.app.model.obbject import OBBject
+    from openbb_core.app.utils import df_to_basemodel
+    from pandas import DataFrame, concat, to_datetime
+
+    if data.has_iv is False:
+        raise OpenBBError("Implied Volatility was not found in the data and is required here.")
+
+    if isinstance(expirations, str):
+        raw_exps = [e.strip() for e in expirations.split(",") if e.strip()]
+    elif isinstance(expirations, list):
+        raw_exps = [str(e).strip() for e in expirations if str(e).strip()]
+    else:
+        raw_exps = []
+
+    if not raw_exps:
+        chosen = _default_smile_expiration(data)
+        raw_exps = [chosen] if chosen else [smile_mod._first_priced_expiration(data)]
+
+    exp_list = list(dict.fromkeys(data._get_nearest_expiration(e) for e in raw_exps))
+    if len(exp_list) > smile_mod.MAX_EXPIRATIONS:
+        raise OpenBBError("Too many dates! Up to five can be selected.")
+
+    # data.skew() checks `if date not in self.expirations:` and keeps empty `expiration` on an exact string match
+    df = concat([data.skew(date=to_datetime(exp).date()) for exp in exp_list])
+
+    spot = None
+    prices = getattr(data, "underlying_price", None)
+    if prices:
+        try:
+            val = float(prices[0])
+            if val > 0 and val == val and val != float("inf"):
+                spot = val
+        except (TypeError, ValueError):
+            pass
+
+    def _atm_idx(side_df):
+        if side_df.empty:
+            return None
+        zeros = side_df[side_df["Skew"] == 0]
+        pool = zeros if not zeros.empty else side_df
+        if spot is not None:
+            return int((pool["Strike"] - spot).abs().idxmin())
+        return int(pool.index[len(pool) // 2])
+
+    symbol = data.underlying_symbol[0] if getattr(data, "underlying_symbol", None) else ""
+    index_name = exp_list[0] if len(exp_list) <= 1 else None
+    target_col = "Skew" if skew is True else "IV"
+    parity_note = " (OTM parity IV)" if (not otm and type(data).__name__ == "SubstituteChain") else ""
+    title = f"{symbol} {'OTM ' if otm is True else ''}{'IV Skew' if skew is True else 'Implied Volatility'}{parity_note}"
+    theme = kwargs.get("theme") or "dark"
+    fig, text_color, background = new_figure(theme)
+    colors = smile_mod.COLORS
+    color = 0
+    parts = []
+
+    for expiration in exp_list:
+        calls = (
+            df.query("`Expiration` == @expiration & `Option Type` == 'call'")
+            .sort_values("Strike", kind="stable")
+            .drop_duplicates("Strike", keep="first")
+            .reset_index(drop=True)
+        )
+        puts = (
+            df.query("`Expiration` == @expiration & `Option Type` == 'put'")
+            .sort_values("Strike", kind="stable")
+            .drop_duplicates("Strike", keep="first")
+            .reset_index(drop=True)
+        )
+
+        if otm is True:
+            put_idx = _atm_idx(puts)
+            if put_idx is not None:
+                puts = puts.iloc[: put_idx + 1].reset_index(drop=True)
+            call_idx = _atm_idx(calls)
+            if call_idx is not None:
+                calls = calls.iloc[call_idx:].reset_index(drop=True)
+
+        if not calls.empty:
+            parts.append(calls)
+        if not puts.empty:
+            parts.append(puts)
+
+        overlay = (not otm) or (
+            not calls.empty and not puts.empty and set(calls["Strike"]).issubset(set(puts["Strike"]))
+        )
+        call_color = colors[color % len(colors)]
+        color += 1
+        put_color = colors[color % len(colors)]
+        color += 1
+
+        if not calls.empty:
+            fig.add_scatter(
+                x=[float(v) for v in calls["Strike"]],
+                y=[float(v) for v in calls[target_col]],
+                mode="lines+markers",
+                name="Calls" if len(exp_list) <= 1 else f"Calls at {expiration}",
+                line=dict(color=call_color, width=2.5 if overlay else 2),
+                marker=dict(color=call_color, size=6, symbol="circle"),
+                hoverinfo="x+y+name",
+            )
+        if not puts.empty:
+            put_line = dict(color=put_color, width=2.5, dash="dash") if overlay else dict(color=put_color, width=2)
+            put_marker = (
+                dict(color=put_color, size=10, symbol="circle-open", line=dict(width=2))
+                if overlay
+                else dict(color=put_color, size=6, symbol="circle")
+            )
+            fig.add_scatter(
+                x=[float(v) for v in puts["Strike"]],
+                y=[float(v) for v in puts[target_col]],
+                mode="lines+markers",
+                name="Puts" if len(exp_list) <= 1 else f"Puts at {expiration}",
+                line=put_line,
+                marker=put_marker,
+                hoverinfo="x+y+name",
+            )
+
+    fig.update_layout(
+        title=dict(text=title, x=0.5, font=dict(size=18)),
+        yaxis=dict(
+            ticklen=0,
+            showline=False,
+            linecolor=text_color,
+            tickfont=dict(size=14),
+            nticks=7,
+        ),
+        xaxis=dict(
+            showgrid=False,
+            autorange=True,
+            ticklen=5,
+            showline=False,
+            linecolor=text_color,
+            title=dict(text=index_name if index_name else "", font=dict(size=16)),
+            tickfont=dict(size=16),
+            nticks=7,
+            showspikes=False,
+            tickprefix="$",
+        ),
+        legend=dict(
+            font=dict(size=14),
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="center",
+            x=0.5,
+            itemdoubleclick="toggleothers",
+        ),
+        font=dict(color=text_color),
+        paper_bgcolor=background,
+        plot_bgcolor=background,
+        hoverdistance=1,
+        hovermode="x unified",
+        dragmode="pan",
+    )
+    output_df = (
+        concat(parts, axis=0)
+        .set_index(["Expiration", "Strike", "Option Type"])
+        .sort_index()
+        .reset_index()
+        if parts
+        else DataFrame()
+    )
+    output: Any = OBBject(results=df_to_basemodel(output_df))
+
+    return finalize(output, fig, theme)
+
+
 def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bill_rate):
     """Options chains and analytics (surface, smile, term structure, stats, strategies) when Cboe refuses its feed."""
     import asyncio
@@ -1264,51 +1472,23 @@ def install_cboe_options_fallback(applied: list, fetch=yahoo_chain, get_rate=bil
             raise OpenBBError("Yahoo Finance returned no option prices recent enough to calculate implied volatility.")
         return views[name]
 
-    def _default_smile_expiration(view):
-        df = getattr(view, "dataframe", None)
-        if df is None or df.empty or "implied_volatility" not in df.columns:
-            return None
-        priced = df[df["implied_volatility"] > 0]
-        if priced.empty:
-            return None
-        spot = float(view.underlying_price[0] or 0.0) if getattr(view, "underlying_price", None) else 0.0
-        uniq = priced.drop_duplicates(["expiration", "strike"])
-        if spot > 0:
-            below = uniq[uniq["strike"] < spot].groupby("expiration")["strike"].count()
-            above = uniq[uniq["strike"] > spot].groupby("expiration")["strike"].count()
-            good = set(below[below >= 2].index) & set(above[above >= 2].index)
-            if good:
-                uniq = uniq[uniq["expiration"].isin(good)]
-        dtes = uniq.groupby("expiration")["dte"].min() if "dte" in uniq.columns else None
-        exps = sorted(str(e)[:10] for e in uniq["expiration"].unique())
-        if not exps:
-            return None
-        if dtes is not None:
-            later = sorted(str(e)[:10] for e, d in dtes.items() if d >= 1)
-            if later:
-                return later[0]
-            nonneg = sorted(str(e)[:10] for e, d in dtes.items() if d >= 0)
-            if nonneg:
-                return nonneg[0]
-        return exps[0]
-
     def use_view(module: str, pick):
         mod = importlib.import_module(f"openbb_cboe.utils.options.{module}")
         orig = getattr(mod, module)
 
         def builder(data, *args, **kwargs):
             name = pick(kwargs)
-            view = view_of(data, name) if name else data
-            if module == "create_smile" and not (args and args[0]) and not kwargs.get("expirations"):
-                chosen = _default_smile_expiration(view)
-                if chosen:
-                    kwargs["expirations"] = chosen
-            return orig(view, *args, **kwargs)
+            return orig(view_of(data, name) if name else data, *args, **kwargs)
 
         setattr(mod, module, builder)               # the routes import the builder when they are called
 
     use_view("create_surface", lambda kw: "priced")
-    use_view("create_smile", lambda kw: "priced")
+    smile_mod = importlib.import_module("openbb_cboe.utils.options.create_smile")
+
+    def smile_builder(data, expirations=None, otm=False, skew=False, **kwargs):
+        return build_cboe_smile(view_of(data, "priced"), expirations=expirations, otm=otm, skew=skew, **kwargs)
+
+    smile_mod.create_smile = smile_builder
     use_view("create_term_structure", lambda kw: "priced" if kw.get("metric", "iv") == "iv" else None)
     use_view("create_stats", lambda kw: "all")
 
@@ -1920,6 +2100,145 @@ def install_cot_canada(applied: list):
     cm.COT_MARKETS = tuple(markets)
     ci.CftcCotIndexFetcher._terminal_cache_rev = "cot_cad"          # CFTC answers are cached on disk
     applied.append("COT currencies include the Canadian dollar")
+
+
+_POLICY_PATH_UNDERLIERS = {
+    "USD": ("FEDERAL FUNDS",),
+    "EUR": ("EUROSTR", "ESTR"),
+    "GBP": ("SONIA",),
+    "JPY": ("TONA",),
+    "CAD": ("CORRA",),
+    "AUD": ("AONIA",),
+}
+
+
+def build_ois_policy_path(records, fisn: str, currency: str, curve_date, min_trades: int = 3,
+                          max_period_days: int = 75, min_period_days: int = 20) -> list[dict]:
+    """Build the OIS policy-rate path: one node per (start, end) meeting period, filtering to each
+    currency's benchmark overnight underlier (EFFR for USD), keeping 20-75 day inter-meeting periods,
+    imminent meetings traded forward earlier, 2-trade middle-meeting bridges, and pricing each node
+    from its freshest trades."""
+    from collections import defaultdict
+    from statistics import median
+
+    from openbb_core.provider.utils.errors import EmptyDataError
+
+    from openbb_cftc.utils.curve import _percentile
+    from openbb_cftc.utils.policy import extract_forward_observations
+
+    tokens = _POLICY_PATH_UNDERLIERS.get(currency.upper())
+    if tokens:
+        records = [
+            rec for rec in records
+            if "TERM" not in (u := (rec.get("UPI Underlier Name") or "").strip().upper())
+            and any(tok in u for tok in tokens)
+        ]
+
+    observations = [
+        obs
+        for obs in extract_forward_observations(records, fisn, currency, curve_date, min_forward_days=-1)
+        if min_period_days <= obs["tenor_days"] <= max_period_days
+    ]
+    if not observations:
+        raise EmptyDataError(
+            f"No single-period forward-starting {currency} OIS matching '{fisn}' was"
+            " disseminated in the window; the currency may trade no meeting-dated OIS."
+        )
+
+    groups = defaultdict(list)
+    for obs in observations:
+        groups[(obs["effective_date"], obs["expiration_date"])].append(obs)
+
+    eligible = {}
+    for (eff, exp), members in groups.items():
+        fwd = (eff - curve_date).days
+        if fwd <= 5 and max((eff - m["as_of_date"]).days for m in members) <= 5:
+            continue
+        eligible[(eff, exp)] = members
+
+    strong_keys = {k for k, members in eligible.items() if len(members) >= min_trades}
+    strong_starts = {eff for eff, _ in strong_keys}
+    strong_ends = {exp for _, exp in strong_keys}
+
+    kept = list(strong_keys)
+    if min_trades >= 3:
+        for (eff, exp), members in eligible.items():
+            if len(members) == min_trades - 1:
+                if any(abs((eff - s_exp).days) <= 3 for s_exp in strong_ends) and any(
+                    abs((s_eff - exp).days) <= 3 for s_eff in strong_starts
+                ):
+                    kept.append((eff, exp))
+
+    nodes = []
+    for eff, exp in kept:
+        members = eligible[(eff, exp)]
+        by_day = defaultdict(list)
+        for m in members:
+            by_day[m["as_of_date"]].append(m["rate"])
+        need = min(min_trades, len(members))
+        priced, seen = [], 0
+        for day in sorted(by_day, reverse=True):
+            day_rates = by_day[day]
+            if seen == 0:
+                priced.extend(day_rates)
+            else:
+                priced.append(median(day_rates))
+            seen += len(day_rates)
+            if seen >= need:
+                break
+        priced.sort()
+        if len(priced) >= 5:
+            lo, hi = _percentile(priced, 5), _percentile(priced, 95)
+            priced = [r for r in priced if lo <= r <= hi] or priced
+        nodes.append({
+            "forward_days": (eff - curve_date).days,
+            "tenor_days": (exp - eff).days,
+            "rate": median(priced),
+            "min_rate": priced[0],
+            "max_rate": priced[-1],
+            "num_trades": len(members),
+            "as_of_date": max(by_day),
+            "start_date": eff,
+            "end_date": exp,
+            "is_capped": any(m["is_capped"] for m in members),
+        })
+
+    if not nodes:
+        raise EmptyDataError(
+            f"No forward start cleared min_trades (currently {min_trades})."
+            " Lower min_trades, or widen the window."
+        )
+
+    reference = max(n["as_of_date"] for n in nodes)
+    for node in nodes:
+        node["staleness_days"] = (reference - node["as_of_date"]).days
+    nodes.sort(key=lambda n: (n["start_date"], n["end_date"]))
+    return nodes
+
+
+def install_cftc_ois_policy_path_fix(applied: list):
+    """Fix CFTC OIS policy path underlier filtering, inter-meeting period caps, grouping, imminent meetings, and fresh pricing."""
+    try:
+        import openbb_cftc.models.ois_policy_path as opp
+        import openbb_cftc.utils.policy as pol
+    except ImportError:
+        return
+    pol.build_policy_path = build_ois_policy_path
+    opp.CftcOisPolicyPathQueryParams.model_fields["lookback_days"].default = 14
+    opp.CftcOisPolicyPathQueryParams.model_rebuild(force=True)
+    orig_td = opp.CftcOisPolicyPathFetcher.transform_data
+    if not getattr(orig_td, "_policy_path_effr", False):
+        def transform_data(query, data, **kwargs):
+            res = orig_td(query, data, **kwargs)
+            if getattr(query, "currency", None) == "USD" and isinstance(getattr(res, "metadata", None), dict):
+                res.metadata["benchmark"] = "EFFR"
+            return res
+        transform_data._policy_path_effr = True
+        opp.CftcOisPolicyPathFetcher.transform_data = staticmethod(transform_data)
+    opp.CftcOisPolicyPathFetcher._terminal_cache_rev = "policy_path_v3"
+    applied.append(
+        "CFTC OIS policy path filters to each currency's overnight benchmark (EFFR for USD), keeps up to 75-day and imminent meeting periods, groups by start and end, and prices from freshest trades"
+    )
 
 
 def install_montreal_times(applied: list):
@@ -3533,16 +3852,114 @@ def install_yfinance_historical_end_date(applied: list):
 
     from openbb_yfinance.models.equity_historical import YFinanceEquityHistoricalFetcher as F
 
-    orig = F.transform_query
+    def _wrap_end_date(cls):
+        orig = cls.transform_query
 
-    def transform_query(params, _orig=orig):
-        if isinstance(params, dict) and params.get("end_date") is None:
-            params = dict(params)
-            params["end_date"] = datetime.now().date() + timedelta(days=1)
-        return _orig(params)
+        def transform_query(params, _orig=orig):
+            if isinstance(params, dict) and params.get("end_date") is None:
+                params = dict(params)
+                params["end_date"] = datetime.now().date() + timedelta(days=1)
+            return _orig(params)
 
-    F.transform_query = staticmethod(transform_query)
+        cls.transform_query = staticmethod(transform_query)
+
+    _wrap_end_date(F)
+    import importlib.util
+
+    if importlib.util.find_spec("openbb_yfinance.models.fund_historical"):
+        from openbb_yfinance.models.fund_historical import YFinanceFundHistoricalFetcher as FF
+        _wrap_end_date(FF)
     applied.append("Yahoo historical prices: omitted end_date includes tomorrow so exchange-ahead sessions are not clipped")
+
+
+def _yf_finite_pos(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v > 0
+
+
+def fill_yahoo_null_latest_close(quotes, data):
+    """Fill a trailing null daily Close/Adj Close from meta.regularMarketPrice when bar and quote share the exchange day.
+
+    Yahoo's v8/finance/chart 1d response for European exchanges (GER, LSE, AMS, PAR, STO) returns today's daily bar
+    with valid Open/High/Low/Volume but null close/adjclose, while the same response's meta.regularMarketPrice holds
+    the true price for that exchange-local date. Refuses cross-day mismatches, holiday/empty rows, non-1d bars, FX,
+    and 100x GBp/GBP unit mismatches.
+    """
+    if quotes is None or getattr(quotes, "empty", True) or "Close" not in quotes.columns or not isinstance(data, dict):
+        return quotes
+    import datetime as dt
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    import pandas as pd
+
+    close_col = quotes.columns.get_loc("Close")
+    if not isinstance(close_col, int) or not pd.isna(quotes.iat[-1, close_col]):
+        return quotes
+    meta = data.get("meta") or {}
+    if str(meta.get("dataGranularity") or "").lower() != "1d":
+        return quotes
+    if str(meta.get("instrumentType") or "").upper() == "CURRENCY":
+        return quotes
+    rmp = meta.get("regularMarketPrice")
+    rmt = meta.get("regularMarketTime")
+    idx = quotes.index[-1]
+    if not (_yf_finite_pos(rmp) and _yf_finite_pos(rmt)) or not isinstance(idx, pd.Timestamp):
+        return quotes
+    open_col = quotes.columns.get_loc("Open") if "Open" in quotes.columns else None
+    if not isinstance(open_col, int) or not _yf_finite_pos(quotes.iat[-1, open_col]):
+        return quotes
+    vals = []
+    for c in ("Open", "High", "Low"):
+        if c in quotes.columns:
+            col = quotes.columns.get_loc(c)
+            if isinstance(col, int):
+                v = quotes.iat[-1, col]
+                if _yf_finite_pos(v):
+                    vals.append(float(v))
+    if not vals:
+        return quotes
+    lo, hi = min(vals), max(vals)
+    if not (0.5 * lo <= float(rmp) <= 2.0 * hi):
+        return quotes
+    tz = None
+    tz_name = meta.get("exchangeTimezoneName")
+    if isinstance(tz_name, str) and tz_name.strip():
+        try:
+            tz = ZoneInfo(tz_name.strip())
+        except (ZoneInfoNotFoundError, KeyError, ValueError):
+            tz = None
+    if tz is None:
+        go = meta.get("gmtoffset")
+        if isinstance(go, (int, float)) and not isinstance(go, bool) and math.isfinite(go):
+            tz = dt.timezone(dt.timedelta(seconds=int(go)))
+    if tz is None:
+        return quotes
+    bar_ts = (idx.tz_localize("UTC") if idx.tzinfo is None else idx.tz_convert("UTC")).timestamp()
+    if dt.datetime.fromtimestamp(bar_ts, tz).date() != dt.datetime.fromtimestamp(float(rmt), tz).date():
+        return quotes
+    quotes.iat[-1, close_col] = float(rmp)
+    if "Adj Close" in quotes.columns:
+        adj_col = quotes.columns.get_loc("Adj Close")
+        if isinstance(adj_col, int) and pd.isna(quotes.iat[-1, adj_col]):
+            quotes.iat[-1, adj_col] = float(rmp)
+    return quotes
+
+
+def install_yfinance_null_close_fix(applied: list):
+    """Recover trailing null 1d closes on European/global Yahoo chart responses from meta.regularMarketPrice."""
+    try:
+        from yfinance import utils as yfu
+    except ImportError:
+        return
+    if getattr(yfu.parse_quotes, "_terminal_null_close_patched", False):
+        return
+    orig = yfu.parse_quotes
+
+    def parse_quotes(data, _orig=orig):
+        return fill_yahoo_null_latest_close(_orig(data), data)
+
+    parse_quotes._terminal_null_close_patched = True
+    yfu.parse_quotes = parse_quotes
+    applied.append("Yahoo daily bars: trailing null close filled from regularMarketPrice on the same exchange day")
 
 
 def sec_standalone_quarters(records: list, frames) -> list:
@@ -6058,6 +6475,7 @@ PATCHES = [
     Patch("yfinance_futures_curve_fix", "Yahoo futures curve prices (one-sided quotes, untraded months)", install_yfinance_futures_curve_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_quote_regular_market", "Yahoo quote last price for funds and day change", install_yfinance_quote_regular_market, targets=_targets("openbb-yfinance")),
     Patch("yfinance_historical_end_date", "Yahoo historical default end date across time zones", install_yfinance_historical_end_date, targets=_targets("openbb-yfinance")),
+    Patch("yfinance_null_close_fix", "Yahoo daily bar trailing null close recovery", install_yfinance_null_close_fix, targets=_targets("yfinance", "openbb-yfinance")),
     Patch("yfinance_fund_multiples_fix", "Yahoo fund multiples", install_yfinance_fund_multiples_fix, targets=_targets("openbb-yfinance")),
     Patch("yfinance_recommendations_months", "Yahoo recommendations readable months", install_yfinance_recommendations_months, targets=_targets("openbb-yfinance")),
     Patch("tmx_holdings_currency_fix", "TMX ETF holdings currency", install_tmx_holdings_currency_fix, targets=_targets("openbb-tmx")),
@@ -6097,6 +6515,7 @@ PATCHES = [
     Patch("fx_chart_fix", "TradingView FX closes", install_fx_chart_fix, targets=_targets("openbb-platform-api", "openbb-yfinance")),
     Patch("tv_legend_change", "TradingView legend change from the previous close", install_tv_legend_change, targets=_targets("openbb-yfinance", "pywry")),
     Patch("cot_canada", "COT Canadian dollar", install_cot_canada, targets=_targets("openbb-cftc")),
+    Patch("cftc_ois_policy_path_fix", "CFTC OIS policy path periods and fresh pricing", install_cftc_ois_policy_path_fix, targets=_targets("openbb-cftc")),
     Patch("guard", "request guard (Host and Origin checks, redacted errors)", _install_guard_patch, critical=True, targets=_targets("uvicorn")),
 ]
 

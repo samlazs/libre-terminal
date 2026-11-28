@@ -268,13 +268,23 @@ DASHBOARDS = [
     ], more=["index/*"]),
 
     D("etfs", "ETFs & Mutual Funds", "funds", "ETF profiles, holdings, exposures and flows; mutual-fund analytics; fund regulatory filings.", [
-        # holdings, sector and country weights take the source that covers the ETF (Nasdaq for SPY, TMX for XIU.TO)
-        T("ETF Profile", rows=[[W("etf/historical", 24, 18, chart=True, title="ETF price chart"), W("etf/info", 16, 18)]],
-          # sector and country weights are keyless for Canadian ETFs only (TMX): after the cards that cover the default SPY
-          auto=["etf/holdings", "etf/price_performance", "etf/equity_exposure", "etf/historical", "etf/sectors", "etf/countries"]),
-        T("ETF Search & Movers", auto=[W("etf/discovery/gainers", title="ETF movers (gainers, losers, most active)"), "etf/search", "etf/discovery/*"], groups=[]),
-        T("Mutual Funds", auto=["yfinance/funds/*"], groups=["Fund"]),
-        T("Fund Filings (N-PORT)", rows=[[X("etf_overlap", 20, 18, groups=[])]], auto=["etf/nport_disclosure", "sec/nport_fund_metrics"]),
+        # holdings, sector and country weights take the source that covers the ETF (Yahoo/SEC for SPY, TMX for XIU.TO)
+        T("ETF Profile", rows=[[W("etf/historical", 24, 18, chart=True, title="ETF price chart"), W("etf/info", 16, 18)],
+                               [W("etf/holdings", 20, 14, provider="tmx"), W("etf/sectors", 20, 14, sort="weight:desc")],
+                               [W("yfinance/funds/performance", 20, 14, title="ETF performance"), W("yfinance/funds/risk", 20, 14, title="ETF risk vs benchmark")],
+                               [W("etf/historical", 24, 14, title="ETF price history"), W("etf/countries", 16, 14)]],
+          auto=["etf/price_performance"]),
+        T("ETF Search & Movers", rows=[[X("board", 24, 18, preset="major_etfs", title="Major ETFs (USD)"), X("perf_bars", 16, 18, preset="us_sectors", period="1D", title="Sector ETFs: 1D ranking")],
+                                       [W("etf/search", 22, 16, provider="tmx", title="ETF search"), W("etf/equity_exposure", 18, 16, params={"symbol": "AAPL"}, groups=[], title="ETF exposure by stock")]],
+          auto=[W("etf/discovery/gainers", title="ETF movers (gainers, losers, most active)"), "etf/discovery/*"], groups=[]),
+        T("Mutual Funds", rows=[[W("yfinance/funds/historical", 22, 18, title="Fund price chart", plot={"x": "date", "ys": ["close"], "split": "", "type": "line"}, view="chart"),
+                                 W("yfinance/funds/info", 18, 18, title="Fund profile")],
+                                [W("yfinance/funds/performance", 20, 14, title="Fund performance"), W("yfinance/funds/holdings", 20, 14, title="Top holdings")],
+                                [W("yfinance/funds/allocation", 14, 14, title="Fund allocation"), W("yfinance/funds/risk", 13, 14, title="Risk vs benchmark"), W("yfinance/funds/ratings", 13, 14, title="Morningstar ratings")]],
+          auto=["yfinance/funds/*"], groups=["Fund"]),
+        T("Fund Filings (N-PORT)", rows=[[X("etf_overlap", 20, 18), W("sec/nport_fund_metrics", 20, 18, title="Fund performance & flows (N-PORT)")],
+                                         [W("etf/nport_disclosure", 40, 18, title="Full portfolio holdings (N-PORT)", sort="weight:desc")]],
+          groups=["Symbol"]),
     ], groups=[dict(SYMBOL, value="SPY"), {"name": "Fund", "paramName": "symbol", "value": "VFIAX"}], more=["etf/*"]),
 
     # ============================================================ RATES & CREDIT
@@ -305,7 +315,7 @@ DASHBOARDS = [
         # WIRP: the OIS-implied policy path first (keyless, CFTC swap reports), then market inflation and curve shape
         # HANDOFF P3-3: six central banks, today vs 1W / 1M ago, BIS policy rate as anchor (terminal/policy_path.py)
         # owner 2026-11-19: the FOMC documents (statements, minutes, projections, newest first) beside the market-implied path
-        T("Policy Expectations", rows=[[X("policy_path", 24, 18), X("policy_path_table", 16, 18)],
+        T("Policy Expectations", rows=[[X("policy_path", 22, 18), X("policy_path_table", 18, 18)],
                                         [W("federal_reserve/fomc_documents_download", 40, 26, title="FOMC documents: statements, minutes, projections (newest first)")],
                                         [W("federal_reserve/sf/term_premium", 20, 16, params={"start_date": "2015-01-01"}, title="10-year yield, expected short rate and term premium (SF Fed model, %)",
                                            plot={"x": "date", "ys": ["yield_zero_coupon", "expected_short_rate", "term_premium"], "split": "", "type": "line"}),

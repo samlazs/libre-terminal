@@ -185,11 +185,11 @@ def run_path(route, params, paths, fixings, policy):
 USD_PATHS = {("USD", None): [prow("2026-12-10", "2027-01-28", 3.62, "2026-11-18", 50), prow("2027-01-28", "2027-03-18", 3.50, "2026-11-18")]}
 GBP_PATHS = {("GBP", None): [prow("2026-12-17", "2027-02-04", 3.90, "2026-11-17", 40), prow("2027-02-04", "2027-03-19", 3.80, "2026-11-16")]}
 USD_OLD = {("USD", None): [prow("2026-12-10", "2027-01-28", 3.62, "2026-11-17", 50), prow("2027-01-28", "2027-03-18", 3.50, "2026-11-17")]}
-FIX = {"SOFR": ("2026-11-18", 3.60), "DFEDTARL": ("2026-11-18", 3.50), "DFEDTARU": ("2026-11-18", 3.75), "IUDSOIA": ("2026-11-16", 3.95)}
+FIX = {"EFFR": ("2026-11-18", 3.60), "DFEDTARL": ("2026-11-18", 3.50), "DFEDTARU": ("2026-11-18", 3.75), "IUDSOIA": ("2026-11-16", 3.95)}
 POL = {"US": [("2026-11-10", 3.625)], "GB": [("2026-11-12", 4.0)]}
 
 o = run_path("policy_path_table", {"currency": "USD"}, USD_OLD, FIX, POL)
-check_as_of("policy_path_table", o, "2026-11-18", "USD: prints of 2026-11-17, the SOFR fixing of 2026-11-18 is newer and shown")
+check_as_of("policy_path_table", o, "2026-11-18", "USD: prints of 2026-11-17, the EFFR fixing of 2026-11-18 is newer and shown")
 o = run_path("policy_path_table", {"currency": "GBP"}, GBP_PATHS, FIX, POL)
 check_as_of("policy_path_table", o, "2026-11-17", "GBP: prints of 2026-11-17, SONIA of 2026-11-16 is older")
 

@@ -59,7 +59,7 @@ def overlap(a_rows, b_rows):
 def etf_overlap(symbol="SPY", symbol2="QQQ", **_):
     a, b = (C._syms(symbol, 1) or ["SPY"])[0], (C._syms(symbol2, 1) or ["QQQ"])[0]
     if a == b:
-        raise C.CompositeError("Pick two different funds.")
+        raise C.CompositeError("Pick two different funds (change Fund 2 on this card).")
     C.us_only([a, b], "SEC N-PORT fund holdings")
     with C.cf.ThreadPoolExecutor(max_workers=2) as ex:
         ha, hb = ex.map(holdings, (a, b))

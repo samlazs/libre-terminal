@@ -1177,9 +1177,11 @@
     if (cid && S.concepts[cid] && S.concepts[cid].members.some(function (x) { return x.mk; })) {
       var gs = dashGroups || (S.cur && S.cur.groups) || [];
       item.groups = item.groups || [];
-      gs.forEach(function (g) {
-        if (g.paramName === "symbol" && names.indexOf("symbol") >= 0 && !(g.paramName in keep) && item.groups.indexOf(g.name) < 0) item.groups.push(g.name);
-      });
+      var hasSymGrp = item.groups.some(function (n) { return gs.some(function (o) { return o.name === n && o.paramName === "symbol"; }); });
+      if (!hasSymGrp && names.indexOf("symbol") >= 0 && !("symbol" in keep)) {
+        var sg = gs.filter(function (g) { return g.paramName === "symbol"; })[0];
+        if (sg) item.groups.push(sg.name);
+      }
     }
     delete item.chart; delete item.view; delete item.flip; delete item._nocover;
     if (m && m.k) item.needsKey = m.k; else delete item.needsKey;
@@ -1193,7 +1195,7 @@
     var c = S.concepts[mo.id];
     if (!c.members.some(function (m) { return m.mk; })) return had;
     var sym = symbolOf(item, resolveDef(item.backend, item.widgetId));
-    if (!sym && S.cur && Array.isArray(S.cur.groups)) {
+    if (!sym && !groupOf(item, "symbol") && S.cur && Array.isArray(S.cur.groups)) {
       var sg = S.cur.groups.filter(function (g) { return g.paramName === "symbol"; })[0];
       if (sg && sg.value) sym = Array.isArray(sg.value) ? sg.value[0] : sg.value;
     }
@@ -1205,14 +1207,15 @@
     // display only: the saved pick is kept and comes back with a U.S. ticker.
     var pickStands = pm && (covers(pm) || mkt === "us" || !mkt);
     if (!onGroupChange && pick === item.backend + ":" + item.widgetId && pickStands && resolveDef(pm.b, pm.w)) return had;
-    if (covers(mo.member) && (!(mo.member && mo.member.paid) || pick === item.backend + ":" + item.widgetId)) return had;
+    var target = c.members.filter(function (m) { return covers(m) && !m.paid && resolveDef(m.b, m.w); })[0];
+    if (covers(mo.member) && (!(mo.member && mo.member.paid) || pick === item.backend + ":" + item.widgetId)
+        && (!item._orig || pick === item.backend + ":" + item.widgetId || !target || mo.member === target)) return had;
     // automatic routing never lands on a paid plan; the user can still pick it
     if (pm && (covers(pm) || (!onGroupChange && pickStands)) && resolveDef(pm.b, pm.w)) { applySource(item, pm.b + ":" + pm.w); return true; }
     if (onGroupChange && pick && S.cur && S.state.srcsel && S.state.srcsel[S.cur.id]) {
       delete S.state.srcsel[S.cur.id][item.uid];
       saveNow();
     }
-    var target = c.members.filter(function (m) { return covers(m) && !m.paid && resolveDef(m.b, m.w); })[0];
     if (target) { applySource(item, target.b + ":" + target.w); return true; }
     item._nocover = { text: (c.none || "No source on this card covers {sym}.").replace("{sym}", String(sym).toUpperCase()),
       hint: c.members.filter(function (m) { return m.mk; }).map(function (m) { return m.l + ": " + m.mk.map(function (x) { return T.MARKET_NAMES[x] || x; }).join(", "); }).join(" · ") + (c.hint ? ". " + c.hint : ".") };
@@ -1533,13 +1536,14 @@
           .catch(function () {});
       });
     }
+    var routed = false;
     S.cards.slice().forEach(function (c) {
       if (reset.length && (c.item.groups || []).some(function (n) { return reset.indexOf(n) >= 0; }) && (c.item.groups || []).indexOf(g.name) < 0) {
         if (c.def) { c.redrawParams(); c.refresh(false); }
         return;
       }
       var inGrp = (c.item.groups || []).indexOf(g.name) >= 0;
-      var routedConcept = !inGrp && g.paramName === "symbol" && (function () {
+      var routedConcept = !inGrp && g.paramName === "symbol" && !groupOf(c.item, g.paramName) && (function () {
         var mo = memberOf(c.item), co = mo && S.concepts[mo.id];
         return !!(co && co.members.some(function (m) { return m.mk; }));
       })();
@@ -1548,9 +1552,10 @@
         return;
       }
       if (sourceWin && c.ownsFrame && c.ownsFrame(sourceWin)) return;
-      if (routeItem(c.item, true)) { replaceCard(c.item); return; }       // the new ticker trades where another source covers it
+      if (routeItem(c.item, true)) { replaceCard(c.item); routed = true; return; }       // the new ticker trades where another source covers it
       if (c.def) { c.redrawParams(g.paramName); c.refresh(false); }
     });
+    if (routed) paintGroups();
   }
   /** Options of a group whose choices depend on other groups ($symbol = the value of the group on "symbol"). */
   function groupOptions(g) {
@@ -1684,9 +1689,30 @@
   }
   T.cusipOk = cusipOk;
   /** A table cell asked to set `param` elsewhere (click a ticker, a country, a filing…). */
-  function broadcast(from, param, value) {
+  function broadcast(from, param, value, row) {
     if (param === "__open") { openSecurity(value); return true; }
     if (value == null || value === "") return false;
+    if (param === "symbol" && S.cur && S.cur.id === "d:etfs" && from) {
+      if (/^(etf_holdings_|yfinance_funds_holdings_|etf_nport_disclosure_)/.test(from.widgetId || "")) {
+        var hv = String(value).trim().toUpperCase();
+        if (from.widgetId === "etf_holdings_tmx_obb") {
+          if (/:US$/i.test(hv)) hv = hv.replace(/:US$/i, "");
+          else if (!/\.(TO|V|NE|CN)$/i.test(hv) && hv.indexOf(":") < 0) {
+            var ex = row && row.exchange != null ? String(row.exchange).trim().toUpperCase() : "";
+            var ctry = row && row.country != null ? String(row.country).trim().toUpperCase() : "";
+            if (!row || ctry === "CA" || /^(TSX|TSXV|TOR|AQL|NEO|CNQ)$/.test(ex)) {
+              hv = hv.replace(/\./g, "-") + (ex === "TSXV" ? ".V" : ".TO");
+            }
+          }
+        }
+        T.openSecurity(hv);
+        return true;
+      }
+      if (from.widgetId === "etf_search_tmx_obb") {
+        var tv = String(value).trim().toUpperCase();
+        if (tv && !/\.(TO|V|NE|CN)$/i.test(tv)) value = tv.replace(/\./g, "-") + ".TO";
+      }
+    }
     var tab = curTab();
     var gOnTab = S.cur && S.cur.groups.filter(function (x) { return x.paramName === param && tab && tab.items.some(function (it) { return (it.groups || []).indexOf(x.name) >= 0; }); })[0];
     if (gOnTab) { setGroup(gOnTab, value); T.toast(gOnTab.name + " set to " + value); return true; }
@@ -2392,7 +2418,9 @@
         });
         if (!okOrigin || !S.cur || !Array.isArray(S.cur.groups)) return;
         var sym = String(d.params.symbol).trim().toUpperCase();
-        var g = S.cur.groups.filter(function (x) { return x.paramName === "symbol"; })[0];
+        var tab = curTab();
+        var g = S.cur.groups.filter(function (x) { return x.paramName === "symbol" && tab && tab.items.some(function (it) { return (it.groups || []).indexOf(x.name) >= 0; }); })[0]
+          || S.cur.groups.filter(function (x) { return x.paramName === "symbol"; })[0];
         if (sym && g && g.value !== sym) setGroup(g, sym, event.source);
       });
       if (!sr.ok) stateUnusable(st && st.detail);                                  // 503: unreadable, nothing restored

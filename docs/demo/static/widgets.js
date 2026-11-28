@@ -507,11 +507,13 @@
     });
     var pn = T.providerName(def);
     var src = rawSrc.length ? rawSrc : (pn ? [pn] : []);
+    var ep = String((def && def.endpoint) || ""), isFundEp = /\/(etf\/|etf_|sec\/nport|yfinance\/funds\/)/.test(ep);
     var tail = hasYahooSibling ? "Switch this card to Yahoo Finance with the source selector, or use the company's U.S. listing (ADR) if it has one."
+      : isFundEp ? "Yahoo Finance cards on ETF Profile and Mutual Funds cover " + sym + "."
       : "Use the company's U.S. listing (ADR) if it has one; Overview, Financials, Estimates, Price & Peers and Ownership use Yahoo Finance and cover " + sym + ".";
     if (/Premium Query Parameter|Special Endpoint/i.test(text || "")) return "FMP's free plan covers U.S. listings only for this data. " + tail;
     if (/Could not find CIK|CIK not found/i.test(text || "") || (src.length && src.every(function (s) { return US_ONLY.test(s); })))
-      return (src.join(", ") || "This source") + " covers U.S.-listed companies only, and " + sym + " trades outside the U.S. " + tail;
+      return (src.join(", ") || "This source") + " covers U.S.-listed " + (isFundEp ? "funds" : "companies") + " only, and " + sym + " trades outside the U.S. " + tail;
     return null;
   };
 
@@ -1112,7 +1114,7 @@
         data: data, colDefs: pick(def, "data.table.columnsDefs"), dense: ctx.backend.id === "x", sort: item.sort, since: item.since,
         spec: T.colSpec ? T.colSpec(def.widgetId) : null, itemCols: item.cols, cols: ctx.colsel ? ctx.colsel(item) : null,
         curated: ctx.backend.id === "x", calendar: /calendar|upcoming/i.test(def.widgetId || ""),
-        onAction: function (param, value) { return ctx.broadcast(item, param, value); },
+        onAction: function (param, value, row) { return ctx.broadcast(item, param, value, row); },
         onCount: function (t) {
           var conv = lastJson && typeof lastJson.convention === "string" ? lastJson.convention : "";   // e.g. total return vs price change
           // a board that came back mostly empty says so (review C4), rather than a table of dashes

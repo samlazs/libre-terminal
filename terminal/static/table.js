@@ -617,7 +617,7 @@
             var p = act.groupByParamName || (act.groupBy && act.groupBy.paramName);
             var vf = act.groupBy && act.groupBy.valueField;
             var val = vf && !c.perRow ? row[vf] : v;
-            var handled = p && opts.onAction ? opts.onAction(p, val) : false;
+            var handled = p && opts.onAction ? opts.onAction(p, val, row) : false;
             if (!handled && url) window.open(url, "_blank", "noopener");
           });
         } else if (url) {
@@ -999,7 +999,11 @@
         else { ax.tickformat = peak >= 1e5 ? "~s" : peak >= 100 ? ",.0f" : ""; if (u) ax.ticksuffix = " " + u; }
       });
       // a numeric x (tenor in years, unemployment rate) keeps its spacing; text x is a category in row order
-      if (xc && xc.type !== "date") { layout.xaxis.type = xc.type === "number" ? "linear" : "category"; layout.hovermode = "closest"; }
+      if (xc && xc.type !== "date") {
+        layout.xaxis.type = xc.type === "number" ? "linear" : "category";
+        layout.hovermode = "closest";
+        if (xc.type === "number" && xc.name) layout.xaxis.title = { text: xc.name, font: { size: 11, color: INK.muted }, standoff: 6 };
+      }
       if (cfg.type === "bar") { layout.bargap = 0.25; layout.barmode = "group"; }
       if (cfg.type === "scatter") layout.hovermode = "closest";
       note.textContent = msg;

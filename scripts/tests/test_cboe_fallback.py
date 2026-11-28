@@ -298,8 +298,119 @@ async def installed():
     def_smile = smile_mod.create_smile(built_smile[0], otm=True)
     def_exps = {str(r.Expiration)[:10] for r in def_smile.results}
     check(def_exps == {exp1.isoformat()} and len(def_smile.results) >= 4, f"default smile skips 0DTE {exp0} -> {def_exps}")
+    def_traces = def_smile.chart.content["data"]
+    check(len(def_traces) == 2 and def_traces[0]["x"] == [100.0, 110.0, 120.0]
+          and def_traces[1]["x"] == [80.0, 90.0, 100.0],
+          f"flat-vol smile centers ATM at 100 and keeps top call strike ({[t['x'] for t in def_traces]})")
     exp_smile = smile_mod.create_smile(built_smile[0], expirations=exp0.isoformat(), otm=True)
     check({str(r.Expiration)[:10] for r in exp_smile.results} == {exp0.isoformat()}, "explicit 0DTE expiration is still honored")
+
+    # multi-expiration smile preserves top call strike and overlays puts on otm=False
+    multi_exps = f"{exp0.isoformat()},{exp1.isoformat()}"
+    multi_otm = smile_mod.create_smile(built_smile[0], expirations=multi_exps, otm=True)
+    multi_otm_tr = multi_otm.chart.content["data"]
+    check(len(multi_otm_tr) == 4
+          and multi_otm_tr[0]["x"] == [100.0, 110.0, 120.0] and multi_otm_tr[2]["x"] == [100.0, 110.0, 120.0]
+          and multi_otm_tr[1]["x"] == [80.0, 90.0, 100.0] and multi_otm_tr[3]["x"] == [80.0, 90.0, 100.0],
+          "multi-expiry OTM smile preserves top call strike on all expirations")
+    multi_all = smile_mod.create_smile(built_smile[0], expirations=multi_exps, otm=False)
+    multi_all_tr = multi_all.chart.content["data"]
+    check(len(multi_all_tr) == 4
+          and all(tr["x"] == [80.0, 90.0, 100.0, 110.0, 120.0]
+                  and all(close(v, 0.28, tol=1e-4) for v in tr["y"]) for tr in multi_all_tr)
+          and all((multi_all_tr[i].get("line") or {}).get("dash") == "dash"
+                  and (multi_all_tr[i].get("marker") or {}).get("symbol") == "circle-open" for i in (1, 3)),
+          "multi-expiry otm=False preserves all strikes/IVs and overlays dashed open-circle Puts over solid Calls")
+
+    # F-shaped 5-strike sloped smile with noisy ITM quote and one-sided wings
+    yrs_f = om.years_to_expiry(exp1, "F", quote_t)
+    f_vols = {11.0: 0.48, 11.5: 0.40, 12.0: 0.33, 12.5: 0.30, 13.0: 0.299}
+    f_list = []
+    for k, vol in f_vols.items():
+        for side in ("call", "put"):
+            v = float(om.black76(12.33, np.array([k]), yrs_f, np.array([vol]), 1.0, np.array([side == "call"]))[0])
+            bid, ask = (1.30, 1.44) if (k == 11.0 and side == "call") else (v * 0.99, v * 1.01)
+            f_list.append({"contract_symbol": f"F{exp1:%y%m%d}{side[0].upper()}{round(k * 1000):08d}",
+                           "expiration": exp1, "strike": k, "option_type": side,
+                           "bid": bid, "ask": ask, "last_trade_price": v,
+                           "last_trade_time": quote_t.tz_convert("UTC"), "open_interest": 20, "volume": 5})
+    f_list.append({"contract_symbol": f"F{exp1:%y%m%d}P00010500", "expiration": exp1, "strike": 10.5, "option_type": "put",
+                   "bid": 0.0, "ask": 0.02, "last_trade_price": 0.01, "last_trade_time": quote_t.tz_convert("UTC"),
+                   "open_interest": 20, "volume": 1})
+    f_list.append({"contract_symbol": f"F{exp1:%y%m%d}C00013500", "expiration": exp1, "strike": 13.5, "option_type": "call",
+                   "bid": 0.0, "ask": 0.01, "last_trade_price": 0.01, "last_trade_time": quote_t.tz_convert("UTC"),
+                   "open_interest": 20, "volume": 1})
+    f_rows = pd.DataFrame(f_list)
+    f_df, _ = om.analyse_chain(f_rows, 12.33, quote_t, 0.0, today_et)
+    f_priced = om.priced_part(f_df, 12.33)
+    check(sorted(f_priced["strike"].unique()) == [11.0, 11.5, 12.0, 12.5, 13.0],
+          "F-shaped chain keeps 5 two-sided strikes and excludes bid=0 wings")
+    for k, want_iv in f_vols.items():
+        got_iv = f_priced.loc[f_priced["strike"] == k, "implied_volatility"].iloc[0]
+        check(close(got_iv, want_iv, tol=1e-4), f"F strike {k} OTM parity IV ignores ITM noise: {got_iv} != {want_iv}")
+
+    f_chain, _ = rb.build_substitute_chain("F", (f_rows, 12.33, quote_t), 0.0, today_et)
+    f_otm = smile_mod.create_smile(f_chain, otm=True)
+    f_otm_tr = f_otm.chart.content["data"]
+    check(len(f_otm_tr) == 2 and f_otm_tr[0]["x"] == [12.5, 13.0] and f_otm_tr[1]["x"] == [11.0, 11.5, 12.0, 12.5],
+          f"F OTM smile keeps top call strike 13.0 ({[t['x'] for t in f_otm_tr]})")
+    check(all(close(a, b, tol=1e-4) for a, b in zip(f_otm_tr[0]["y"], [0.30, 0.299]))
+          and all(close(a, b, tol=1e-4) for a, b in zip(f_otm_tr[1]["y"], [0.48, 0.40, 0.33, 0.30])),
+          "F OTM smile trace IVs match hand-computed values")
+    check((f_otm_tr[0].get("marker") or {}).get("color") == "royalblue"
+          and (f_otm_tr[0].get("line") or {}).get("dash") in (None, "solid")
+          and (f_otm_tr[1].get("marker") or {}).get("color") == "red"
+          and (f_otm_tr[1].get("line") or {}).get("dash") in (None, "solid"),
+          "F OTM smile uses solid royalblue Calls and solid red Puts")
+    f_res_calls = sorted(r.Strike for r in f_otm.results if getattr(r, "Option Type", None) == "call")
+    f_res_puts = sorted(r.Strike for r in f_otm.results if getattr(r, "Option Type", None) == "put")
+    check(f_res_calls == [12.5, 13.0] and f_res_puts == [11.0, 11.5, 12.0, 12.5],
+          f"F OTM smile results match plotted strikes (calls={f_res_calls}, puts={f_res_puts})")
+
+    f_all = smile_mod.create_smile(f_chain, otm=False)
+    f_all_tr = f_all.chart.content["data"]
+    check(len(f_all_tr) == 2
+          and f_all_tr[0]["x"] == [11.0, 11.5, 12.0, 12.5, 13.0]
+          and f_all_tr[1]["x"] == [11.0, 11.5, 12.0, 12.5, 13.0]
+          and all(abs(a - b) <= 1e-9 for a, b in zip(f_all_tr[0]["y"], f_all_tr[1]["y"]))
+          and (f_all_tr[0].get("line") or {}).get("color") == "royalblue"
+          and (f_all_tr[0].get("line") or {}).get("dash") in (None, "solid")
+          and (f_all_tr[0].get("marker") or {}).get("symbol") == "circle"
+          and (f_all_tr[1].get("line") or {}).get("color") == "red"
+          and (f_all_tr[1].get("line") or {}).get("dash") == "dash"
+          and (f_all_tr[1].get("marker") or {}).get("symbol") == "circle-open",
+          "F otm=False overlays dashed open-circle red Puts over solid royalblue Calls")
+
+    f_skew = smile_mod.create_smile(f_chain, otm=True, skew=True)
+    f_skew_tr = f_skew.chart.content["data"]
+    check(len(f_skew_tr) == 2 and f_skew_tr[0]["x"] == [12.5, 13.0] and f_skew_tr[1]["x"] == [11.0, 11.5, 12.0, 12.5]
+          and all(close(a, b, tol=1e-4) for a, b in zip(f_skew_tr[0]["y"], [0.0, -0.001]))
+          and all(close(a, b, tol=1e-4) for a, b in zip(f_skew_tr[1]["y"], [0.18, 0.10, 0.03, 0.0])),
+          "F OTM skew=True computes Skew = IV - ATM IV cleanly across all expected strikes")
+
+    # degenerate single-call-strike OTM chain (non-SubstituteChain / raw Cboe chain) keeps ATM call visible
+    from openbb_cboe.models.options_chains import CboeOptionsChainsData
+    raw_chain = CboeOptionsChainsData.model_validate({
+        "underlying_symbol": ["RAW"] * 6,
+        "underlying_price": [100.0] * 6,
+        "contract_symbol": [f"RAW{exp1:%y%m%d}{s}{round(k * 1000):08d}" for s in ("C", "P") for k in (90.0, 95.0, 100.0)],
+        "expiration": [exp1] * 6,
+        "dte": [7] * 6,
+        "strike": [90.0, 95.0, 100.0, 90.0, 95.0, 100.0],
+        "option_type": ["call", "call", "call", "put", "put", "put"],
+        "implied_volatility": [0.35, 0.32, 0.30, 0.35, 0.32, 0.30],
+    })
+    raw_otm = smile_mod.create_smile(raw_chain, otm=True)
+    raw_tr = raw_otm.chart.content["data"]
+    check(len(raw_tr) == 2 and raw_tr[0]["x"] == [100.0] and raw_tr[1]["x"] == [90.0, 95.0, 100.0]
+          and (raw_tr[1].get("line") or {}).get("dash") == "dash"
+          and (raw_tr[1].get("marker") or {}).get("symbol") == "circle-open",
+          "single-call-strike OTM overlap styles Puts as dashed open-circle so ATM call dot stays visible")
+    raw_all = smile_mod.create_smile(raw_chain, otm=False)
+    check("(OTM parity IV)" in f_all.chart.fig.layout.title.text
+          and "(OTM parity IV)" not in f_otm.chart.fig.layout.title.text
+          and "(OTM parity IV)" not in raw_all.chart.fig.layout.title.text,
+          "OTM parity IV label appears only on SubstituteChain otm=False smile")
 
     check(len(got[0].strategies(days=-1)) == 2, "a straddle for each expiry")
     try:

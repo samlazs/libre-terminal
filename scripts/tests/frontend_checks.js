@@ -540,6 +540,9 @@ window.__fcPromise = (async function (T) {
   ok(/Nasdaq covers U\.S\.-listed/.test(T.nonUSNote({ endpoint: "/api/v1/nasdaq/equity/filings_viewer", source: ["Custom"], params: [] }, "SAP.DE", "No documents available for these settings.", false) || ""),
     "nonUSNote resolves Custom source via endpoint namespace");
   ok(T.nonUSNote({ endpoint: "/api/v1/sec/company_filings", source: ["SEC"], params: [] }, "BRK.B", "No data", false) === null, "U.S. share class BRK.B is not flagged non-US");
+  var fundNote = T.nonUSNote({ endpoint: "/api/v1/sec/nport_fund_metrics", source: ["SEC"], params: [] }, "DFEN.DE", "No data", false) || "";
+  ok(/U\.S\.-listed funds/.test(fundNote) && /ETF Profile and Mutual Funds/.test(fundNote) && !/Overview, Financials/.test(fundNote),
+    "nonUSNote on fund endpoint points to ETF Profile and Mutual Funds, not Company tabs");
 
   var keepCur = T.S.cur, keepTab = T.S.tabId, keepCards = T.S.cards, keepSt = T.S.state, keepBroken = T.S.stateBroken;
   var grpBox = document.getElementById("groups"), keepGrpNodes = grpBox ? Array.prototype.slice.call(grpBox.childNodes) : [];
@@ -712,6 +715,89 @@ window.__fcPromise = (async function (T) {
     if (grpBox) { grpBox.textContent = ""; keepGrpNodes.forEach(function (n) { grpBox.appendChild(n); }); }
     T.S.cur = keepCur; T.S.tabId = keepTab; T.S.cards = keepCards; T.S.state = keepSt; T.S.stateBroken = keepBroken;
   }
+
+  // Multi-symbol-group dashboard (d:etfs: Symbol + Fund): routing Symbol-bound card must not append Fund or show Fund input,
+  // and clicking a stock holding opens the stock instead of setting Symbol, while TMX ETF search normalizes to .TO.
+  (function () {
+    var keepCurE = T.S.cur, keepTabE = T.S.tabId, keepCardsE = T.S.cards, keepStE = T.S.state, keepBrokenE = T.S.stateBroken;
+    var keepWE = T.S.widgets.v5, keepCE = T.S.concepts, keepEpE = T.S.epIndex;
+    var grpBoxE = document.getElementById("groups"), keepGrpE = grpBoxE ? [].slice.call(grpBoxE.childNodes) : [];
+    var tabsBoxE = document.getElementById("tabs"), keepTabsE = tabsBoxE ? [].slice.call(tabsBoxE.childNodes) : [];
+    try {
+      T.S.stateBroken = true;
+      T.S.state = { v: 4, dashboards: {}, groups: {}, ui: { collapsed: {} } };
+      var etfSymG = { name: "Symbol", paramName: "symbol", value: "SPY" };
+      var etfFundG = { name: "Fund", paramName: "symbol", value: "VFIAX" };
+      var etfHoldIt = { uid: "etf-profile-2", widgetId: "etf_holdings_tmx_obb", backend: "v5", x: 0, y: 0, w: 20, h: 14, params: {}, groups: ["Symbol"] };
+      var mutInfoIt = { uid: "mutual-funds-3", widgetId: "yfinance_funds_info_yfinance_obb", backend: "v5", x: 0, y: 0, w: 20, h: 14, params: {}, groups: ["Fund"] };
+      var tmxHoldDef = { widgetId: "etf_holdings_tmx_obb", name: "TMX Holdings", type: "table", endpoint: "/api/v1/etf/holdings", params: [{ paramName: "symbol", type: "text", show: true }, { paramName: "provider", value: "tmx" }], source: ["TMX"] };
+      var yfHoldDef = { widgetId: "yfinance_funds_holdings_yfinance_obb", name: "Yahoo Holdings", type: "table", endpoint: "/api/v1/yfinance/funds/holdings", params: [{ paramName: "symbol", type: "text", show: true }], source: ["yFinance"] };
+      var yfInfoDef = { widgetId: "yfinance_funds_info_yfinance_obb", name: "Fund Profile", type: "table", endpoint: "/api/v1/yfinance/funds/info", params: [{ paramName: "symbol", type: "text", show: true }], source: ["yFinance"] };
+      T.S.widgets.v5 = Object.assign({}, keepWE || {}, {
+        etf_holdings_tmx_obb: tmxHoldDef,
+        yfinance_funds_holdings_yfinance_obb: yfHoldDef,
+        yfinance_funds_info_yfinance_obb: yfInfoDef
+      });
+      T.S.concepts = Object.assign({}, keepCE || {}, {
+        "fund.holdings": { label: "Fund holdings", members: [
+          { b: "v5", w: "etf_holdings_tmx_obb", l: "TMX", mk: ["ca"], sym: "tmx" },
+          { b: "v5", w: "yfinance_funds_holdings_yfinance_obb", l: "Yahoo Finance (top holdings)", mk: ["us", "other", "nordic", "ca"] }
+        ] }
+      });
+      T.S.epIndex = null;
+      T.S.cur = {
+        id: "d:etfs", name: "ETFs & Mutual Funds", groups: [etfSymG, etfFundG],
+        tabs: [
+          { id: "etf-profile", name: "ETF Profile", items: [etfHoldIt] },
+          { id: "etf-search-movers", name: "ETF Search & Movers", items: [] },
+          { id: "mutual-funds", name: "Mutual Funds", items: [mutInfoIt] }
+        ]
+      };
+      T.S.tabId = "etf-profile";
+      T.S.cards = [
+        { item: etfHoldIt, def: tmxHoldDef, destroy: function () {}, redrawParams: function () {}, refresh: function () {} },
+        { item: mutInfoIt, def: yfInfoDef, destroy: function () {}, redrawParams: function () {}, refresh: function () {} }
+      ];
+      ok(T.routeItem(etfHoldIt, false) && etfHoldIt.widgetId === "yfinance_funds_holdings_yfinance_obb", "d:etfs holds routes SPY to Yahoo Finance");
+      ok(etfHoldIt.groups.length === 1 && etfHoldIt.groups[0] === "Symbol", "applySource keeps Symbol group only and does not attach Fund (" + JSON.stringify(etfHoldIt.groups) + ")");
+      T.paintGroups();
+      var etfGroupLabels = Array.prototype.map.call(document.querySelectorAll("#groups .group label"), function (n) { return n.textContent; });
+      ok(etfGroupLabels.join(",") === "Symbol", "ETF Profile shows only Symbol input, not Fund (" + etfGroupLabels.join(",") + ")");
+      T.setGroup(etfSymG, "XIU.TO");
+      ok(etfHoldIt.widgetId === "etf_holdings_tmx_obb" && etfHoldIt.groups.join(",") === "Symbol" && mutInfoIt.groups.join(",") === "Fund" && etfFundG.value === "VFIAX",
+        "switching Symbol to XIU.TO routes ETF card to TMX without disturbing Fund group");
+      var etfGroupLabels2 = Array.prototype.map.call(document.querySelectorAll("#groups .group label"), function (n) { return n.textContent; });
+      ok(etfGroupLabels2.join(",") === "Symbol", "ETF Profile still shows only Symbol input after setGroup routing (" + etfGroupLabels2.join(",") + ")");
+      T.setGroup(etfSymG, "SPY");
+      var origOpenSec = T.openSecurity, openedSecs = [];
+      T.openSecurity = function (sym) { openedSecs.push(sym); };
+      try {
+        T.broadcast({ uid: "etf-profile-2", widgetId: "yfinance_funds_holdings_yfinance_obb", backend: "v5", params: {}, groups: ["Symbol"] }, "symbol", "PLTR");
+        T.broadcast({ uid: "etf-profile-2", widgetId: "etf_holdings_tmx_obb", backend: "v5", params: {}, groups: ["Symbol"] }, "symbol", "RY", { exchange: "TSX", country: "CA" });
+        T.broadcast({ uid: "etf-profile-2", widgetId: "etf_holdings_tmx_obb", backend: "v5", params: {}, groups: ["Symbol"] }, "symbol", "BBD.B", { exchange: "TSX", country: "CA" });
+        T.broadcast({ uid: "etf-profile-2", widgetId: "etf_holdings_tmx_obb", backend: "v5", params: {}, groups: ["Symbol"] }, "symbol", "VOO:US", { exchange: "ARCA", country: "US" });
+        T.broadcast({ uid: "etf-profile-2", widgetId: "etf_holdings_tmx_obb", backend: "v5", params: {}, groups: ["Symbol"] }, "symbol", "FOO", { exchange: "TSXV", country: "CA" });
+        ok(openedSecs.join(",") === "PLTR,RY.TO,BBD-B.TO,VOO,FOO.V" && etfSymG.value === "SPY",
+          "clicking holdings routes Yahoo/TMX tickers cleanly without overwriting Symbol (" + openedSecs.join(",") + ")");
+      } finally {
+        T.openSecurity = origOpenSec;
+      }
+      T.S.tabId = "etf-search-movers";
+      T.S.cards = [];
+      T.broadcast({ uid: "etf-search-movers-2", widgetId: "etf_search_tmx_obb", backend: "v5", params: {}, groups: [] }, "symbol", "AMHE.U");
+      ok(etfSymG.value === "AMHE-U.TO" && T.S.tabId === "etf-profile", "clicking TMX ETF search AMHE.U normalizes to AMHE-U.TO and switches to ETF Profile (" + etfSymG.value + ")");
+      T.S.tabId = "etf-search-movers";
+      T.broadcast({ uid: "etf-search-movers-2", widgetId: "etf_search_tmx_obb", backend: "v5", params: {}, groups: [] }, "symbol", "XIU");
+      ok(etfSymG.value === "XIU.TO" && T.S.tabId === "etf-profile", "clicking TMX ETF search XIU normalizes to XIU.TO (" + etfSymG.value + ")");
+    } finally {
+      (T.S.cards || []).forEach(function (c) { try { if (c.destroy) c.destroy(); } catch (e) { /* ignore */ } });
+      if (T.S.grid && T.S.grid.clear) T.S.grid.clear();
+      if (grpBoxE) { grpBoxE.textContent = ""; keepGrpE.forEach(function (n) { grpBoxE.appendChild(n); }); }
+      if (tabsBoxE) { tabsBoxE.textContent = ""; keepTabsE.forEach(function (n) { tabsBoxE.appendChild(n); }); }
+      T.S.widgets.v5 = keepWE; T.S.concepts = keepCE; T.S.epIndex = keepEpE;
+      T.S.cur = keepCurE; T.S.tabId = keepTabE; T.S.cards = keepCardsE; T.S.state = keepStE; T.S.stateBroken = keepBrokenE;
+    }
+  })();
 
   // ---- P4: readable month sort, bounded per-card timeouts, and 3-tier board widths at 1440 px
   ok(T.monthKey("Nov 2026") === 202611 && T.monthKey("Oct 2026") < T.monthKey("Nov 2026"), "readable recommendation months sort chronologically");

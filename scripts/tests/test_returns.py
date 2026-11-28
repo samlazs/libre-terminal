@@ -25,7 +25,7 @@ for s in ("HYG", "AAPL", "SAP.DE", "BRK-B", "NOVO-B.CO", "U-UN.TO", "7203.T"):
 for s in ("^GSPC", "^TNX", "GC=F", "JPY=X", "EURUSD=X", "BTC-USD", "DX-Y.NYB", "000001.SS", "FTSEMIB.MI", "OBX.OL"):
     check(not c.is_security(s), f"{s}: price only (index, future, currency, coin)")
 tr_boards = {k for k, (_, secs) in c.BOARDS.items() if c.returns_basis([s for _, its in secs for _, s in its]) == "total"}
-check(tr_boards == {"us_sectors", "us_factors", "us_industries", "megacaps", "global_markets", "defense", "shipping", "fixed_income", "themes",
+check(tr_boards == {"us_sectors", "us_factors", "us_industries", "megacaps", "global_markets", "major_etfs", "defense", "shipping", "fixed_income", "themes",
                     "ai_complex", "datacenter_power", "private_markets", "banks"}, "boards of stocks and funds show total return: " + ", ".join(sorted(tr_boards)))
 
 # ---- the views, on a history with one distribution

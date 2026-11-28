@@ -47,6 +47,23 @@ check([r["category"] for r in al] == ["Bond", "Real Estate", "AAA", "AA", "A", "
       "allocation: plain names, asset class, sectors, then ratings AAA down")
 check(agg[-1]["category"] == "Realestate", "input not mutated")
 
+# Sector/asset-class rows sort by descending weight while bond_rating keeps AAA down
+dfen_sec = [
+    {"breakdown": "sector", "category": "Realestate", "weight": 0.0},
+    {"breakdown": "sector", "category": "Technology", "weight": 0.2033},
+    {"breakdown": "sector", "category": "Industrials", "weight": 0.7215},
+    {"breakdown": "asset_class", "category": "Cash", "weight": 0.01},
+    {"breakdown": "asset_class", "category": "Stock", "weight": 0.99},
+    {"breakdown": "bond_rating", "category": "BB", "weight": 0.4},
+    {"breakdown": "bond_rating", "category": "AAA", "weight": 0.2},
+]
+al_w = rb.fund_allocation_rows(dfen_sec)
+check([(r["breakdown"], r["category"]) for r in al_w] == [
+    ("asset_class", "Stock"), ("asset_class", "Cash"),
+    ("sector", "Industrials"), ("sector", "Technology"), ("sector", "Real Estate"),
+    ("bond_rating", "AAA"), ("bond_rating", "BB"),
+], f"weighted allocation sorts asset_class/sector descending by weight, ratings AAA down: {al_w}")
+
 # review A3: TMX Asset Info escaped values twice ("Media &amp;amp; Telecommunications" in the HTML)
 try:
     from openbb_tmx.utils import asset_info as _tai

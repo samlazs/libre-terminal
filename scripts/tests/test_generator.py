@@ -54,7 +54,7 @@ for k in bd.OPT_LABELS:
     check(route(cid, "SU.TO").startswith("TMX"), f"{cid}: SU.TO -> TMX")
     check(route(cid, "BTC").startswith("Deribit"), f"{cid}: BTC -> Deribit")
     check(route(cid, "SAP.DE") is None, f"{cid}: SAP.DE -> no listed-options source (the card says so)")
-check(route("fund.holdings", "SPY").startswith("Nasdaq") and route("fund.holdings", "XIU.TO") == "TMX", "ETF holdings: SPY -> Nasdaq, XIU.TO -> TMX")
+check(route("fund.holdings", "SPY").startswith("Yahoo") and route("fund.holdings", "XIU.TO") == "TMX", "ETF holdings: SPY -> Yahoo top holdings, XIU.TO -> TMX")
 check(route("fund.holdings", "VWRL.L").startswith("Yahoo"), "ETF holdings elsewhere -> Yahoo top holdings")
 check(route("etf.sectors", "SPY").startswith("Yahoo") and route("etf.sectors", "XIU.TO") == "TMX" and route("etf.sectors", "VWRL.L").startswith("Yahoo"),
       "ETF sectors: Yahoo (keyless) for U.S. and other listings, TMX first for .TO (Stage 3 13a)")
@@ -250,6 +250,30 @@ else:
     bk_dash = next((d for d in dashes if d["id"] == "d:banking"), None)
     bk_rssd = next((g for g in (bk_dash or {}).get("groups", []) if g["name"] == "RSSD"), None)
     check(bk_rssd is not None and bk_rssd.get("syncFrom") == "Bank" and bk_rssd.get("syncUrl") == "/x/bank_rssd", "d:banking RSSD group carries syncFrom and syncUrl")
+
+    # d:etfs layout & linking overhaul
+    etf_dash = next(d for d in dashes if d["id"] == "d:etfs")
+    etf_tabs = {t["id"]: t for t in etf_dash["tabs"]}
+    prof = etf_tabs["etf-profile"]["items"]
+    check(len(prof) >= 7 and all(not it.get("needsKey") and it.get("groups") == ["Symbol"] for it in prof),
+          "d:etfs > ETF Profile: >=7 keyless cards, all linked to Symbol")
+    check("etf_equity_exposure_nasdaq_obb" not in [it["widgetId"] for it in prof],
+          "d:etfs > ETF Profile does not place stock-keyed Equity Exposure")
+    srch = etf_tabs["etf-search-movers"]["items"]
+    check(any(it["widgetId"] == "x_board" and it.get("params", {}).get("preset") == "major_etfs" for it in srch)
+          and any(it["widgetId"] == "x_perf_bars" for it in srch)
+          and any(it["widgetId"] == "etf_search_tmx_obb" for it in srch)
+          and any(it["widgetId"] == "etf_equity_exposure_nasdaq_obb" and it.get("params", {}).get("symbol") == "AAPL" and not it.get("groups") for it in srch),
+          "d:etfs > ETF Search & Movers places major_etfs board, sector perf_bars, TMX ETF search, and unlinked AAPL equity exposure")
+    mut = etf_tabs["mutual-funds"]["items"]
+    check(len(mut) == 7 and all(it["widgetId"].startswith("yfinance_funds_") and it.get("groups") == ["Fund"] for it in mut),
+          "d:etfs > Mutual Funds places all 7 yfinance_funds_* cards linked to Fund")
+    check(any(it["widgetId"] == "yfinance_funds_allocation_yfinance_obb" and it.get("title") == "Fund allocation" for it in mut),
+          "d:etfs > Mutual Funds allocation card titled Fund allocation (not ETF sector weights)")
+    nport = etf_tabs["fund-filings-n-port"]["items"]
+    check(all(it.get("groups") == ["Symbol"] for it in nport)
+          and {it["widgetId"] for it in nport} == {"x_etf_overlap", "sec_nport_fund_metrics_sec_obb", "etf_nport_disclosure_sec_obb"},
+          "d:etfs > Fund Filings (N-PORT): all 3 cards linked to Symbol")
 
 import dashboards as db_pkg  # noqa: E402
 from dashboards import layouts as db_layouts, overrides as db_overrides  # noqa: E402

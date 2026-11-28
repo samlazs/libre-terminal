@@ -240,6 +240,7 @@ UNITS = {
     # premium 4.23 + country premium 11.66
     "economy_risk_premium_fmp_obb": {"total_equity_risk_premium": "percent", "country_risk_premium": "percent"},
     "cftc_cds_index_trades_cftc_obb": {"spread_bp": "number"},
+    "cftc_ois_policy_path_cftc_obb": {"min_rate": "percent", "max_rate": "percent"},
     "derivatives_futures_curve_yfinance_obb": {"implied_rate": "percent"},              # Fed funds (ZQ) 100 - 95.865 = 4.135 (run_backend.futures_curve_points)                         # run_backend.cds_spread_bp: 0.006112 (notation 3) = 61.12
     # yield 8.31 / OAS 3.43 (percent) or total-return index 1,868.8, by index_type: shown as delivered; the rows carry a
     # `unit` column from index_type (run_backend.install_fred_bond_index_unit)
@@ -479,10 +480,24 @@ PRESETS: dict[str, list[str]] = {
                                    "operating_margin", "profit_margin", "revenue_growth", "earnings_growth", "return_on_equity", "dividend_yield", "beta"],
     "equity/profile": ["name", "stock_exchange", "sector", "industry_category", "market_cap", "employees", "ceo", "hq_country", "hq_address_city",
                        "company_url", "dividend_yield", "beta", "shares_outstanding", "short_description"],
-    "etf/info": ["name", "issuer", "fund_family", "category", "inception_date", "nav_price", "total_assets", "dividend_yield", "return_ytd", "return_3y_avg",
-                 "return_5y_avg", "beta_3y_avg", "year_high", "year_low", "volume_avg", "description"],
+    "etf/info": ["name", "fund_family", "category", "exchange", "currency", "inception_date", "nav_price", "total_assets", "trailing_pe",
+                 "dividend_yield", "return_ytd", "return_3y_avg", "return_5y_avg", "year_high", "year_low", "volume_avg"],
     # the currency sits beside the market value it qualifies (TMX values are in the fund's currency: run_backend)
     "etf/holdings": ["symbol", "name", "weight", "shares", "market_value", "currency", "country", "sector", "exchange"],
+    "etf/sectors": ["sector", "weight"],
+    "etf/countries": ["country", "weight"],
+    "etf/search": ["symbol", "name", "last_price", "change_percent", "one_year_percent", "currency", "unit_price", "close",
+                   "issuer", "asset_class", "region", "return_1m", "return_1y"],
+    "etf/nport_disclosure": ["symbol", "name", "weight", "value", "balance", "currency", "country", "asset_category", "cusip", "isin"],
+    "yfinance/funds/allocation": ["breakdown", "category", "weight"],
+    "yfinance/funds/holdings": ["symbol", "name", "weight"],
+    "yfinance/funds/performance": ["measure", "period", "cumulative_return", "annualized_return"],
+    "yfinance/funds/risk": ["benchmark", "start_date", "end_date", "annualized_return", "volatility", "sharpe_ratio", "beta", "max_drawdown"],
+    "yfinance/funds/info": ["category", "family", "legal_type", "total_net_assets", "annual_report_expense_ratio", "annual_report_expense_ratio_category",
+                            "annual_holdings_turnover", "price_to_earnings", "price_to_book", "price_to_sales", "price_to_cashflow",
+                            "three_year_earnings_growth", "median_market_cap", "description"],
+    "yfinance/funds/ratings": ["morningstar_overall_rating", "morningstar_risk_rating", "category", "family", "style_box_label",
+                               "style_box_size", "style_box_investment_style", "style_box_credit_quality", "style_box_interest_rate_sensitivity"],
     "equity/price/quote": ["symbol", "name", "exchange", "last_price", "change", "change_percent", "open", "high", "low", "prev_close", "volume",
                            "year_high", "year_low", "ma_50d", "ma_200d", "currency"],
     "imf/portwatch/country_activity": ["date", "country", "portcalls", "portcalls_tanker", "portcalls_container", "imports", "exports", "shipment_30ma",
@@ -545,6 +560,7 @@ _DTS_HEADERS = {
 UNIT_HEADERS = {
     "equity/ownership/institutional": {"market_value": "Market value ($ thous.)"},
     "cftc/cds_index_trades": {"spread_bp": "Spread (bp)", "spread": "Spread (as reported)"},
+    "cftc/ois_policy_path": {"num_trades": "Trades (14d)"},
     # EconDB (UN Comtrade) sends "Value million USD"; its fetcher puts "Millions of USD" in a units column (review A6;
     # live 2026-11-18: United States -> Mexico 33,656)
     "economy/export_destinations": {"value": "Exports (USD millions)"},

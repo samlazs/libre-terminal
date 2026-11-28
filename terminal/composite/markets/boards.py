@@ -45,6 +45,12 @@ BOARDS = {
         ("Emerging markets", [("China", "FXI"), ("India", "INDA"), ("Brazil", "EWZ"), ("Mexico", "EWW"), ("South Korea", "EWY"), ("Taiwan", "EWT"), ("South Africa", "EZA"),
                               ("Turkey", "TUR"), ("Indonesia", "EIDO"), ("Thailand", "THD"), ("Poland", "EPOL"), ("Saudi Arabia", "KSA")]),
     ]),
+    "major_etfs": ("Major ETFs (USD)", [
+        ("U.S. equity", [("S&P 500 (SPY)", "SPY"), ("Nasdaq 100 (QQQ)", "QQQ"), ("Russell 2000 (IWM)", "IWM"), ("Total U.S. Market (VTI)", "VTI"), ("Dow 30 (DIA)", "DIA")]),
+        ("International", [("Developed ex-U.S. (EFA)", "EFA"), ("Emerging Markets (EEM)", "EEM"), ("Europe (VGK)", "VGK"), ("Japan (EWJ)", "EWJ"), ("China Large-Cap (FXI)", "FXI")]),
+        ("Fixed income & commodities", [("U.S. Aggregate Bond (AGG)", "AGG"), ("20+ Yr Treasury (TLT)", "TLT"), ("Investment Grade Credit (LQD)", "LQD"), ("High Yield Credit (HYG)", "HYG"),
+                                        ("Gold (GLD)", "GLD"), ("Silver (SLV)", "SLV"), ("Crude Oil (USO)", "USO")]),
+    ]),
     # Rows named after a currency show that currency against the dollar (+ = currency stronger), whatever way Yahoo
     # quotes the pair; the "Quote" column gives the market quote. Rows named as a pair (EUR/JPY) are that pair as quoted.
     "fx": ("Currencies", [

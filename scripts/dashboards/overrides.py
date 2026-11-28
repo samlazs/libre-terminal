@@ -117,7 +117,8 @@ RENAMED_TABS = {
 }
 
 # Lists that must open in their own order (whatever order the provider sends)
-SORTS = {"equity/discovery/gainers": "percent_change:desc", "equity/discovery/losers": "percent_change:asc", "equity/discovery/active": "volume:desc"}
+SORTS = {"equity/discovery/gainers": "percent_change:desc", "equity/discovery/losers": "percent_change:asc", "equity/discovery/active": "volume:desc",
+         "etf/sectors": "weight:desc", "yfinance/funds/holdings": "weight:desc", "etf/holdings": "weight:desc", "etf/nport_disclosure": "weight:desc"}
 
 # Plain-language card names by endpoint, used wherever a card has no title of its own (also on saved layouts:
 # dashboards.json "titles" by widget id, read by static/widgets.js). No codes, no provider names, unit where it helps.
@@ -184,15 +185,16 @@ CONCEPTS.update({
     "options.covered_calls": dict(label="Covered calls", none="Covered-call screens cover Canadian listings only (TMX); {sym} is not one.",
                                   members=[("tmx/derivatives/options/covered_calls", None, "TMX (Montreal Exchange)", {"mk": ["ca"], "sym": "tmx"})]),
     "fund.holdings": dict(label="Fund holdings", none="No keyless source has holdings for {sym}.", members=[
-        ("etf/holdings", "nasdaq", "Nasdaq (full list)", {"mk": ["us"]}), ("etf/holdings", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}),
-        # when Nasdaq's holdings feed fails: the fund's own SEC filing (full list, quarterly, filed up to 60 days after the quarter)
+        ("etf/holdings", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}),
+        ("yfinance/funds/holdings", "yfinance", "Yahoo Finance (top holdings)", {"mk": ["us", "other", "nordic", "ca"]}),
+        # when top holdings are not enough: the fund's own SEC filing (full list, quarterly, filed up to 60 days after the quarter)
         ("etf/nport_disclosure", "sec", "SEC N-PORT (quarterly filing, up to 60 days old)", {"mk": ["us"]}),
-        ("yfinance/funds/holdings", "yfinance", "Yahoo Finance (top holdings)", {"mk": ["us", "ca", "other", "nordic"]})]),
+        ("etf/holdings", "nasdaq", "Nasdaq", {"mk": ["us"]})]),
     "etf.sectors": dict(label="ETF sector weights", none="No keyless source has sector weights for {sym}.",
                         hint="FMP has them for U.S. ETFs on a paid plan", members=[
         ("etf/sectors", "tmx", "TMX", {"mk": ["ca"], "sym": "tmx"}),
-        # Stage 3 13a: Yahoo's fund sector breakdown (keyless) ahead of FMP for U.S. and other listings; after TMX for .TO
-        ("yfinance/funds/allocation", None, "Yahoo Finance (sector breakdown)", {"mk": ["us", "other", "ca"], "p": {"breakdown": "sector"}}),
+        # Stage 3 13a: Yahoo's fund sector breakdown (keyless) ahead of FMP for U.S. and other listings; TMX for .TO
+        ("yfinance/funds/allocation", None, "Yahoo Finance (sector breakdown)", {"mk": ["us", "other", "nordic", "ca"], "p": {"breakdown": "sector"}}),
         ("etf/sectors", "fmp", "FMP (paid plan)", {"mk": ["us", "other"], "paid": True})]),
     "etf.countries": dict(label="ETF country weights", none="No keyless source has country weights for {sym}.",
                           hint="FMP has them for U.S. ETFs on a paid plan", members=[

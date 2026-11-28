@@ -118,6 +118,9 @@ check(unit_of("yfinance_industry_top_performing_yfinance_obb", "ytd_return") == 
 check(unit_of("yfinance_sectors_overview_yfinance_obb", "market_weight")["formatterFn"] == "normalizedPercent", "Yahoo sector weights are fractions (sum 1.0)")
 check(unit_of("equity_screener_tmx_obb", "return_on_equity") == {"formatterFn": "percent", "decimalPlaces": 2}, "TMX screener ratios are already percent (RY ROE 16.49)")
 check(unit_of("eia_nuclear_outages_us_nuclear_outages_eia_obb", "percent_outage")["formatterFn"] == "percent", "EIA outage share is percent (13,956 / 99,723 = 13.99)")
+check(unit_of("cftc_ois_policy_path_cftc_obb", "min_rate")["formatterFn"] == "percent"
+      and unit_of("cftc_ois_policy_path_cftc_obb", "max_rate")["formatterFn"] == "percent",
+      "CFTC OIS policy path min/max rates are formatted as percent")
 check(unit_of("etf_discovery_gainers_wsj_obb", "percent_change")["formatterFn"] == "percent", "WSJ ETF movers: percent")
 check(unit_of("ustreasury_auction_results_us_treasury_obb", "allocation_percentage_decimals") == {"decimalPlaces": 0}, "a count of decimals is an integer")
 raw = unit_of("fixedincome_bond_indices_fred_obb", "high_yield", "Emerging Markets High Yield.")

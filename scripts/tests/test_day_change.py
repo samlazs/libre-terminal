@@ -254,9 +254,10 @@ finally:
     c.reset_runtime_caches()
 
 # ---- YFinance historical default end_date includes tomorrow across time zones
-from openbb_yfinance.models import equity_historical as yeh  # noqa: E402
+from openbb_yfinance.models import equity_historical as yeh, fund_historical as yfh  # noqa: E402
 
 saved_tq = yeh.YFinanceEquityHistoricalFetcher.transform_query
+saved_ftq = yfh.YFinanceFundHistoricalFetcher.transform_query
 try:
     rb.install_yfinance_historical_end_date([])
     q_default = yeh.YFinanceEquityHistoricalFetcher.transform_query({"symbol": "7203.T"})
@@ -265,7 +266,104 @@ try:
     explicit = dt.date(2026, 5, 1)
     q_explicit = yeh.YFinanceEquityHistoricalFetcher.transform_query({"symbol": "7203.T", "end_date": explicit})
     check(q_explicit.end_date == explicit, f"explicit historical end_date is preserved ({q_explicit.end_date})")
+    qf_default = yfh.YFinanceFundHistoricalFetcher.transform_query({"symbol": "DFEN.DE"})
+    check(qf_default.end_date == dt.date.today() + dt.timedelta(days=1),
+          f"omitted fund historical end_date defaults to tomorrow ({qf_default.end_date})")
+    qf_explicit = yfh.YFinanceFundHistoricalFetcher.transform_query({"symbol": "DFEN.DE", "end_date": explicit})
+    check(qf_explicit.end_date == explicit, f"explicit fund historical end_date is preserved ({qf_explicit.end_date})")
 finally:
     yeh.YFinanceEquityHistoricalFetcher.transform_query = saved_tq
+    yfh.YFinanceFundHistoricalFetcher.transform_query = saved_ftq
+
+# ---- Yahoo v8/finance/chart 1d trailing null close recovery (DFEN.DE / SXR8.DE / SHEL.L)
+import pandas as pd  # noqa: E402
+from yfinance import utils as yfu  # noqa: E402
+
+def _df_2days(o1, h1, l1, c1, o2, h2, l2, c2=float("nan"), ac2=float("nan"), ts1=1795683600, ts2=1795770000):
+    # 1795683600 = 2026-11-26 09:00 CET (08:00 UTC); 1795770000 = 2026-11-27 09:00 CET (08:00 UTC)
+    idx = pd.to_datetime([ts1, ts2], unit="s")
+    return pd.DataFrame({
+        "Open": [o1, o2], "High": [h1, h2], "Low": [l1, l2],
+        "Close": [c1, c2], "Adj Close": [c1, ac2], "Volume": [56740.0, 115902.0],
+    }, index=idx)
+
+# Hand-computed from live DFEN.DE 2026-11-27 probe: prev close 48.39500045776367, live regularMarketPrice 49.925
+dfen_q = _df_2days(48.31, 48.615, 48.31, 48.39500045776367, 49.545, 49.925, 49.52)
+dfen_meta = {"dataGranularity": "1d", "instrumentType": "ETF", "exchangeTimezoneName": "Europe/Berlin",
+             "regularMarketPrice": 49.925, "regularMarketTime": 1795797354}
+dfen_filled = rb.fill_yahoo_null_latest_close(dfen_q.copy(), {"meta": dfen_meta})
+check(near(float(dfen_filled["Close"].iloc[-1]), 49.925) and near(float(dfen_filled["Adj Close"].iloc[-1]), 49.925),
+      f"DFEN.DE null trailing close filled from regularMarketPrice 49.925 ({dfen_filled['Close'].iloc[-1]})")
+dfen_row = c._quote_row("VanEck Defense ETF", "DFEN.DE", [("2026-11-26", float(dfen_filled["Close"].iloc[0])), ("2026-11-27", float(dfen_filled["Close"].iloc[-1]))])
+check(near(dfen_row["chg"], 49.925 - 48.39500045776367, 1e-6) and near(dfen_row["chg_pct"] * 100, (49.925 - 48.39500045776367) / 48.39500045776367 * 100, 1e-4)
+      and dfen_row["as_of"] == "2026-11-27", f"DFEN.DE watchlist row: +1.5300 (+3.1615%), as_of 2026-11-27 ({dfen_row['chg']}, {dfen_row['chg_pct']}, {dfen_row['as_of']})")
+
+# SXR8.DE: prev 712.1400146484375, regularMarketPrice 719.18 -> +7.04 (+0.9886%)
+sxr8_q = _df_2days(709.62, 713.0, 709.10, 712.1400146484375, 719.32, 722.36, 711.70)
+sxr8_filled = rb.fill_yahoo_null_latest_close(sxr8_q.copy(), {"meta": {
+    "dataGranularity": "1d", "instrumentType": "ETF", "exchangeTimezoneName": "Europe/Berlin",
+    "regularMarketPrice": 719.18, "regularMarketTime": 1795797368}})
+check(near(float(sxr8_filled["Close"].iloc[-1]), 719.18), "SXR8.DE null trailing close filled from 719.18")
+sxr8_row = c._quote_row("iShares Core S&P 500", "SXR8.DE", [("2026-11-26", 712.1400146484375), ("2026-11-27", float(sxr8_filled["Close"].iloc[-1]))])
+check(near(sxr8_row["chg"], 719.18 - 712.1400146484375, 1e-6) and near(sxr8_row["chg_pct"] * 100, 0.9885696, 1e-4),
+      f"SXR8.DE watchlist row: +7.04 (+0.9886%) ({sxr8_row['chg']}, {sxr8_row['chg_pct']})")
+
+# SHEL.L (GBp): valid 3643.0 fills; 100x currency mismatch 36.43 is rejected
+shel_q = _df_2days(3582.5, 3627.0, 3572.0, 3623.5, 3636.0, 3660.0, 3626.0)
+shel_ok = rb.fill_yahoo_null_latest_close(shel_q.copy(), {"meta": {
+    "dataGranularity": "1d", "instrumentType": "EQUITY", "exchangeTimezoneName": "Europe/London",
+    "regularMarketPrice": 3643.0, "regularMarketTime": 1795797300}})
+check(near(float(shel_ok["Close"].iloc[-1]), 3643.0), "SHEL.L (GBp) null close filled from 3643.0")
+shel_bad = rb.fill_yahoo_null_latest_close(shel_q.copy(), {"meta": {
+    "dataGranularity": "1d", "instrumentType": "EQUITY", "exchangeTimezoneName": "Europe/London",
+    "regularMarketPrice": 36.43, "regularMarketTime": 1795797300}})
+check(pd.isna(shel_bad["Close"].iloc[-1]), "SHEL.L 100x GBp/GBP mismatch (36.43 vs 3636) rejected")
+
+# Negative guards: cross-day mismatch, holiday/empty Open, non-1d, CURRENCY, existing finite Close, missing tz
+check(pd.isna(rb.fill_yahoo_null_latest_close(dfen_q.copy(), {"meta": dict(dfen_meta, regularMarketTime=1795797354 + 86400)})["Close"].iloc[-1]),
+      "cross-day regularMarketTime rejected (never stamps next day's price on yesterday's bar)")
+hol_q = _df_2days(48.31, 48.615, 48.31, 48.395, float("nan"), float("nan"), float("nan"))
+check(pd.isna(rb.fill_yahoo_null_latest_close(hol_q, {"meta": dfen_meta})["Close"].iloc[-1]),
+      "holiday/empty bar (NaN Open) untouched")
+check(pd.isna(rb.fill_yahoo_null_latest_close(dfen_q.copy(), {"meta": dict(dfen_meta, dataGranularity="5m")})["Close"].iloc[-1]),
+      "non-1d granularity untouched")
+check(pd.isna(rb.fill_yahoo_null_latest_close(dfen_q.copy(), {"meta": dict(dfen_meta, instrumentType="CURRENCY")})["Close"].iloc[-1]),
+      "CURRENCY instrument untouched (uses FX session closes)")
+fin_q = _df_2days(48.31, 48.615, 48.31, 48.395, 49.545, 49.925, 49.52, c2=49.80, ac2=49.80)
+check(near(float(rb.fill_yahoo_null_latest_close(fin_q, {"meta": dfen_meta})["Close"].iloc[-1]), 49.80),
+      "existing finite Close never overwritten")
+gmt_ok = rb.fill_yahoo_null_latest_close(dfen_q.copy(), {"meta": {"dataGranularity": "1d", "instrumentType": "ETF", "gmtoffset": 3600, "regularMarketPrice": 49.925, "regularMarketTime": 1795797354}})
+check(near(float(gmt_ok["Close"].iloc[-1]), 49.925), "gmtoffset fallback works when exchangeTimezoneName absent")
+
+# Through yfinance.utils.parse_quotes after install_yfinance_null_close_fix
+saved_pq = yfu.parse_quotes
+try:
+    raw_chart = {
+        "meta": dfen_meta,
+        "timestamp": [1795683600, 1795770000],
+        "indicators": {
+            "quote": [{"open": [48.31, 49.545], "high": [48.615, 49.925], "low": [48.31, 49.52], "close": [48.39500045776367, None], "volume": [56740, 115902]}],
+            "adjclose": [{"adjclose": [48.39500045776367, None]}],
+        },
+    }
+    rb.install_yfinance_null_close_fix([])
+    parsed = yfu.parse_quotes(raw_chart)
+    check(near(float(parsed["Close"].iloc[-1]), 49.925) and near(float(parsed["Adj Close"].iloc[-1]), 49.925),
+          "installed yfinance.utils.parse_quotes fills trailing null daily Close and Adj Close")
+    # Duplicate trailing timestamp must not raise ValueError via label indexing
+    dup_chart = {
+        "meta": dfen_meta,
+        "timestamp": [1795683600, 1795770000, 1795770000],
+        "indicators": {
+            "quote": [{"open": [48.31, 49.545, 49.545], "high": [48.615, 49.925, 49.925], "low": [48.31, 49.52, 49.52],
+                       "close": [48.39500045776367, None, None], "volume": [56740, 115000, 115902]}],
+            "adjclose": [{"adjclose": [48.39500045776367, None, None]}],
+        },
+    }
+    dup_parsed = yfu.parse_quotes(dup_chart)
+    check(near(float(dup_parsed["Close"].iloc[-1]), 49.925) and near(float(dup_parsed["Adj Close"].iloc[-1]), 49.925),
+          "duplicate trailing timestamp fills trailing Close cleanly without ValueError")
+finally:
+    yfu.parse_quotes = saved_pq
 
 done("test_day_change")
